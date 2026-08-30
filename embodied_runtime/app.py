@@ -1,10 +1,14 @@
 """Application lifecycle orchestration."""
 
+import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 import logging
-from threading import Event
 
+from embodied_runtime.events import (
+    ApplicationStarted,
+    EventBus,
+)
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.profile import RobotProfile
 
@@ -41,14 +45,16 @@ class RobotApplication:
         profile: RobotProfile,
         hardware: HardwareBackend,
         options: ApplicationOptions | None = None,
+        events: EventBus | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
         self.options = options or ApplicationOptions()
+        self.events = events or EventBus()
         self.state = LifecycleState.CREATED
-        self._stop_requested = Event()
+        self._stop_requested = asyncio.Event()
 
-    def start(self) -> None:
+    async def start(self) -> None:
         if self.state is not LifecycleState.CREATED:
             raise RuntimeError(f"Cannot start application in {self.state} state")
         self.state = LifecycleState.STARTING
@@ -57,10 +63,12 @@ class RobotApplication:
             self.profile.identifier,
             self.hardware.identifier,
         )
+        await self.events.start()
         try:
             self.hardware.start()
         except BaseException:
             self.state = LifecycleState.STOPPED
+            await self.events.stop()
             raise
         LOGGER.info(
             "[HW] backend=%s physical=%s status=ready",
@@ -69,8 +77,9 @@ class RobotApplication:
         )
         self.state = LifecycleState.RUNNING
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
+        await self.events.publish(ApplicationStarted(source="application"))
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         if self.state is LifecycleState.STOPPED:
             return
         self.state = LifecycleState.STOPPING
@@ -80,16 +89,24 @@ class RobotApplication:
         finally:
             self.state = LifecycleState.STOPPED
             self._stop_requested.set()
+            await self.events.stop()
             LOGGER.info("[APP] stopped")
 
-    def run(self) -> None:
-        self.start()
+    async def run(self) -> None:
+        await self.start()
         try:
-            self._stop_requested.wait()
+            await self._stop_requested.wait()
+        except asyncio.CancelledError:
+            LOGGER.info("[APP] interrupted")
+            raise
         except KeyboardInterrupt:
             LOGGER.info("[APP] interrupted")
         finally:
-            self.stop()
+            await self.stop()
+
+    def request_stop(self) -> None:
+        """Request an orderly stop from code running on the application loop."""
+        self._stop_requested.set()
 
     def summary(self) -> RuntimeSummary:
         return RuntimeSummary(

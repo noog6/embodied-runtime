@@ -1,12 +1,13 @@
 """Command-line interface for the runtime."""
 
 import argparse
+import asyncio
 import logging
 from collections.abc import Sequence
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
-from embodied_runtime.profile import ProfileLoadError, load_profile
+from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +31,23 @@ def format_summary(summary: RuntimeSummary) -> str:
     )
 
 
+async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> int:
+    hardware = VirtualHardwareBackend()
+    application = RobotApplication(
+        profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt)
+    )
+    if args.diagnostics:
+        try:
+            await application.start()
+            print(format_summary(application.summary()))
+        finally:
+            await application.stop()
+        return 0
+
+    await application.run()
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -38,17 +56,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ProfileLoadError as error:
         build_parser().error(str(error))
 
-    hardware = VirtualHardwareBackend()
-    application = RobotApplication(
-        profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt)
-    )
-    if args.diagnostics:
-        try:
-            application.start()
-            print(format_summary(application.summary()))
-        finally:
-            application.stop()
-        return 0
-
-    application.run()
-    return 0
+    try:
+        return asyncio.run(_run_application(args, profile))
+    except KeyboardInterrupt:
+        return 130
