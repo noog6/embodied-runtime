@@ -11,5 +11,8 @@ The runtime should keep these concerns distinct:
 - **Cognition:** decision-making, memory, and higher-level reasoning.
 
 These boundaries are intended to keep the reusable runtime independent of a
-specific robot or vendor backend. The architecture should emerge through
-implementation and validated needs; do not over-design it up front.
+specific robot or vendor backend. Interaction and cognition implementations
+may interpret runtime state and request semantic capabilities, but they do not
+own authoritative physical robot state or hardware safety. The architecture
+should emerge through implementation and validated needs; do not over-design
+it up front.
