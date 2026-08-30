@@ -1,8 +1,7 @@
 """Application lifecycle orchestration."""
 
 import asyncio
-from dataclasses import dataclass
-from enum import StrEnum
+from dataclasses import dataclass, replace
 import logging
 
 from embodied_runtime.events import (
@@ -11,16 +10,14 @@ from embodied_runtime.events import (
 )
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.platform import (
+    HostPlatformProvider,
+    PlatformProvider,
+    PlatformSnapshot,
+)
+from embodied_runtime.state import LifecycleState, RuntimeState
 
 LOGGER = logging.getLogger(__name__)
-
-
-class LifecycleState(StrEnum):
-    CREATED = "created"
-    STARTING = "starting"
-    RUNNING = "running"
-    STOPPING = "stopping"
-    STOPPED = "stopped"
 
 
 @dataclass(frozen=True)
@@ -46,28 +43,55 @@ class RobotApplication:
         hardware: HardwareBackend,
         options: ApplicationOptions | None = None,
         events: EventBus | None = None,
+        platform_provider: PlatformProvider | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
         self.options = options or ApplicationOptions()
         self.events = events or EventBus()
-        self.state = LifecycleState.CREATED
+        self._runtime_state = RuntimeState(LifecycleState.CREATED)
+        self._platform_provider = platform_provider or HostPlatformProvider()
         self._stop_requested = asyncio.Event()
+
+    @property
+    def runtime_state(self) -> RuntimeState:
+        return self._runtime_state
+
+    @property
+    def state(self) -> LifecycleState:
+        """Compatibility view of the authoritative lifecycle state."""
+        return self._runtime_state.lifecycle
+
+    def _set_lifecycle(self, lifecycle: LifecycleState) -> None:
+        self._runtime_state = replace(self._runtime_state, lifecycle=lifecycle)
+
+    def refresh_platform_state(self) -> PlatformSnapshot:
+        snapshot = self._platform_provider.snapshot()
+        self._runtime_state = replace(self._runtime_state, platform=snapshot)
+        return snapshot
 
     async def start(self) -> None:
         if self.state is not LifecycleState.CREATED:
             raise RuntimeError(f"Cannot start application in {self.state} state")
-        self.state = LifecycleState.STARTING
+        self._set_lifecycle(LifecycleState.STARTING)
         LOGGER.info(
             "[APP] starting profile=%s hardware=%s",
             self.profile.identifier,
             self.hardware.identifier,
         )
+        platform_state = self.refresh_platform_state()
+        LOGGER.info(
+            "[PLATFORM] hostname=%s system=%s machine=%s python=%s status=ready",
+            platform_state.hostname,
+            platform_state.system,
+            platform_state.machine,
+            platform_state.python_version,
+        )
         await self.events.start()
         try:
             self.hardware.start()
         except BaseException:
-            self.state = LifecycleState.STOPPED
+            self._set_lifecycle(LifecycleState.STOPPED)
             await self.events.stop()
             raise
         LOGGER.info(
@@ -75,19 +99,19 @@ class RobotApplication:
             self.hardware.identifier,
             str(self.hardware.is_physical).lower(),
         )
-        self.state = LifecycleState.RUNNING
+        self._set_lifecycle(LifecycleState.RUNNING)
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
         await self.events.publish(ApplicationStarted(source="application"))
 
     async def stop(self) -> None:
         if self.state is LifecycleState.STOPPED:
             return
-        self.state = LifecycleState.STOPPING
+        self._set_lifecycle(LifecycleState.STOPPING)
         LOGGER.info("[APP] stopping")
         try:
             self.hardware.stop()
         finally:
-            self.state = LifecycleState.STOPPED
+            self._set_lifecycle(LifecycleState.STOPPED)
             self._stop_requested.set()
             await self.events.stop()
             LOGGER.info("[APP] stopped")

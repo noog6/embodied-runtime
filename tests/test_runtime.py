@@ -1,12 +1,22 @@
 import asyncio
+from dataclasses import FrozenInstanceError
 import unittest
 from unittest.mock import patch
 
 from embodied_runtime.app import ApplicationOptions, LifecycleState, RobotApplication
-from embodied_runtime.cli import build_parser, format_summary
+from embodied_runtime.cli import build_parser, format_platform, format_summary
 from embodied_runtime.events import ApplicationStarted, Event, EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
+from tests.test_platform import snapshot
+
+
+class FakePlatformProvider:
+    def __init__(self, snapshots):
+        self.snapshots = iter(snapshots)
+
+    def snapshot(self):
+        return next(self.snapshots)
 
 
 class VirtualHardwareTests(unittest.TestCase):
@@ -35,9 +45,15 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.hardware = VirtualHardwareBackend()
         self.events = RecordingEventBus()
+        self.first_platform = snapshot(hostname="first")
+        self.second_platform = snapshot(hostname="second", captured_monotonic=2.0)
+        self.platform_provider = FakePlatformProvider(
+            [self.first_platform, self.second_platform]
+        )
         self.application = RobotApplication(
             RobotProfile("test", "Test Robot"), self.hardware,
             ApplicationOptions(startup_prompt="private prompt"), self.events,
+            self.platform_provider,
         )
         self.events.application = self.application
 
@@ -60,6 +76,26 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             [(type(event), state) for event, state in self.events.published],
             [(ApplicationStarted, LifecycleState.RUNNING)],
         )
+
+    async def test_start_captures_platform_state(self) -> None:
+        await self.application.start()
+        self.assertIs(self.application.runtime_state.platform, self.first_platform)
+        await self.application.stop()
+
+    async def test_refresh_replaces_platform_snapshot(self) -> None:
+        await self.application.start()
+        previous_state = self.application.runtime_state
+        refreshed = self.application.refresh_platform_state()
+        self.assertIs(refreshed, self.second_platform)
+        self.assertIs(self.application.runtime_state.platform, self.second_platform)
+        self.assertIs(previous_state.platform, self.first_platform)
+        await self.application.stop()
+
+    async def test_runtime_state_cannot_be_mutated(self) -> None:
+        await self.application.start()
+        with self.assertRaises(FrozenInstanceError):
+            self.application.runtime_state.lifecycle = LifecycleState.STOPPED  # type: ignore[misc]
+        await self.application.stop()
 
     async def test_full_event_queue_cannot_block_application_stop(self) -> None:
         handler_started = asyncio.Event()
@@ -133,3 +169,30 @@ class CliTests(unittest.TestCase):
     def test_optional_startup_prompt(self) -> None:
         args = build_parser().parse_args(["Good morning, Mira."])
         self.assertEqual(args.startup_prompt, "Good morning, Mira.")
+
+    def test_platform_diagnostics_are_structured(self) -> None:
+        rendered = format_platform(
+            snapshot(
+                model="Test Model",
+                uptime_seconds=123.456,
+                load_averages=(0.12, 0.2, 0.3),
+                memory_total_bytes=512 * 1024 * 1024,
+                memory_available_bytes=350 * 1024 * 1024,
+                cpu_temperature_celsius=42.75,
+            )
+        )
+        self.assertEqual(
+            rendered,
+            "[PLATFORM] hostname=test-host system=TestOS release=1 machine=test64 "
+            "python=3.13.5 model='Test Model' uptime_s=123.5 load_1m=0.12 "
+            "memory_available_mb=350 memory_total_mb=512 cpu_temp_c=42.8",
+        )
+
+    def test_missing_platform_metrics_are_unknown(self) -> None:
+        rendered = format_platform(snapshot())
+        self.assertIn("model='unknown'", rendered)
+        self.assertIn("uptime_s=unknown", rendered)
+        self.assertIn("load_1m=unknown", rendered)
+        self.assertIn("memory_available_mb=unknown", rendered)
+        self.assertIn("cpu_temp_c=unknown", rendered)
+        self.assertNotIn("None", rendered)

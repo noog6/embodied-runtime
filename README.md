@@ -13,6 +13,10 @@ python main.py "Good morning, Mira."
 python main.py --diagnostics
 ```
 
+Diagnostics report both the selected robot hardware backend and a separate
+snapshot of the real host platform, including available identity and resource
+telemetry.
+
 The runtime currently loads the Mira robot profile and uses the hardware-free
 virtual backend by default. Physical SunFounder Fusion HAT+ support has not yet
 been implemented. See [the architecture notes](docs/architecture.md) for the
