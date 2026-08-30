@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
+from embodied_runtime.platform import PlatformSnapshot
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,33 @@ def format_summary(summary: RuntimeSummary) -> str:
     )
 
 
+def format_platform(snapshot: PlatformSnapshot) -> str:
+    def value(item: object | None) -> str:
+        return "unknown" if item is None or item == "" else str(item)
+
+    def decimal(item: float | None, digits: int = 1) -> str:
+        return "unknown" if item is None else f"{item:.{digits}f}"
+
+    load_1m = snapshot.load_averages[0] if snapshot.load_averages else None
+    mib = 1024 * 1024
+    available_mb = (
+        round(snapshot.memory_available_bytes / mib)
+        if snapshot.memory_available_bytes is not None else None
+    )
+    total_mb = (
+        round(snapshot.memory_total_bytes / mib)
+        if snapshot.memory_total_bytes is not None else None
+    )
+    return (
+        f"[PLATFORM] hostname={value(snapshot.hostname)} system={value(snapshot.system)} "
+        f"release={value(snapshot.release)} machine={value(snapshot.machine)} "
+        f"python={value(snapshot.python_version)} model={value(snapshot.model)!r} "
+        f"uptime_s={decimal(snapshot.uptime_seconds)} load_1m={decimal(load_1m, 2)} "
+        f"memory_available_mb={value(available_mb)} memory_total_mb={value(total_mb)} "
+        f"cpu_temp_c={decimal(snapshot.cpu_temperature_celsius)}"
+    )
+
+
 async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> int:
     hardware = VirtualHardwareBackend()
     application = RobotApplication(
@@ -39,7 +67,10 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     if args.diagnostics:
         try:
             await application.start()
+            application.refresh_platform_state()
             print(format_summary(application.summary()))
+            assert application.runtime_state.platform is not None
+            print(format_platform(application.runtime_state.platform))
         finally:
             await application.stop()
         return 0

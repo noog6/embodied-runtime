@@ -2,8 +2,8 @@
 
 The runtime should keep these concerns distinct:
 
-- **Platform and hardware:** operating-system services, hardware adapters, and
-  device capabilities.
+- **Platform and hardware:** host computer/operating-system observations are
+  distinct from robot hardware adapters and their device capabilities.
 - **Embodiment:** robot/body-specific configuration, actuators, and physical
   constraints.
 - **Sensing and perception:** sensor inputs and their interpretation.
@@ -20,3 +20,4 @@ it up front.
 Discrete in-process facts may be announced through the transient typed event
 mechanism described in [Events](events.md). Events complement, but do not own,
 authoritative runtime state and are not capability requests or data streams.
+The ownership and snapshot semantics are documented in [Runtime state](state.md).
