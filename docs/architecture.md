@@ -16,3 +16,7 @@ may interpret runtime state and request semantic capabilities, but they do not
 own authoritative physical robot state or hardware safety. The architecture
 should emerge through implementation and validated needs; do not over-design
 it up front.
+
+Discrete in-process facts may be announced through the transient typed event
+mechanism described in [Events](events.md). Events complement, but do not own,
+authoritative runtime state and are not capability requests or data streams.
