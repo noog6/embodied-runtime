@@ -1,0 +1,4 @@
+[profile]
+id = "mira"
+name = "Mira"
+description = "Initial reference robot for embodied-runtime."
