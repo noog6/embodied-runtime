@@ -11,5 +11,16 @@ authoritative state.
 
 Platform state describes the host computer and operating system independently
 of the robot hardware backend. A Raspberry Pi host can therefore run the
-virtual hardware backend. Platform observations are captured at startup and on
-explicit refresh; this phase does not poll or publish platform-change events.
+virtual hardware backend. Platform observations are captured at startup, on
+explicit refresh, and by a lightweight application-owned monitor. Every
+successful sample replaces the authoritative platform snapshot before any related event is published. Ordinary
+samples are state updates, not events or a telemetry stream.
+
+The monitor announces only thermal-warning and memory-pressure transitions.
+Hysteresis prevents threshold chatter, and missing or invalid telemetry neither
+changes the tracked condition nor falsely announces recovery. The default
+advisory policy samples every 5 seconds, raises/clears thermal warning at
+80/75 degrees Celsius, and raises/clears memory pressure at 10/15 percent
+available. These runtime thresholds are advisory, not replacements for kernel,
+firmware, or hardware safety protection. Monitoring is owned by the application
+and is cancelled before hardware and the event bus shut down.

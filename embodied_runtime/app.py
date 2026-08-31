@@ -12,6 +12,8 @@ from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.platform import (
     HostPlatformProvider,
+    PlatformMonitor,
+    PlatformMonitorPolicy,
     PlatformProvider,
     PlatformSnapshot,
 )
@@ -44,6 +46,7 @@ class RobotApplication:
         options: ApplicationOptions | None = None,
         events: EventBus | None = None,
         platform_provider: PlatformProvider | None = None,
+        platform_monitor_policy: PlatformMonitorPolicy | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -52,6 +55,13 @@ class RobotApplication:
         self._runtime_state = RuntimeState(LifecycleState.CREATED)
         self._platform_provider = platform_provider or HostPlatformProvider()
         self._stop_requested = asyncio.Event()
+        self._platform_monitor = PlatformMonitor(
+            self._platform_provider,
+            self.events,
+            self._replace_platform_state,
+            lambda: self.state is LifecycleState.RUNNING,
+            policy=platform_monitor_policy,
+        )
 
     @property
     def runtime_state(self) -> RuntimeState:
@@ -67,8 +77,11 @@ class RobotApplication:
 
     def refresh_platform_state(self) -> PlatformSnapshot:
         snapshot = self._platform_provider.snapshot()
-        self._runtime_state = replace(self._runtime_state, platform=snapshot)
+        self._replace_platform_state(snapshot)
         return snapshot
+
+    def _replace_platform_state(self, snapshot: PlatformSnapshot) -> None:
+        self._runtime_state = replace(self._runtime_state, platform=snapshot)
 
     async def start(self) -> None:
         if self.state is not LifecycleState.CREATED:
@@ -80,6 +93,7 @@ class RobotApplication:
             self.hardware.identifier,
         )
         platform_state = self.refresh_platform_state()
+        self._platform_monitor.establish_baseline(platform_state)
         LOGGER.info(
             "[PLATFORM] hostname=%s system=%s machine=%s python=%s status=ready",
             platform_state.hostname,
@@ -102,6 +116,11 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.RUNNING)
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
         await self.events.publish(ApplicationStarted(source="application"))
+        self._platform_monitor.start()
+        LOGGER.info(
+            "[PULSE] monitor=platform interval_s=%.1f status=ready",
+            self._platform_monitor.policy.interval_seconds,
+        )
 
     async def stop(self) -> None:
         if self.state is LifecycleState.STOPPED:
@@ -109,6 +128,7 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.STOPPING)
         LOGGER.info("[APP] stopping")
         try:
+            await self._platform_monitor.stop()
             self.hardware.stop()
         finally:
             self._set_lifecycle(LifecycleState.STOPPED)
