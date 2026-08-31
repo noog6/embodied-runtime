@@ -118,8 +118,10 @@ class RobotApplication:
         await self.events.publish(ApplicationStarted(source="application"))
         self._platform_monitor.start()
         LOGGER.info(
-            "[PULSE] monitor=platform interval_s=%.1f status=ready",
-            self._platform_monitor.policy.interval_seconds,
+            "[PULSE] monitor=platform interval_s=%s heartbeat_s=%s status=ready",
+            str(self._platform_monitor.policy.interval_seconds),
+            "off" if self._platform_monitor.policy.heartbeat_interval_seconds is None
+            else str(self._platform_monitor.policy.heartbeat_interval_seconds),
         )
 
     async def stop(self) -> None:
