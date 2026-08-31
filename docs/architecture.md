@@ -24,3 +24,9 @@ authoritative runtime state and are not capability requests or data streams.
 The ownership and snapshot semantics are documented in [Runtime state](state.md).
 The [local runtime console](console.md) is a projection of that state and a thin
 adapter for explicit development input, not an additional state owner or observer.
+
+Small deterministic [local reflexes](reflexes.md) may consume semantic events
+and request semantic application capabilities. The implemented path is sensing
+or semantic observation -> authoritative state and event -> reflex -> semantic
+capability -> body. A reflex neither owns state nor accesses a body backend
+directly, and configured reflex lifecycles belong to the application.

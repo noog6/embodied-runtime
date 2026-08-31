@@ -32,3 +32,7 @@ transitions. The application installs the new authoritative `PresenceState`
 before publishing, so handlers see the new truth. Repeated observations with
 the same boolean value produce no duplicate transition. Body orientation is
 authoritative state and deliberately does not produce an event.
+
+Semantic events may drive deterministic [local reflexes](reflexes.md). They
+remain facts, not commands: the reflex independently translates a relevant fact
+into a request through an application semantic capability.

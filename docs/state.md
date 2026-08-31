@@ -42,3 +42,6 @@ the lifecycle and latest platform snapshot, it owns:
   observation is received.
 
 Backends, the console, and events do not independently own these facts.
+Local reflexes do not add or own authoritative state; they consume semantic
+events and request application capabilities that update state through its
+existing owner.
