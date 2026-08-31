@@ -14,6 +14,7 @@ from embodied_runtime.events import (
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.reflexes import Reflex
+from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.platform import (
     HostPlatformProvider,
     PlatformMonitor,
@@ -60,12 +61,14 @@ class RobotApplication:
         platform_monitor_policy: PlatformMonitorPolicy | None = None,
         body_backend: BodyBackend | None = None,
         reflexes: Sequence[Reflex] = (),
+        camera_backend: CameraBackend | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
         self.options = options or ApplicationOptions()
         self.events = events or EventBus()
         self.body_backend = body_backend
+        self.camera_backend = camera_backend
         self._reflexes = tuple(reflexes)
         self._started_reflexes: list[Reflex] = []
         self._runtime_state = RuntimeState(LifecycleState.CREATED)
@@ -119,6 +122,7 @@ class RobotApplication:
         )
         await self.events.start()
         hardware_started = False
+        camera_start_attempted = False
         try:
             self.hardware.start()
             hardware_started = True
@@ -136,6 +140,16 @@ class RobotApplication:
                     str(self.body_backend.is_physical).lower(),
                     ",".join(self.body_backend.capabilities) or "none",
                 )
+            if self.camera_backend is not None:
+                # Offer stop even when start fails so injected implementations can
+                # release resources acquired during partial initialization.
+                camera_start_attempted = True
+                self.camera_backend.start()
+                LOGGER.info(
+                    "[CAMERA] backend=%s physical=%s status=ready",
+                    self.camera_backend.identifier,
+                    str(self.camera_backend.is_physical).lower(),
+                )
             for reflex in self._reflexes:
                 # Record before starting so a partially established subscription
                 # is still offered cleanup if start raises.
@@ -143,6 +157,11 @@ class RobotApplication:
                 await reflex.start(self.events, self)
         except BaseException:
             await self._stop_reflexes_for_cleanup()
+            if camera_start_attempted:
+                try:
+                    self.camera_backend.stop()
+                except BaseException:
+                    LOGGER.exception("[CAMERA] cleanup_failed")
             if self.body_backend is not None:
                 try:
                     await self.body_backend.stop()
@@ -184,6 +203,12 @@ class RobotApplication:
             await self._stop_reflexes()
         except BaseException as error:
             failure = failure or error
+        if self.camera_backend is not None:
+            try:
+                self.camera_backend.stop()
+            except BaseException as error:
+                LOGGER.exception("[CAMERA] stop_failed")
+                failure = failure or error
         if self.body_backend is not None:
             try:
                 await self.body_backend.stop()
@@ -218,6 +243,18 @@ class RobotApplication:
     def request_stop(self) -> None:
         """Request an orderly stop from code running on the application loop."""
         self._stop_requested.set()
+
+    def capture_camera_frame(self) -> CameraFrame:
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Camera capture requires a running application")
+        if self.camera_backend is None:
+            raise RuntimeError("No camera backend is configured")
+        frame = self.camera_backend.capture_frame()
+        LOGGER.info(
+            "[CAMERA] capture width=%s height=%s media_type=%s bytes=%s",
+            frame.width, frame.height, frame.media_type, len(frame.data),
+        )
+        return frame
 
     async def set_body_orientation(
         self, *, yaw_degrees: float, pitch_degrees: float
