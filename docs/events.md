@@ -21,3 +21,8 @@ Events do not own authoritative state and are not persistent history. Camera
 frames, PCM audio, IMU samples, servo telemetry, and other high-rate data are
 streams and do not belong on this bus. Persistence, replay, event sourcing,
 and distributed messaging are not currently intended.
+
+Platform polling updates authoritative state without emitting a sample event.
+Only meaningful advisory transitions are announced: `ThermalWarningRaised`,
+`ThermalWarningCleared`, `MemoryPressureRaised`, and `MemoryPressureCleared`.
+Continuous platform telemetry does not belong on the `EventBus`.
