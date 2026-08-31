@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 import math
 import os
+from pathlib import Path
 import shlex
 import sys
 import time
@@ -58,9 +59,15 @@ class RuntimeConsole:
             return self._hardware(), False
         if vocabulary == ["body"]:
             return self._body(), False
+        if vocabulary == ["camera", "status"]:
+            return self._camera(), False
         if vocabulary == ["presence"]:
             return self._presence(), False
-        if vocabulary[:2] == ["body", "orient"] or vocabulary[:2] == ["simulate", "presence"]:
+        if (
+            vocabulary[:2] == ["body", "orient"]
+            or vocabulary[:2] == ["simulate", "presence"]
+            or vocabulary[:2] == ["camera", "capture"]
+        ):
             return "This command requires an active asynchronous console session.", False
         return f"Unknown command: {words[0]}. Type 'help' for commands.", False
 
@@ -71,6 +78,28 @@ class RuntimeConsole:
         except ValueError as error:
             return f"Unable to parse command: {error}.", False
         lowered = [word.lower() for word in words]
+        if lowered[:2] == ["camera", "capture"]:
+            if len(words) != 3:
+                return "Usage: camera capture <output_path>.", False
+            try:
+                frame = self._application.capture_camera_frame()
+                Path(words[2]).write_bytes(frame.data)
+            except (RuntimeError, OSError) as error:
+                return f"Camera capture failed: {error}.", False
+            summary = self._application.camera_summary()
+            backend = "unknown" if summary is None else summary.backend
+            return "\n".join(
+                (
+                    "Camera capture",
+                    f"  backend:       {backend}",
+                    f"  width:         {frame.width}",
+                    f"  height:        {frame.height}",
+                    f"  media_type:    {frame.media_type}",
+                    f"  bytes:         {len(frame.data)}",
+                    f"  output:        {words[2]}",
+                    "  status:        ok",
+                )
+            ), False
         if lowered[:2] == ["body", "orient"]:
             if len(words) != 4:
                 return "Usage: body orient <yaw> <pitch>.", False
@@ -109,6 +138,8 @@ class RuntimeConsole:
                 "  hardware                       Show robot hardware backend",
                 "  body                           Show current body state",
                 "  body orient <yaw> <pitch>      Set semantic body orientation",
+                "  camera status                  Show configured camera resource",
+                "  camera capture <output_path>   Capture one JPEG to an explicit path",
                 "  presence                       Show current presence state",
                 "  simulate presence <on|off>     Inject virtual presence",
                 "  help                           Show this help",
@@ -200,6 +231,19 @@ class RuntimeConsole:
                 f"  capabilities:  {capabilities}",
                 f"  yaw_deg:       {state.yaw_degrees}",
                 f"  pitch_deg:     {state.pitch_degrees}",
+            )
+        )
+
+    def _camera(self) -> str:
+        summary = self._application.camera_summary()
+        if summary is None:
+            return "Camera\n  state:         unavailable"
+        return "\n".join(
+            (
+                "Camera",
+                f"  backend:       {summary.backend}",
+                f"  physical:      {str(summary.is_physical).lower()}",
+                f"  running:       {str(summary.is_running).lower()}",
             )
         )
 

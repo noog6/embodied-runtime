@@ -1,7 +1,10 @@
 import asyncio
 from dataclasses import replace
 import io
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.body.virtual import VirtualBodyBackend
@@ -9,6 +12,7 @@ from embodied_runtime.cli import build_parser
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from tests.test_platform import snapshot
 
 
@@ -33,6 +37,35 @@ class FakeTerminal:
     async def read_line(self, prompt):
         self.write(prompt)
         return next(self.lines)
+
+
+JPEG = b"\xff\xd8console-jpeg\xff\xd9"
+
+
+class FakeCamera(CameraBackend):
+    identifier = "fake-camera"
+    is_physical = True
+
+    def __init__(self):
+        self.running = False
+        self.captures = 0
+        self.capture_error = None
+
+    @property
+    def is_running(self):
+        return self.running
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+    def capture_frame(self):
+        self.captures += 1
+        if self.capture_error is not None:
+            raise self.capture_error
+        return CameraFrame(JPEG, "image/jpeg", 640, 480, 1)
 
 
 class ConsoleTests(unittest.IsolatedAsyncioTestCase):
@@ -69,6 +102,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  hardware                       Show robot hardware backend\n"
             "  body                           Show current body state\n"
             "  body orient <yaw> <pitch>      Set semantic body orientation\n"
+            "  camera status                  Show configured camera resource\n"
+            "  camera capture <output_path>   Capture one JPEG to an explicit path\n"
             "  presence                       Show current presence state\n"
             "  simulate presence <on|off>     Inject virtual presence\n"
             "  help                           Show this help\n"
@@ -77,6 +112,100 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.console.execute("help"), (expected, False))
         self.assertEqual(self.console.execute("?"), (expected, False))
+
+    def test_camera_status_without_configured_camera(self):
+        self.assertEqual(
+            self.console.execute("camera status"),
+            ("Camera\n  state:         unavailable", False),
+        )
+
+    async def test_camera_status_and_capture_use_application_api(self):
+        camera = FakeCamera()
+        app = RobotApplication(
+            RobotProfile("camera", "Camera Robot"),
+            VirtualHardwareBackend(),
+            platform_provider=CountingProvider([self.first]),
+            camera_backend=camera,
+        )
+        await app.start()
+        console = RuntimeConsole(app)
+        state_before = app.runtime_state
+        published = []
+        original_publish = app.events.publish
+
+        async def record(event):
+            published.append(event)
+            await original_publish(event)
+
+        app.events.publish = record
+        self.assertEqual(
+            console.execute("camera status"),
+            (
+                "Camera\n"
+                "  backend:       fake-camera\n"
+                "  physical:      true\n"
+                "  running:       true",
+                False,
+            ),
+        )
+
+        calls = 0
+        capture = app.capture_camera_frame
+
+        def recording_capture():
+            nonlocal calls
+            calls += 1
+            return capture()
+
+        app.capture_camera_frame = recording_capture  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "console.jpg"
+            report, stop = await console.execute_async(f"camera capture {output}")
+            self.assertEqual(output.read_bytes(), JPEG)
+        self.assertFalse(stop)
+        self.assertEqual(calls, 1)
+        self.assertEqual(camera.captures, 1)
+        self.assertIn("backend:       fake-camera", report)
+        self.assertIn("width:         640", report)
+        self.assertIn("height:        480", report)
+        self.assertIn("media_type:    image/jpeg", report)
+        self.assertIn(f"bytes:         {len(JPEG)}", report)
+        self.assertIn(f"output:        {output}", report)
+        self.assertIn("status:        ok", report)
+        self.assertIs(app.runtime_state, state_before)
+        self.assertEqual(published, [])
+        await app.stop()
+
+    async def test_camera_capture_validation_and_errors_keep_session_alive(self):
+        for command in ("camera capture", "camera capture one two"):
+            report, stop = await self.console.execute_async(command)
+            self.assertEqual(report, "Usage: camera capture <output_path>.")
+            self.assertFalse(stop)
+
+        report, stop = await self.console.execute_async("camera capture nowhere.jpg")
+        self.assertIn("No camera backend is configured", report)
+        self.assertFalse(stop)
+
+        camera = FakeCamera()
+        app = RobotApplication(
+            RobotProfile("camera", "Camera Robot"),
+            VirtualHardwareBackend(),
+            platform_provider=CountingProvider([self.first]),
+            camera_backend=camera,
+        )
+        await app.start()
+        console = RuntimeConsole(app)
+        camera.capture_error = RuntimeError("sensor unavailable")
+        report, stop = await console.execute_async("camera capture ignored.jpg")
+        self.assertIn("Camera capture failed: sensor unavailable", report)
+        self.assertFalse(stop)
+
+        camera.capture_error = None
+        with patch.object(Path, "write_bytes", side_effect=OSError("read-only path")):
+            report, stop = await console.execute_async("camera capture /bad/output.jpg")
+        self.assertIn("Camera capture failed: read-only path", report)
+        self.assertFalse(stop)
+        await app.stop()
 
     def test_status_projects_current_state_without_sampling(self):
         calls = self.provider.calls

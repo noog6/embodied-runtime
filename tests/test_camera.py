@@ -218,6 +218,28 @@ class ApplicationCameraTests(unittest.IsolatedAsyncioTestCase):
             app.capture_camera_frame()
         await app.stop()
 
+    async def test_camera_summary_is_transient_resource_metadata(self):
+        camera = FakeCamera()
+        app = self.application(camera)
+        state_before = app.runtime_state
+        summary = app.camera_summary()
+        self.assertEqual(summary.backend, "fake")
+        self.assertFalse(summary.is_physical)
+        self.assertFalse(summary.is_running)
+        self.assertIs(app.runtime_state, state_before)
+
+        await app.start()
+        running_state = app.runtime_state
+        self.assertTrue(app.camera_summary().is_running)
+        self.assertIs(app.runtime_state, running_state)
+        await app.stop()
+
+    def test_camera_summary_is_none_without_configured_camera(self):
+        app = self.application()
+        state_before = app.runtime_state
+        self.assertIsNone(app.camera_summary())
+        self.assertIs(app.runtime_state, state_before)
+
     async def test_failed_camera_start_unwinds_started_resources(self):
         camera = FakeCamera(fail_start=True)
         events = EventBus()
