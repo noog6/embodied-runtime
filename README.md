@@ -29,6 +29,11 @@ virtual hardware and virtual body backends by default. Physical SunFounder Fusio
 been implemented. See [the architecture notes](docs/architecture.md) for the
 runtime's intended boundaries.
 
+The default demo also includes one deterministic local reflex: a transition to
+semantic presence centers body yaw and pitch through the application body API.
+It is source-independent, owns no state, and involves no AI or cognition. See
+[Local reflexes](docs/reflexes.md).
+
 Runtime log records use local ISO-8601 wall-clock timestamps with an explicit
 timezone offset. A healthy run remains quiet between low-frequency heartbeats:
 

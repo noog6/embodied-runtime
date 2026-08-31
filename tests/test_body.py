@@ -65,13 +65,47 @@ class RecordingBody(BodyBackend):
         return BodyState(yaw_degrees, pitch_degrees)
 
 
-def application(hardware, body, *, events=None):
+class RecordingReflex:
+    identifier = "recording"
+
+    def __init__(self, calls, *, start_error=None, stop_error=None):
+        self.calls = calls
+        self.start_error = start_error
+        self.stop_error = stop_error
+        self.active = False
+
+    async def start(self, events, capabilities):
+        self.calls.append("reflex.start")
+        self.active = True
+        if self.start_error is not None:
+            raise self.start_error
+
+    async def stop(self):
+        self.calls.append("reflex.stop")
+        self.active = False
+        if self.stop_error is not None:
+            raise self.stop_error
+
+
+class FailingStopEventBus(EventBus):
+    def __init__(self, calls):
+        super().__init__()
+        self.calls = calls
+
+    async def stop(self):
+        self.calls.append("events.stop")
+        await super().stop()
+        raise RuntimeError("event cleanup failed")
+
+
+def application(hardware, body, *, events=None, reflexes=()):
     return RobotApplication(
         RobotProfile("test", "Test"),
         hardware,
         events=events,
         platform_provider=PlatformProvider(),
         body_backend=body,
+        reflexes=reflexes,
     )
 
 
@@ -126,6 +160,27 @@ class ApplicationBodyTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         await delivered.wait()
         self.assertEqual(observed, [(LifecycleState.RUNNING, BodyState(0.0, 0.0))])
+        await app.stop()
+
+    async def test_started_handler_sees_reflex_already_active(self):
+        calls = []
+        reflex = RecordingReflex(calls)
+        app = application(
+            VirtualHardwareBackend(), VirtualBodyBackend(), reflexes=(reflex,)
+        )
+        observed = []
+        delivered = asyncio.Event()
+
+        async def handler(_event: ApplicationStarted) -> None:
+            observed.append((app.state, app.runtime_state.body, reflex.active))
+            delivered.set()
+
+        app.events.subscribe(ApplicationStarted, handler)
+        await app.start()
+        await delivered.wait()
+        self.assertEqual(
+            observed, [(LifecycleState.RUNNING, BodyState(0.0, 0.0), True)]
+        )
         await app.stop()
 
     async def test_orientation_requires_running_and_body_backend(self):
@@ -199,6 +254,82 @@ class ApplicationBodyTests(unittest.IsolatedAsyncioTestCase):
         calls.clear()
         await app.stop()
         self.assertEqual(calls, ["body.stop", "hardware.stop"])
+
+    async def test_shutdown_stops_reflex_before_body_and_hardware(self):
+        calls: list[str] = []
+        reflex = RecordingReflex(calls)
+        app = application(
+            RecordingHardware(calls), RecordingBody(calls), reflexes=(reflex,)
+        )
+        await app.start()
+        calls.clear()
+        await app.stop()
+        self.assertEqual(calls, ["reflex.stop", "body.stop", "hardware.stop"])
+
+    async def test_reflex_start_failure_cleans_all_dependencies(self):
+        calls: list[str] = []
+        hardware = RecordingHardware(calls)
+        body = RecordingBody(calls)
+        original = RuntimeError("reflex start failed")
+        reflex = RecordingReflex(
+            calls, start_error=original, stop_error=RuntimeError("cleanup failed")
+        )
+        app = application(hardware, body, reflexes=(reflex,))
+        with self.assertLogs("embodied_runtime.app", level="ERROR"):
+            with self.assertRaises(RuntimeError) as raised:
+                await app.start()
+        self.assertIs(raised.exception, original)
+        self.assertEqual(
+            calls,
+            ["hardware.start", "body.start", "reflex.start", "reflex.stop",
+             "body.stop", "hardware.stop"],
+        )
+        self.assertEqual(app.state, LifecycleState.STOPPED)
+        self.assertFalse(app.events.is_running)
+        self.assertFalse(app._platform_monitor.is_running)
+
+    async def test_event_cleanup_failure_preserves_reflex_start_failure(self):
+        calls: list[str] = []
+        hardware = RecordingHardware(calls)
+        body = RecordingBody(calls)
+        events = FailingStopEventBus(calls)
+        original = RuntimeError("reflex start failed")
+        reflex = RecordingReflex(calls, start_error=original)
+        app = application(
+            hardware, body, events=events, reflexes=(reflex,)
+        )
+
+        with self.assertLogs("embodied_runtime.app", level="ERROR") as logs:
+            with self.assertRaises(RuntimeError) as raised:
+                await app.start()
+
+        self.assertIs(raised.exception, original)
+        self.assertEqual(
+            calls,
+            ["hardware.start", "body.start", "reflex.start", "reflex.stop",
+             "body.stop", "hardware.stop", "events.stop"],
+        )
+        self.assertTrue(any("[EVENT] cleanup_failed" in line for line in logs.output))
+        self.assertEqual(app.state, LifecycleState.STOPPED)
+        self.assertFalse(events.is_running)
+        self.assertFalse(app._platform_monitor.is_running)
+
+    async def test_reflex_stop_failure_does_not_prevent_shutdown(self):
+        calls: list[str] = []
+        hardware = RecordingHardware(calls)
+        reflex = RecordingReflex(calls, stop_error=RuntimeError("stop failed"))
+        app = application(
+            hardware, RecordingBody(calls), reflexes=(reflex,)
+        )
+        await app.start()
+        calls.clear()
+        with self.assertLogs("embodied_runtime.app", level="ERROR"):
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                await app.stop()
+        self.assertEqual(calls, ["reflex.stop", "body.stop", "hardware.stop"])
+        self.assertEqual(app.state, LifecycleState.STOPPED)
+        self.assertFalse(hardware.is_running)
+        self.assertFalse(app.events.is_running)
 
     async def test_body_stop_failure_still_completes_remaining_cleanup(self):
         calls: list[str] = []

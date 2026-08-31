@@ -1,6 +1,7 @@
 """Application lifecycle orchestration."""
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 import logging
 
@@ -12,6 +13,7 @@ from embodied_runtime.events import (
 )
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.reflexes import Reflex
 from embodied_runtime.platform import (
     HostPlatformProvider,
     PlatformMonitor,
@@ -57,12 +59,15 @@ class RobotApplication:
         platform_provider: PlatformProvider | None = None,
         platform_monitor_policy: PlatformMonitorPolicy | None = None,
         body_backend: BodyBackend | None = None,
+        reflexes: Sequence[Reflex] = (),
     ) -> None:
         self.profile = profile
         self.hardware = hardware
         self.options = options or ApplicationOptions()
         self.events = events or EventBus()
         self.body_backend = body_backend
+        self._reflexes = tuple(reflexes)
+        self._started_reflexes: list[Reflex] = []
         self._runtime_state = RuntimeState(LifecycleState.CREATED)
         self._platform_provider = platform_provider or HostPlatformProvider()
         self._stop_requested = asyncio.Event()
@@ -131,7 +136,13 @@ class RobotApplication:
                     str(self.body_backend.is_physical).lower(),
                     ",".join(self.body_backend.capabilities) or "none",
                 )
+            for reflex in self._reflexes:
+                # Record before starting so a partially established subscription
+                # is still offered cleanup if start raises.
+                self._started_reflexes.append(reflex)
+                await reflex.start(self.events, self)
         except BaseException:
+            await self._stop_reflexes_for_cleanup()
             if self.body_backend is not None:
                 try:
                     await self.body_backend.stop()
@@ -143,7 +154,10 @@ class RobotApplication:
                 except BaseException:
                     LOGGER.exception("[HW] cleanup_failed")
             self._set_lifecycle(LifecycleState.STOPPED)
-            await self.events.stop()
+            try:
+                await self.events.stop()
+            except BaseException:
+                LOGGER.exception("[EVENT] cleanup_failed")
             raise
         self._set_lifecycle(LifecycleState.RUNNING)
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
@@ -166,6 +180,10 @@ class RobotApplication:
             await self._platform_monitor.stop()
         except BaseException as error:
             failure = error
+        try:
+            await self._stop_reflexes()
+        except BaseException as error:
+            failure = failure or error
         if self.body_backend is not None:
             try:
                 await self.body_backend.stop()
@@ -222,10 +240,12 @@ class RobotApplication:
     async def observe_presence(self, *, present: bool, source: str) -> PresenceState:
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Presence observation requires a running application")
+        if type(present) is not bool:
+            raise TypeError("Presence value must be a bool")
         if not source or not source.strip():
             raise ValueError("Presence source must be non-empty")
         previous = self._runtime_state.presence
-        current = PresenceState(present=bool(present), source=source)
+        current = PresenceState(present=present, source=source)
         self._runtime_state = replace(self._runtime_state, presence=current)
         if previous is None or previous.present != current.present:
             await self.events.publish(
@@ -236,6 +256,25 @@ class RobotApplication:
                 )
             )
         return current
+
+    async def _stop_reflexes(self) -> None:
+        failure: BaseException | None = None
+        while self._started_reflexes:
+            reflex = self._started_reflexes.pop()
+            try:
+                await reflex.stop()
+            except BaseException as error:
+                LOGGER.exception("[REFLEX] name=%s stop_failed", reflex.identifier)
+                failure = failure or error
+        if failure is not None:
+            raise failure
+
+    async def _stop_reflexes_for_cleanup(self) -> None:
+        try:
+            await self._stop_reflexes()
+        except BaseException:
+            # Startup's original failure remains authoritative.
+            pass
 
     def body_summary(self) -> BodySummary | None:
         if self.body_backend is None:

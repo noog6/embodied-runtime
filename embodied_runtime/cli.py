@@ -11,6 +11,7 @@ from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_cons
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
+from embodied_runtime.reflexes import PresenceCenteringReflex
 from embodied_runtime.platform import PlatformSnapshot
 
 LOGGER = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt),
         body_backend=VirtualBodyBackend(),
+        reflexes=(PresenceCenteringReflex(),),
     )
     if args.diagnostics:
         try:

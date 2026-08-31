@@ -39,6 +39,21 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "non-empty"):
             await self.app.observe_presence(present=True, source=" ")
 
+    async def test_observation_rejects_non_boolean_without_state_or_event(self):
+        delivered = asyncio.Event()
+
+        async def handler(_event: PresenceChanged) -> None:
+            delivered.set()
+
+        self.app.events.subscribe(PresenceChanged, handler)
+        await self.app.start()
+        for value in ("true", "false", 1, 0, None, [], object()):
+            with self.subTest(value=value), self.assertRaisesRegex(TypeError, "bool"):
+                await self.app.observe_presence(present=value, source="test")  # type: ignore[arg-type]
+            self.assertIsNone(self.app.runtime_state.presence)
+        await asyncio.sleep(0)
+        self.assertFalse(delivered.is_set())
+
     async def test_state_precedes_event_and_equal_values_are_deduplicated(self):
         events = []
         states = []
