@@ -6,6 +6,7 @@ from collections.abc import Sequence
 import logging
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
+from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
@@ -68,7 +69,8 @@ def format_platform(snapshot: PlatformSnapshot) -> str:
 async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> int:
     hardware = VirtualHardwareBackend()
     application = RobotApplication(
-        profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt)
+        profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt),
+        body_backend=VirtualBodyBackend(),
     )
     if args.diagnostics:
         try:

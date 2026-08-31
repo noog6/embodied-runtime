@@ -4,6 +4,7 @@ import io
 import unittest
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication
+from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cli import build_parser
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
@@ -48,6 +49,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             RobotProfile("test", "Test Robot"), VirtualHardwareBackend(),
             ApplicationOptions(startup_prompt="secret words"),
             platform_provider=self.provider,
+            body_backend=VirtualBodyBackend(),
         )
         await self.app.start()
         self.console = RuntimeConsole(self.app, monotonic=lambda: 11.75)
@@ -62,12 +64,16 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
     def test_help_is_exact_and_alias_matches(self):
         expected = (
             "Commands\n"
-            "  status    Show current runtime overview\n"
-            "  platform  Show current host platform state\n"
-            "  hardware  Show robot hardware backend\n"
-            "  help      Show this help\n"
-            "  quit      Stop the console and runtime\n"
-            "  exit      Stop the console and runtime"
+            "  status                         Show current runtime overview\n"
+            "  platform                       Show current host platform state\n"
+            "  hardware                       Show robot hardware backend\n"
+            "  body                           Show current body state\n"
+            "  body orient <yaw> <pitch>      Set semantic body orientation\n"
+            "  presence                       Show current presence state\n"
+            "  simulate presence <on|off>     Inject virtual presence\n"
+            "  help                           Show this help\n"
+            "  quit                           Stop the console and runtime\n"
+            "  exit                           Stop the console and runtime"
         )
         self.assertEqual(self.console.execute("help"), (expected, False))
         self.assertEqual(self.console.execute("?"), (expected, False))
@@ -120,6 +126,56 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             self.console.execute("events"),
             ("Unknown command: events. Type 'help' for commands.", False),
         )
+
+    async def test_body_and_presence_commands_use_application_semantic_apis(self):
+        orientation_calls = []
+        presence_calls = []
+        set_orientation = self.app.set_body_orientation
+        observe_presence = self.app.observe_presence
+
+        async def recording_orientation(**arguments):
+            orientation_calls.append(arguments)
+            return await set_orientation(**arguments)
+
+        async def recording_presence(**arguments):
+            presence_calls.append(arguments)
+            return await observe_presence(**arguments)
+
+        self.app.set_body_orientation = recording_orientation  # type: ignore[method-assign]
+        self.app.observe_presence = recording_presence  # type: ignore[method-assign]
+
+        report, stop = await self.console.execute_async("BoDy OrIeNt 30 -10")
+        self.assertFalse(stop)
+        self.assertIn("yaw_deg:       30.0", report)
+        self.assertEqual(
+            orientation_calls,
+            [{"yaw_degrees": 30.0, "pitch_degrees": -10.0}],
+        )
+
+        report, stop = await self.console.execute_async("simulate presence ON")
+        self.assertFalse(stop)
+        self.assertIn("status:        present", report)
+        self.assertEqual(
+            presence_calls,
+            [{"present": True, "source": "virtual_scenario"}],
+        )
+        self.assertIn("yaw_deg:       30.0", self.console.execute("body")[0])
+        self.assertIn(
+            "source:        virtual_scenario",
+            self.console.execute("presence")[0],
+        )
+
+    async def test_body_orientation_error_does_not_mutate_state(self):
+        previous = self.app.runtime_state.body
+        report, stop = await self.console.execute_async("body orient 181 0")
+        self.assertFalse(stop)
+        self.assertIn("Invalid body orientation", report)
+        self.assertIs(self.app.runtime_state.body, previous)
+
+    def test_malformed_quoted_command_is_concise(self):
+        report, stop = self.console.execute("body '")
+        self.assertFalse(stop)
+        self.assertIn("Unable to parse command", report)
 
     async def test_session_eof_and_quit_terminate(self):
         for lines in ([None], ["", "quit"]):

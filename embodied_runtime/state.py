@@ -15,6 +15,20 @@ class LifecycleState(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class BodyState:
+    yaw_degrees: float
+    pitch_degrees: float
+
+
+@dataclass(frozen=True, slots=True)
+class PresenceState:
+    present: bool
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeState:
     lifecycle: LifecycleState
     platform: PlatformSnapshot | None = None
+    body: BodyState | None = None
+    presence: PresenceState | None = None

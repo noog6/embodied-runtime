@@ -4,9 +4,11 @@ import asyncio
 from dataclasses import dataclass, replace
 import logging
 
+from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.events import (
     ApplicationStarted,
     EventBus,
+    PresenceChanged,
 )
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.profile import RobotProfile
@@ -17,7 +19,7 @@ from embodied_runtime.platform import (
     PlatformProvider,
     PlatformSnapshot,
 )
-from embodied_runtime.state import LifecycleState, RuntimeState
+from embodied_runtime.state import BodyState, LifecycleState, PresenceState, RuntimeState
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +40,13 @@ class RuntimeSummary:
     lifecycle_status: LifecycleState
 
 
+@dataclass(frozen=True)
+class BodySummary:
+    backend: str
+    is_physical: bool
+    capabilities: tuple[str, ...]
+
+
 class RobotApplication:
     def __init__(
         self,
@@ -47,11 +56,13 @@ class RobotApplication:
         events: EventBus | None = None,
         platform_provider: PlatformProvider | None = None,
         platform_monitor_policy: PlatformMonitorPolicy | None = None,
+        body_backend: BodyBackend | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
         self.options = options or ApplicationOptions()
         self.events = events or EventBus()
+        self.body_backend = body_backend
         self._runtime_state = RuntimeState(LifecycleState.CREATED)
         self._platform_provider = platform_provider or HostPlatformProvider()
         self._stop_requested = asyncio.Event()
@@ -102,17 +113,38 @@ class RobotApplication:
             platform_state.python_version,
         )
         await self.events.start()
+        hardware_started = False
         try:
             self.hardware.start()
+            hardware_started = True
+            LOGGER.info(
+                "[HW] backend=%s physical=%s status=ready",
+                self.hardware.identifier,
+                str(self.hardware.is_physical).lower(),
+            )
+            if self.body_backend is not None:
+                body_state = await self.body_backend.start()
+                self._runtime_state = replace(self._runtime_state, body=body_state)
+                LOGGER.info(
+                    "[BODY] backend=%s physical=%s capabilities=%s status=ready",
+                    self.body_backend.identifier,
+                    str(self.body_backend.is_physical).lower(),
+                    ",".join(self.body_backend.capabilities) or "none",
+                )
         except BaseException:
+            if self.body_backend is not None:
+                try:
+                    await self.body_backend.stop()
+                except BaseException:
+                    LOGGER.exception("[BODY] cleanup_failed")
+            if hardware_started:
+                try:
+                    self.hardware.stop()
+                except BaseException:
+                    LOGGER.exception("[HW] cleanup_failed")
             self._set_lifecycle(LifecycleState.STOPPED)
             await self.events.stop()
             raise
-        LOGGER.info(
-            "[HW] backend=%s physical=%s status=ready",
-            self.hardware.identifier,
-            str(self.hardware.is_physical).lower(),
-        )
         self._set_lifecycle(LifecycleState.RUNNING)
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
         await self.events.publish(ApplicationStarted(source="application"))
@@ -129,14 +161,29 @@ class RobotApplication:
             return
         self._set_lifecycle(LifecycleState.STOPPING)
         LOGGER.info("[APP] stopping")
+        failure: BaseException | None = None
         try:
             await self._platform_monitor.stop()
+        except BaseException as error:
+            failure = error
+        if self.body_backend is not None:
+            try:
+                await self.body_backend.stop()
+            except BaseException as error:
+                LOGGER.exception("[BODY] stop_failed")
+                failure = failure or error
+        try:
             self.hardware.stop()
-        finally:
+        except BaseException as error:
+            failure = failure or error
+        try:
             self._set_lifecycle(LifecycleState.STOPPED)
             self._stop_requested.set()
             await self.events.stop()
             LOGGER.info("[APP] stopped")
+        finally:
+            if failure is not None:
+                raise failure
 
     async def run(self) -> None:
         await self.start()
@@ -153,6 +200,51 @@ class RobotApplication:
     def request_stop(self) -> None:
         """Request an orderly stop from code running on the application loop."""
         self._stop_requested.set()
+
+    async def set_body_orientation(
+        self, *, yaw_degrees: float, pitch_degrees: float
+    ) -> BodyState:
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Body orientation requires a running application")
+        if self.body_backend is None:
+            raise RuntimeError("No body backend is configured")
+        if "orientation" not in self.body_backend.capabilities:
+            raise RuntimeError("Body backend does not support orientation")
+        result = await self.body_backend.set_orientation(yaw_degrees, pitch_degrees)
+        self._runtime_state = replace(self._runtime_state, body=result)
+        LOGGER.info(
+            "[BODY] orientation yaw_deg=%s pitch_deg=%s",
+            result.yaw_degrees,
+            result.pitch_degrees,
+        )
+        return result
+
+    async def observe_presence(self, *, present: bool, source: str) -> PresenceState:
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Presence observation requires a running application")
+        if not source or not source.strip():
+            raise ValueError("Presence source must be non-empty")
+        previous = self._runtime_state.presence
+        current = PresenceState(present=bool(present), source=source)
+        self._runtime_state = replace(self._runtime_state, presence=current)
+        if previous is None or previous.present != current.present:
+            await self.events.publish(
+                PresenceChanged(
+                    source=source,
+                    previous_present=None if previous is None else previous.present,
+                    present=current.present,
+                )
+            )
+        return current
+
+    def body_summary(self) -> BodySummary | None:
+        if self.body_backend is None:
+            return None
+        return BodySummary(
+            backend=self.body_backend.identifier,
+            is_physical=self.body_backend.is_physical,
+            capabilities=tuple(self.body_backend.capabilities),
+        )
 
     def summary(self) -> RuntimeSummary:
         return RuntimeSummary(

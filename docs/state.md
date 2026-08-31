@@ -33,3 +33,12 @@ defaults to 60 seconds, and may be disabled through monitor policy while samplin
 and advisory transitions continue normally. Runtime log timestamps instead use
 the host's local ISO-8601 wall-clock time and explicit timezone offset. Direct
 diagnostic report lines remain structured snapshot output rather than runtime logs.
+`RobotApplication` owns one immutable `RuntimeState` snapshot. In addition to
+the lifecycle and latest platform snapshot, it owns:
+
+- `BodyState(yaw_degrees, pitch_degrees)`, which is `None` before a body starts
+  and is replaced only after a body capability succeeds; and
+- `PresenceState(present, source)`, which is `None` until a semantic presence
+  observation is received.
+
+Backends, the console, and events do not independently own these facts.
