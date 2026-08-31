@@ -4,7 +4,11 @@ import unittest
 from unittest.mock import patch
 
 from embodied_runtime.app import ApplicationOptions, LifecycleState, RobotApplication
-from embodied_runtime.cli import build_parser, format_platform, format_summary
+from embodied_runtime.cli import build_hardware_backend, build_parser, format_platform, format_summary, main
+from embodied_runtime.hardware.fusion_hat import (
+    FusionHatHardwareBackend,
+    FusionHatUnavailableError,
+)
 from embodied_runtime.events import ApplicationStarted, Event, EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
@@ -169,6 +173,32 @@ class CliTests(unittest.TestCase):
     def test_optional_startup_prompt(self) -> None:
         args = build_parser().parse_args(["Good morning, Mira."])
         self.assertEqual(args.startup_prompt, "Good morning, Mira.")
+
+    def test_explicit_fusion_hat_builds_physical_backend(self) -> None:
+        args = build_parser().parse_args(["--hardware", "fusion-hat"])
+        self.assertIsInstance(build_hardware_backend(args), FusionHatHardwareBackend)
+
+    def test_servo_test_requires_diagnostics_and_physical_hardware(self) -> None:
+        for argv in (["--fusion-servo-test", "P0"],
+                     ["--diagnostics", "--fusion-servo-test", "P0"]):
+            with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
+                main(argv)
+
+    def test_invalid_servo_channel_is_rejected(self) -> None:
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            main(["--hardware", "fusion-hat", "--diagnostics", "--fusion-servo-test", "P12"])
+
+    def test_missing_physical_driver_is_concise_without_fallback(self) -> None:
+        error = FusionHatUnavailableError(
+            "Fusion HAT unavailable; run `fusion_hat doctor`"
+        )
+        with patch.object(FusionHatHardwareBackend, "start", side_effect=error):
+            with patch("sys.stderr") as stderr:
+                self.assertEqual(
+                    main(["--hardware", "fusion-hat", "--diagnostics"]), 2
+                )
+        rendered = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("fusion_hat doctor", rendered)
 
     def test_platform_diagnostics_are_structured(self) -> None:
         rendered = format_platform(
