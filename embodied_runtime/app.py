@@ -50,6 +50,13 @@ class BodySummary:
     capabilities: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CameraSummary:
+    backend: str
+    is_physical: bool
+    is_running: bool
+
+
 class RobotApplication:
     def __init__(
         self,
@@ -320,6 +327,15 @@ class RobotApplication:
             backend=self.body_backend.identifier,
             is_physical=self.body_backend.is_physical,
             capabilities=tuple(self.body_backend.capabilities),
+        )
+
+    def camera_summary(self) -> CameraSummary | None:
+        if self.camera_backend is None:
+            return None
+        return CameraSummary(
+            backend=self.camera_backend.identifier,
+            is_physical=self.camera_backend.is_physical,
+            is_running=self.camera_backend.is_running,
         )
 
     def summary(self) -> RuntimeSummary:
