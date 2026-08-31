@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import logging
 import math
+import time
 from embodied_runtime.events import EventBus
 from embodied_runtime.events.platform import (
     MemoryPressureCleared,
@@ -25,6 +26,7 @@ class PlatformMonitorPolicy:
     thermal_clear_celsius: float = 75.0
     memory_pressure_ratio: float = 0.10
     memory_clear_ratio: float = 0.15
+    heartbeat_interval_seconds: float | None = 60.0
 
     def __post_init__(self) -> None:
         values = (
@@ -36,6 +38,11 @@ class PlatformMonitorPolicy:
         )
         if not all(math.isfinite(value) for value in values):
             raise ValueError("platform monitor policy values must be finite")
+        if self.heartbeat_interval_seconds is not None and (
+            not math.isfinite(self.heartbeat_interval_seconds)
+            or self.heartbeat_interval_seconds <= 0
+        ):
+            raise ValueError("heartbeat_interval_seconds must be finite and positive")
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
         if self.thermal_clear_celsius >= self.thermal_warning_celsius:
@@ -55,15 +62,19 @@ class PlatformMonitor:
         may_publish: Callable[[], bool],
         *,
         policy: PlatformMonitorPolicy | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.policy = policy or PlatformMonitorPolicy()
         self._provider = provider
         self._events = events
         self._replace_platform = replace_platform
         self._may_publish = may_publish
+        self._monotonic = monotonic
         self._thermal_warning: bool | None = None
         self._memory_pressure: bool | None = None
         self._task: asyncio.Task[None] | None = None
+        self._successful_samples = 0
+        self._last_heartbeat_monotonic = 0.0
 
     @property
     def is_running(self) -> bool:
@@ -80,6 +91,8 @@ class PlatformMonitor:
     def start(self) -> None:
         if self.is_running:
             raise RuntimeError("platform monitor is already running")
+        self._successful_samples = 0
+        self._last_heartbeat_monotonic = self._monotonic()
         self._task = asyncio.create_task(self._run(), name="platform-monitor")
 
     async def stop(self) -> None:
@@ -102,13 +115,46 @@ class PlatformMonitor:
         while True:
             await asyncio.sleep(self.policy.interval_seconds)
             try:
-                await self.sample_platform_once()
+                await self._sample_background_once()
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 LOGGER.exception(
                     "[PULSE] monitor=platform status=sample_failed error=%s", error
                 )
+
+    async def _sample_background_once(self) -> PlatformSnapshot:
+        """Perform one monitor-owned sample (kept separate for deterministic tests)."""
+        snapshot = await self.sample_platform_once()
+        self._successful_samples += 1
+        self._log_heartbeat_if_due(snapshot)
+        return snapshot
+
+    def _log_heartbeat_if_due(self, snapshot: PlatformSnapshot) -> None:
+        interval = self.policy.heartbeat_interval_seconds
+        if interval is None:
+            return
+        now = self._monotonic()
+        if now - self._last_heartbeat_monotonic < interval:
+            return
+        self._last_heartbeat_monotonic = now
+        temperature = snapshot.cpu_temperature_celsius
+        temperature_valid = temperature is not None and math.isfinite(temperature)
+        ratio = self._memory_ratio(snapshot)
+        available = snapshot.memory_available_bytes
+        available_mb = round(available / (1024 * 1024)) if ratio is not None else None
+        LOGGER.info(
+            "[PULSE] heartbeat samples=%d cpu_temp_c=%s memory_available_mb=%s "
+            "memory_available_pct=%s thermal=%s memory=%s",
+            self._successful_samples,
+            f"{temperature:.1f}" if temperature_valid else "unknown",
+            str(available_mb) if available_mb is not None else "unknown",
+            f"{ratio * 100:.1f}" if ratio is not None else "unknown",
+            ("warning" if self._thermal_warning else "normal")
+            if temperature_valid else "unknown",
+            ("pressure" if self._memory_pressure else "normal")
+            if ratio is not None else "unknown",
+        )
 
     async def _evaluate_thermal(self, snapshot: PlatformSnapshot) -> None:
         value = snapshot.cpu_temperature_celsius

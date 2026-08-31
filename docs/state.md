@@ -24,3 +24,12 @@ advisory policy samples every 5 seconds, raises/clears thermal warning at
 available. These runtime thresholds are advisory, not replacements for kernel,
 firmware, or hardware safety protection. Monitoring is owned by the application
 and is cancelled before hardware and the event bus shut down.
+
+Normal platform samples remain silent state updates. For operator visibility,
+the same polling task periodically logs a heartbeat using the latest successfully
+installed authoritative platform observation; it does not take another sample and
+does not publish an EventBus event. Heartbeat cadence uses monotonic elapsed time,
+defaults to 60 seconds, and may be disabled through monitor policy while sampling
+and advisory transitions continue normally. Runtime log timestamps instead use
+the host's local ISO-8601 wall-clock time and explicit timezone offset. Direct
+diagnostic report lines remain structured snapshot output rather than runtime logs.

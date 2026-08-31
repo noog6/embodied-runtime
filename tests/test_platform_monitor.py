@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import FrozenInstanceError
 import unittest
+from unittest.mock import patch
 
 from embodied_runtime.app import RobotApplication
 from embodied_runtime.events import (
@@ -40,8 +41,9 @@ class PolicyTests(unittest.TestCase):
                 policy.thermal_clear_celsius,
                 policy.memory_pressure_ratio,
                 policy.memory_clear_ratio,
+                policy.heartbeat_interval_seconds,
             ),
-            (5.0, 80.0, 75.0, 0.10, 0.15),
+            (5.0, 80.0, 75.0, 0.10, 0.15, 60.0),
         )
         with self.assertRaises(FrozenInstanceError):
             policy.interval_seconds = 1  # type: ignore[misc]
@@ -54,10 +56,19 @@ class PolicyTests(unittest.TestCase):
             dict(memory_pressure_ratio=0.2, memory_clear_ratio=0.1),
             dict(memory_pressure_ratio=-0.1),
             dict(memory_clear_ratio=1.1),
+            dict(heartbeat_interval_seconds=0),
+            dict(heartbeat_interval_seconds=-1),
+            dict(heartbeat_interval_seconds=float("nan")),
+            dict(heartbeat_interval_seconds=float("inf")),
         ]
         for values in invalid:
             with self.subTest(values=values), self.assertRaises(ValueError):
                 PlatformMonitorPolicy(**values)
+
+    def test_heartbeat_can_be_disabled(self):
+        self.assertIsNone(
+            PlatformMonitorPolicy(heartbeat_interval_seconds=None).heartbeat_interval_seconds
+        )
 
 
 class MonitorTests(unittest.IsolatedAsyncioTestCase):
@@ -167,6 +178,95 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "probe failed"):
             await monitor.sample_platform_once()
         self.assertIs(self.current, old)
+
+    async def test_heartbeat_timing_count_content_and_no_extra_sample(self):
+        clock = [0.0]
+        values = [
+            snapshot(cpu_temperature_celsius=42.84, memory_total_bytes=400 * 1024 * 1024,
+                     memory_available_bytes=253 * 1024 * 1024),
+            snapshot(cpu_temperature_celsius=43.06, memory_total_bytes=400 * 1024 * 1024,
+                     memory_available_bytes=252 * 1024 * 1024),
+            snapshot(cpu_temperature_celsius=43.14, memory_total_bytes=400 * 1024 * 1024,
+                     memory_available_bytes=251 * 1024 * 1024),
+        ]
+        provider = Provider(values)
+        monitor = PlatformMonitor(
+            provider, self.bus, lambda value: setattr(self, "current", value),
+            lambda: True,
+            policy=PlatformMonitorPolicy(heartbeat_interval_seconds=10),
+            monotonic=lambda: clock[0],
+        )
+        monitor.establish_baseline(self.current)
+        monitor._last_heartbeat_monotonic = clock[0]
+        with self.assertLogs("embodied_runtime.platform.monitor", level="INFO") as logs:
+            clock[0] = 9
+            await monitor._sample_background_once()
+            clock[0] = 10
+            await monitor._sample_background_once()
+            clock[0] = 11
+            await monitor._sample_background_once()
+        heartbeat = [line for line in logs.output if "heartbeat samples=" in line]
+        self.assertEqual(len(heartbeat), 1)
+        self.assertIn(
+            "heartbeat samples=2 cpu_temp_c=43.1 memory_available_mb=252 "
+            "memory_available_pct=63.0 thermal=normal memory=normal",
+            heartbeat[0],
+        )
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(self.events, [])
+        self.assertIs(self.current, values[-1])
+
+    async def test_failure_due_then_next_success_heartbeats_without_counting_failure(self):
+        clock = [0.0]
+        provider = Provider([RuntimeError("no sample"), snapshot()])
+        monitor = PlatformMonitor(
+            provider, self.bus, lambda value: setattr(self, "current", value),
+            lambda: True, policy=PlatformMonitorPolicy(heartbeat_interval_seconds=5),
+            monotonic=lambda: clock[0],
+        )
+        monitor._last_heartbeat_monotonic = 0
+        clock[0] = 5
+        with self.assertRaises(RuntimeError):
+            await monitor._sample_background_once()
+        with self.assertLogs("embodied_runtime.platform.monitor", level="INFO") as logs:
+            clock[0] = 6
+            await monitor._sample_background_once()
+        self.assertIn("heartbeat samples=1", logs.output[0])
+
+    async def test_unknown_warning_pressure_and_disabled_rendering(self):
+        warning = snapshot(cpu_temperature_celsius=81, memory_total_bytes=100,
+                           memory_available_bytes=5)
+        clock = [1.0]
+        monitor = PlatformMonitor(
+            Provider([warning]), self.bus, lambda value: setattr(self, "current", value),
+            lambda: True, policy=PlatformMonitorPolicy(heartbeat_interval_seconds=1),
+            monotonic=lambda: clock[0],
+        )
+        with self.assertLogs("embodied_runtime.platform.monitor", level="INFO") as logs:
+            await monitor._sample_background_once()
+        self.assertIn("thermal=warning memory=pressure", logs.output[-1])
+
+        disabled_provider = Provider([snapshot(cpu_temperature_celsius=None)])
+        disabled = PlatformMonitor(
+            disabled_provider, self.bus, lambda value: setattr(self, "current", value),
+            lambda: True, policy=PlatformMonitorPolicy(heartbeat_interval_seconds=None),
+        )
+        with patch("embodied_runtime.platform.monitor.LOGGER.info") as info:
+            await disabled._sample_background_once()
+        info.assert_not_called()
+        self.assertEqual(disabled_provider.calls, 1)
+
+        unknown = snapshot(cpu_temperature_celsius=None, memory_total_bytes=0,
+                           memory_available_bytes=0)
+        unknown_monitor = PlatformMonitor(
+            Provider([unknown]), self.bus, lambda value: setattr(self, "current", value),
+            lambda: True, policy=PlatformMonitorPolicy(heartbeat_interval_seconds=1),
+            monotonic=lambda: 2.0,
+        )
+        with self.assertLogs("embodied_runtime.platform.monitor", level="INFO") as unknown_logs:
+            await unknown_monitor._sample_background_once()
+        self.assertIn("cpu_temp_c=unknown memory_available_mb=unknown ", unknown_logs.output[0])
+        self.assertIn("memory_available_pct=unknown thermal=unknown memory=unknown", unknown_logs.output[0])
 
 
 class ApplicationMonitorTests(unittest.IsolatedAsyncioTestCase):

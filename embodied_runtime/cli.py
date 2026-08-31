@@ -2,11 +2,11 @@
 
 import argparse
 import asyncio
-import logging
 from collections.abc import Sequence
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
+from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.platform import PlatformSnapshot
 
@@ -81,7 +81,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    configure_logging()
     try:
         profile = load_profile(args.profile)
     except ProfileLoadError as error:
