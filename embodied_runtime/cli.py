@@ -4,10 +4,20 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 import logging
+import sys
+import time
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
+from embodied_runtime.hardware.base import HardwareBackend
+from embodied_runtime.hardware.fusion_hat import (
+    FusionHatHardwareBackend,
+    FusionHatUnavailableError,
+    SERVO_CENTER_PULSE_US,
+    SERVO_PERIOD_US,
+    normalize_pwm_channel,
+)
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
@@ -21,11 +31,54 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run an embodied agent profile")
     parser.add_argument("startup_prompt", nargs="?", help="prompt for a future interaction system")
     parser.add_argument("--profile", default="mira", help="robot profile identifier")
-    parser.add_argument("--hardware", choices=("virtual",), default="virtual")
+    parser.add_argument(
+        "--hardware", choices=("virtual", "fusion-hat"), default="virtual"
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--diagnostics", action="store_true")
     modes.add_argument("--console", action="store_true")
+    parser.add_argument(
+        "--fusion-servo-test",
+        metavar="P0..P11",
+        type=_pwm_channel,
+        help="CAUTION: explicitly actuate one Fusion HAT bench-servo PWM channel",
+    )
     return parser
+
+
+def _pwm_channel(value: str) -> str:
+    try:
+        return normalize_pwm_channel(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def build_hardware_backend(args: argparse.Namespace) -> HardwareBackend:
+    if args.hardware == "fusion-hat":
+        return FusionHatHardwareBackend()
+    return VirtualHardwareBackend()
+
+
+def run_fusion_servo_test(
+    hardware: FusionHatHardwareBackend,
+    channel_name: str,
+    *,
+    sleeper=time.sleep,
+) -> str:
+    """Perform the sole explicit physical-output diagnostic."""
+    channel = hardware.open_pwm_channel(channel_name)
+    try:
+        channel.disable()
+        channel.enable()
+        channel.set_period_us(SERVO_PERIOD_US)
+        channel.set_pulse_width_us(SERVO_CENTER_PULSE_US)
+        sleeper(0.5)
+    finally:
+        channel.close()
+    return (
+        f"[FUSION] servo_test channel={channel.name} "
+        f"pulse_us={SERVO_CENTER_PULSE_US} period_us={SERVO_PERIOD_US} status=ok"
+    )
 
 
 def format_summary(summary: RuntimeSummary) -> str:
@@ -68,7 +121,7 @@ def format_platform(snapshot: PlatformSnapshot) -> str:
 
 
 async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> int:
-    hardware = VirtualHardwareBackend()
+    hardware = build_hardware_backend(args)
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt),
         body_backend=VirtualBodyBackend(),
@@ -81,6 +134,13 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
             print(format_summary(application.summary()))
             assert application.runtime_state.platform is not None
             print(format_platform(application.runtime_state.platform))
+            if isinstance(hardware, FusionHatHardwareBackend):
+                print(
+                    f"[FUSION] driver=ready pwm_channels={len(hardware.pwm_channels)} "
+                    "status=ready"
+                )
+                if args.fusion_servo_test is not None:
+                    print(run_fusion_servo_test(hardware, args.fusion_servo_test))
         finally:
             await application.stop()
         return 0
@@ -102,14 +162,22 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.fusion_servo_test is not None and not args.diagnostics:
+        parser.error("--fusion-servo-test requires --diagnostics")
+    if args.fusion_servo_test is not None and args.hardware != "fusion-hat":
+        parser.error("--fusion-servo-test requires --hardware fusion-hat")
     configure_logging()
     try:
         profile = load_profile(args.profile)
     except ProfileLoadError as error:
-        build_parser().error(str(error))
+        parser.error(str(error))
 
     try:
         return asyncio.run(_run_application(args, profile))
+    except FusionHatUnavailableError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         return 130
