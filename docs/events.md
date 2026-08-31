@@ -26,3 +26,9 @@ Platform polling updates authoritative state without emitting a sample event.
 Only meaningful advisory transitions are announced: `ThermalWarningRaised`,
 `ThermalWarningCleared`, `MemoryPressureRaised`, and `MemoryPressureCleared`.
 Continuous platform telemetry does not belong on the `EventBus`.
+
+`PresenceChanged(previous_present, present)` announces semantic presence
+transitions. The application installs the new authoritative `PresenceState`
+before publishing, so handlers see the new truth. Repeated observations with
+the same boolean value produce no duplicate transition. Body orientation is
+authoritative state and deliberately does not produce an event.

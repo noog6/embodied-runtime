@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 import math
 import os
+import shlex
 import sys
 import time
 from typing import TextIO
@@ -38,32 +39,81 @@ class RuntimeConsole:
 
     def execute(self, command: str) -> tuple[str, bool]:
         """Return report text and whether the session should terminate."""
-        command = command.strip().lower()
-        if not command:
+        try:
+            words = shlex.split(command)
+        except ValueError as error:
+            return f"Unable to parse command: {error}.", False
+        if not words:
             return "", False
-        if command in {"quit", "exit"}:
+        vocabulary = [word.lower() for word in words]
+        if vocabulary in (["quit"], ["exit"]):
             return "", True
-        if command in {"help", "?"}:
+        if vocabulary in (["help"], ["?"]):
             return self._help(), False
-        if command == "status":
+        if vocabulary == ["status"]:
             return self._status(), False
-        if command == "platform":
+        if vocabulary == ["platform"]:
             return self._platform(), False
-        if command == "hardware":
+        if vocabulary == ["hardware"]:
             return self._hardware(), False
-        return f"Unknown command: {command}. Type 'help' for commands.", False
+        if vocabulary == ["body"]:
+            return self._body(), False
+        if vocabulary == ["presence"]:
+            return self._presence(), False
+        if vocabulary[:2] == ["body", "orient"] or vocabulary[:2] == ["simulate", "presence"]:
+            return "This command requires an active asynchronous console session.", False
+        return f"Unknown command: {words[0]}. Type 'help' for commands.", False
+
+    async def execute_async(self, command: str) -> tuple[str, bool]:
+        """Execute commands, including semantic operations that must be awaited."""
+        try:
+            words = shlex.split(command)
+        except ValueError as error:
+            return f"Unable to parse command: {error}.", False
+        lowered = [word.lower() for word in words]
+        if lowered[:2] == ["body", "orient"]:
+            if len(words) != 4:
+                return "Usage: body orient <yaw> <pitch>.", False
+            try:
+                yaw, pitch = float(words[2]), float(words[3])
+                await self._application.set_body_orientation(
+                    yaw_degrees=yaw, pitch_degrees=pitch
+                )
+            except (ValueError, RuntimeError) as error:
+                return f"Invalid body orientation: {error}.", False
+            return self._body(), False
+        if lowered[:2] == ["simulate", "presence"]:
+            if len(words) != 3 or lowered[2] not in {"on", "off"}:
+                return "Usage: simulate presence <on|off>.", False
+            present = lowered[2] == "on"
+            previous = self._application.runtime_state.presence
+            await self._application.observe_presence(
+                present=present, source="virtual_scenario"
+            )
+            if previous is None or previous.present != present:
+                import logging
+                logging.getLogger(__name__).info(
+                    "[SCENARIO] presence=%s source=virtual_scenario",
+                    "present" if present else "absent",
+                )
+            return self._presence(), False
+        return self.execute(command)
 
     @staticmethod
     def _help() -> str:
         return "\n".join(
             (
                 "Commands",
-                "  status    Show current runtime overview",
-                "  platform  Show current host platform state",
-                "  hardware  Show robot hardware backend",
-                "  help      Show this help",
-                "  quit      Stop the console and runtime",
-                "  exit      Stop the console and runtime",
+                "  status                         Show current runtime overview",
+                "  platform                       Show current host platform state",
+                "  hardware                       Show robot hardware backend",
+                "  body                           Show current body state",
+                "  body orient <yaw> <pitch>      Set semantic body orientation",
+                "  presence                       Show current presence state",
+                "  simulate presence <on|off>     Inject virtual presence",
+                "  help                           Show this help",
+                "  quit                           Stop the console and runtime",
+                "  exit                           Stop the console and runtime",
             )
         )
 
@@ -77,7 +127,10 @@ class RuntimeConsole:
                 f"  lifecycle:     {summary.lifecycle_status}",
             )
         )
-        return f"{runtime}\n\n{self._platform()}\n\n{self._hardware()}"
+        return (
+            f"{runtime}\n\n{self._platform()}\n\n{self._hardware()}"
+            f"\n\n{self._body()}\n\n{self._presence()}"
+        )
 
     def _platform(self) -> str:
         snapshot = self._application.runtime_state.platform
@@ -131,6 +184,34 @@ class RuntimeConsole:
                 f"  physical:      {str(summary.hardware_is_physical).lower()}",
                 f"  capabilities:  {capabilities}",
             )
+        )
+
+    def _body(self) -> str:
+        state = self._application.runtime_state.body
+        summary = self._application.body_summary()
+        if state is None or summary is None:
+            return "Body\n  state:         unavailable"
+        capabilities = ", ".join(summary.capabilities) or "none"
+        return "\n".join(
+            (
+                "Body",
+                f"  backend:       {summary.backend}",
+                f"  physical:      {str(summary.is_physical).lower()}",
+                f"  capabilities:  {capabilities}",
+                f"  yaw_deg:       {state.yaw_degrees}",
+                f"  pitch_deg:     {state.pitch_degrees}",
+            )
+        )
+
+    def _presence(self) -> str:
+        state = self._application.runtime_state.presence
+        if state is None:
+            status, source = "unknown", "unknown"
+        else:
+            status = "present" if state.present else "absent"
+            source = state.source
+        return "\n".join(
+            ("Presence", f"  status:        {status}", f"  source:        {source}")
         )
 
     @staticmethod
@@ -228,7 +309,7 @@ async def run_console_session(
         line = await terminal.read_line(console.prompt)
         if line is None:
             return
-        report, should_exit = console.execute(line)
+        report, should_exit = await console.execute_async(line)
         if report:
             terminal.write(f"\n{report}\n\n")
         if should_exit:

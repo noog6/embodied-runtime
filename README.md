@@ -14,8 +14,9 @@ python main.py --diagnostics
 python main.py --console
 ```
 
-The local console is a read-only view of the running runtime's current state.
-For example, enter `status`, `platform`, or `hardware` at the profile-derived
+The local console projects the running runtime's current state and provides
+two deliberately narrow development controls. For example, enter `status`,
+`body`, or `presence` at the profile-derived
 prompt, and enter `quit` to shut down cleanly. See [Local runtime
 console](docs/console.md).
 
@@ -24,7 +25,7 @@ snapshot of the real host platform, including available identity and resource
 telemetry.
 
 The runtime currently loads the Mira robot profile and uses the hardware-free
-virtual backend by default. Physical SunFounder Fusion HAT+ support has not yet
+virtual hardware and virtual body backends by default. Physical SunFounder Fusion HAT+ support has not yet
 been implemented. See [the architecture notes](docs/architecture.md) for the
 runtime's intended boundaries.
 
