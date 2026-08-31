@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 import logging
+from pathlib import Path
 import sys
 import time
 
@@ -23,6 +24,11 @@ from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.reflexes import PresenceCenteringReflex
 from embodied_runtime.platform import PlatformSnapshot
+from embodied_runtime.sensing.camera import CameraBackend
+from embodied_runtime.sensing.camera.picamera2 import (
+    Picamera2CameraBackend,
+    Picamera2UnavailableError,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hardware", choices=("virtual", "fusion-hat"), default="virtual"
     )
+    parser.add_argument("--camera", choices=("none", "picamera2"), default="none")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--diagnostics", action="store_true")
     modes.add_argument("--console", action="store_true")
@@ -42,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="P0..P11",
         type=_pwm_channel,
         help="CAUTION: explicitly actuate one Fusion HAT bench-servo PWM channel",
+    )
+    parser.add_argument(
+        "--camera-test",
+        metavar="OUTPUT_PATH",
+        type=Path,
+        help="capture exactly one JPEG to this path during diagnostics",
     )
     return parser
 
@@ -57,6 +70,12 @@ def build_hardware_backend(args: argparse.Namespace) -> HardwareBackend:
     if args.hardware == "fusion-hat":
         return FusionHatHardwareBackend()
     return VirtualHardwareBackend()
+
+
+def build_camera_backend(args: argparse.Namespace) -> CameraBackend | None:
+    if args.camera == "picamera2":
+        return Picamera2CameraBackend()
+    return None
 
 
 def run_fusion_servo_test(
@@ -122,10 +141,12 @@ def format_platform(snapshot: PlatformSnapshot) -> str:
 
 async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> int:
     hardware = build_hardware_backend(args)
+    camera = build_camera_backend(args)
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
+        camera_backend=camera,
     )
     if args.diagnostics:
         try:
@@ -141,6 +162,15 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
                 )
                 if args.fusion_servo_test is not None:
                     print(run_fusion_servo_test(hardware, args.fusion_servo_test))
+            if args.camera_test is not None:
+                frame = application.capture_camera_frame()
+                args.camera_test.write_bytes(frame.data)
+                assert camera is not None
+                print(
+                    f"[CAMERA] backend={camera.identifier} width={frame.width} "
+                    f"height={frame.height} media_type={frame.media_type} "
+                    f"bytes={len(frame.data)} output={args.camera_test} status=ok"
+                )
         finally:
             await application.stop()
         return 0
@@ -168,6 +198,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--fusion-servo-test requires --diagnostics")
     if args.fusion_servo_test is not None and args.hardware != "fusion-hat":
         parser.error("--fusion-servo-test requires --hardware fusion-hat")
+    if args.camera_test is not None and not args.diagnostics:
+        parser.error("--camera-test requires --diagnostics")
+    if args.camera_test is not None and args.camera == "none":
+        parser.error("--camera-test requires a selected camera")
     configure_logging()
     try:
         profile = load_profile(args.profile)
@@ -176,7 +210,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         return asyncio.run(_run_application(args, profile))
-    except FusionHatUnavailableError as error:
+    except (FusionHatUnavailableError, Picamera2UnavailableError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

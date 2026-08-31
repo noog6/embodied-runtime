@@ -22,6 +22,11 @@ Discrete in-process facts may be announced through the transient typed event
 mechanism described in [Events](events.md). Events complement, but do not own,
 authoritative runtime state and are not capability requests or data streams.
 The ownership and snapshot semantics are documented in [Runtime state](state.md).
+Camera acquisition is now a focused application-owned sensing resource, documented
+in [Raspberry Pi CSI camera](hardware/raspberry-pi-csi-camera.md). Its encoded
+frames remain transient resources rather than state or events. The implemented
+boundary is camera acquisition -> future perception -> future semantic observation;
+only that future semantic observation would enter state or the event mechanism.
 The [local runtime console](console.md) is a projection of that state and a thin
 adapter for explicit development input, not an additional state owner or observer.
 
