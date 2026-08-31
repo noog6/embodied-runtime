@@ -21,3 +21,5 @@ Discrete in-process facts may be announced through the transient typed event
 mechanism described in [Events](events.md). Events complement, but do not own,
 authoritative runtime state and are not capability requests or data streams.
 The ownership and snapshot semantics are documented in [Runtime state](state.md).
+The [local runtime console](console.md) is a read-only projection of that state,
+not an additional state owner or platform observer.

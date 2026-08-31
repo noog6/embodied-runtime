@@ -3,12 +3,16 @@
 import argparse
 import asyncio
 from collections.abc import Sequence
+import logging
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
+from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.platform import PlatformSnapshot
+
+LOGGER = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,7 +20,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("startup_prompt", nargs="?", help="prompt for a future interaction system")
     parser.add_argument("--profile", default="mira", help="robot profile identifier")
     parser.add_argument("--hardware", choices=("virtual",), default="virtual")
-    parser.add_argument("--diagnostics", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--diagnostics", action="store_true")
+    modes.add_argument("--console", action="store_true")
     return parser
 
 
@@ -71,6 +77,18 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
             print(format_summary(application.summary()))
             assert application.runtime_state.platform is not None
             print(format_platform(application.runtime_state.platform))
+        finally:
+            await application.stop()
+        return 0
+
+    if args.console:
+        try:
+            await application.start()
+            LOGGER.info("[CONSOLE] mode=local status=ready")
+            await run_console_session(RuntimeConsole(application), AsyncLineTerminal())
+        except asyncio.CancelledError:
+            LOGGER.info("[APP] interrupted")
+            raise
         finally:
             await application.stop()
         return 0

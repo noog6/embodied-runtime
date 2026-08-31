@@ -11,7 +11,13 @@ Python 3.13 or later is required. From a fresh checkout, run:
 python main.py
 python main.py "Good morning, Mira."
 python main.py --diagnostics
+python main.py --console
 ```
+
+The local console is a read-only view of the running runtime's current state.
+For example, enter `status`, `platform`, or `hardware` at the profile-derived
+prompt, and enter `quit` to shut down cleanly. See [Local runtime
+console](docs/console.md).
 
 Diagnostics report both the selected robot hardware backend and a separate
 snapshot of the real host platform, including available identity and resource
