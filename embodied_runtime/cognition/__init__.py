@@ -5,5 +5,15 @@ from embodied_runtime.cognition.base import (
     CognitionUnavailableError,
     TextCognitionBackend,
 )
+from embodied_runtime.cognition.context import (
+    CognitionContext,
+    compose_cognition_instructions,
+)
 
-__all__ = ["CognitionError", "CognitionUnavailableError", "TextCognitionBackend"]
+__all__ = [
+    "CognitionContext",
+    "CognitionError",
+    "CognitionUnavailableError",
+    "TextCognitionBackend",
+    "compose_cognition_instructions",
+]
