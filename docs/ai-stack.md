@@ -1,9 +1,19 @@
 # AI stack
 
-The first implemented AI experiment is a text-only cognition vertical slice
-using the OpenAI Responses API. It exists to test the responsibility boundary
-between the runtime and cognition; it does not select Mira's permanent AI
-architecture. Each request is independent and text-only. See
+The implemented AI experiment is a grounded, text-only cognition vertical slice
+using the OpenAI Responses API:
+
+```text
+operator text + request-time runtime projection -> text cognition
+```
+
+It exists to test the responsibility boundary between the runtime and cognition;
+it does not select the reference robot's permanent AI architecture. The
+application creates an allow-listed immutable projection of its current state
+immediately before every request. Authoritative state remains runtime-owned and
+is neither handed to nor queried by the cognition backend. Each request remains
+independent and text-only. No memory, tools, actions, images, Realtime, or audio
+capability is added. See
 [OpenAI text cognition setup](cognition-openai.md).
 
 Realtime, chained, and hybrid approaches remain open candidates.

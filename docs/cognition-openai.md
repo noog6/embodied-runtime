@@ -21,7 +21,15 @@ One independent request can be made without shell quoting:
 mira> ask Reply with exactly: cognition online
 ```
 
+Immediately before each request, `RobotApplication` adds selected current
+grounding to the provider instructions: profile identity, lifecycle, the latest
+runtime-owned platform snapshot, hardware and body summaries plus authoritative
+orientation, semantic presence, and camera resource metadata. An optional
+startup prompt remains a separate operator-instruction section. The application,
+not the OpenAI adapter, selects and renders this context. Camera metadata does
+not capture or send a frame.
+
 The adapter is initialized lazily on the first request. A missing SDK, missing
 key, or provider failure affects that request only and does not stop the runtime.
-This phase has no history, runtime-state projection, tools, images, audio,
-streaming, or Realtime API integration.
+Requests have no conversation history or continuity. This phase adds no tools,
+actions, images, perception, audio, streaming, or Realtime API integration.

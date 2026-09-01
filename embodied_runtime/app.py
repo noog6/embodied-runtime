@@ -6,7 +6,11 @@ from dataclasses import dataclass, replace
 import logging
 
 from embodied_runtime.body.base import BodyBackend
-from embodied_runtime.cognition import TextCognitionBackend
+from embodied_runtime.cognition import (
+    CognitionContext,
+    TextCognitionBackend,
+    compose_cognition_instructions,
+)
 from embodied_runtime.events import (
     ApplicationStarted,
     EventBus,
@@ -275,11 +279,12 @@ class RobotApplication:
         if not message or not message.strip():
             raise ValueError("Cognition message must be non-empty")
         backend = self._cognition_backend
+        instructions = compose_cognition_instructions(
+            self.cognition_context(), self.options.startup_prompt
+        )
         LOGGER.info("[COGNITION] backend=%s request=started", backend.identifier)
         try:
-            response = await backend.respond(
-                message, instructions=self.options.startup_prompt
-            )
+            response = await backend.respond(message, instructions=instructions)
         except Exception:
             LOGGER.warning("[COGNITION] backend=%s request=failed", backend.identifier)
             raise
@@ -289,6 +294,57 @@ class RobotApplication:
             len(response),
         )
         return response
+
+    def cognition_context(self) -> CognitionContext:
+        """Copy an allow-listed projection of authoritative state for one request."""
+        state = self._runtime_state
+        platform = state.platform
+        body = self.body_summary()
+        camera = self.camera_summary()
+        return CognitionContext(
+            profile_id=self.profile.identifier,
+            profile_name=self.profile.name,
+            profile_description=self.profile.description,
+            lifecycle=state.lifecycle.value,
+            platform_hostname=None if platform is None else platform.hostname,
+            platform_model=None if platform is None else platform.model,
+            platform_system=None if platform is None else platform.system,
+            platform_release=None if platform is None else platform.release,
+            platform_machine=None if platform is None else platform.machine,
+            platform_python_version=(
+                None if platform is None else platform.python_version
+            ),
+            platform_uptime_seconds=None if platform is None else platform.uptime_seconds,
+            platform_load_averages=None if platform is None else platform.load_averages,
+            platform_memory_total_bytes=(
+                None if platform is None else platform.memory_total_bytes
+            ),
+            platform_memory_available_bytes=(
+                None if platform is None else platform.memory_available_bytes
+            ),
+            platform_cpu_temperature_celsius=(
+                None if platform is None else platform.cpu_temperature_celsius
+            ),
+            hardware_backend=self.hardware.identifier,
+            hardware_is_physical=self.hardware.is_physical,
+            hardware_capabilities=tuple(self.hardware.capabilities),
+            body_backend=None if body is None else body.backend,
+            body_is_physical=None if body is None else body.is_physical,
+            body_capabilities=None if body is None else body.capabilities,
+            body_yaw_degrees=None if state.body is None else state.body.yaw_degrees,
+            body_pitch_degrees=None if state.body is None else state.body.pitch_degrees,
+            presence_status=(
+                "unknown"
+                if state.presence is None
+                else "present"
+                if state.presence.present
+                else "absent"
+            ),
+            presence_source=None if state.presence is None else state.presence.source,
+            camera_backend=None if camera is None else camera.backend,
+            camera_is_physical=None if camera is None else camera.is_physical,
+            camera_is_running=None if camera is None else camera.is_running,
+        )
 
     async def set_body_orientation(
         self, *, yaw_degrees: float, pitch_degrees: float
