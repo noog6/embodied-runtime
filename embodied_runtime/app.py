@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import logging
 
 from embodied_runtime.body.base import BodyBackend
+from embodied_runtime.cognition import TextCognitionBackend
 from embodied_runtime.events import (
     ApplicationStarted,
     EventBus,
@@ -69,6 +70,7 @@ class RobotApplication:
         body_backend: BodyBackend | None = None,
         reflexes: Sequence[Reflex] = (),
         camera_backend: CameraBackend | None = None,
+        cognition_backend: TextCognitionBackend | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -76,6 +78,7 @@ class RobotApplication:
         self.events = events or EventBus()
         self.body_backend = body_backend
         self.camera_backend = camera_backend
+        self._cognition_backend = cognition_backend
         self._reflexes = tuple(reflexes)
         self._started_reflexes: list[Reflex] = []
         self._runtime_state = RuntimeState(LifecycleState.CREATED)
@@ -262,6 +265,30 @@ class RobotApplication:
             frame.width, frame.height, frame.media_type, len(frame.data),
         )
         return frame
+
+    async def request_cognition(self, message: str) -> str:
+        """Request one independent text response through the application boundary."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Cognition requires a running application")
+        if self._cognition_backend is None:
+            raise RuntimeError("No cognition backend is configured")
+        if not message or not message.strip():
+            raise ValueError("Cognition message must be non-empty")
+        backend = self._cognition_backend
+        LOGGER.info("[COGNITION] backend=%s request=started", backend.identifier)
+        try:
+            response = await backend.respond(
+                message, instructions=self.options.startup_prompt
+            )
+        except Exception:
+            LOGGER.warning("[COGNITION] backend=%s request=failed", backend.identifier)
+            raise
+        LOGGER.info(
+            "[COGNITION] backend=%s request=completed response_chars=%s",
+            backend.identifier,
+            len(response),
+        )
+        return response
 
     async def set_body_orientation(
         self, *, yaw_degrees: float, pitch_degrees: float

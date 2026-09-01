@@ -30,6 +30,12 @@ only that future semantic observation would enter state or the event mechanism.
 The [local runtime console](console.md) is a projection of that state and a thin
 adapter for explicit development input, not an additional state owner or observer.
 
+The first narrow cognition path is implemented as operator text ->
+`RuntimeConsole` -> `RobotApplication` -> `TextCognitionBackend` -> provider ->
+text response. `RobotApplication` remains the ownership boundary. Cognition does
+not yet receive authoritative runtime state and cannot request runtime or body
+capabilities; request and response text are neither state nor events.
+
 Small deterministic [local reflexes](reflexes.md) may consume semantic events
 and request semantic application capabilities. The implemented path is sensing
 or semantic observation -> authoritative state and event -> reflex -> semantic

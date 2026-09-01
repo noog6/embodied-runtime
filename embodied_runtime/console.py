@@ -1,4 +1,4 @@
-"""Local, read-only projection of the running application's state."""
+"""Small local development and control interface for the running application."""
 
 import asyncio
 from collections.abc import Callable
@@ -11,6 +11,7 @@ import time
 from typing import TextIO
 
 from embodied_runtime.app import RobotApplication
+from embodied_runtime.cognition import CognitionError
 from embodied_runtime.platform import PlatformSnapshot
 
 
@@ -19,7 +20,7 @@ class ConsoleTerminalError(RuntimeError):
 
 
 class RuntimeConsole:
-    """Interpret the deliberately small set of local inspection commands."""
+    """Interpret a deliberately small set of local development commands."""
 
     def __init__(
         self,
@@ -40,6 +41,9 @@ class RuntimeConsole:
 
     def execute(self, command: str) -> tuple[str, bool]:
         """Return report text and whether the session should terminate."""
+        raw_parts = command.lstrip().split(maxsplit=1)
+        if raw_parts and raw_parts[0].lower() == "ask":
+            return "This command requires an active asynchronous console session.", False
         try:
             words = shlex.split(command)
         except ValueError as error:
@@ -73,6 +77,16 @@ class RuntimeConsole:
 
     async def execute_async(self, command: str) -> tuple[str, bool]:
         """Execute commands, including semantic operations that must be awaited."""
+        raw_parts = command.lstrip().split(maxsplit=1)
+        if raw_parts and raw_parts[0].lower() == "ask":
+            message = raw_parts[1] if len(raw_parts) == 2 else ""
+            if not message.strip():
+                return "Usage: ask <message>.", False
+            try:
+                response = await self._application.request_cognition(message)
+            except (CognitionError, RuntimeError, ValueError) as error:
+                return f"Cognition request failed: {error}.", False
+            return f"{self._application.profile.name}: {response}", False
         try:
             words = shlex.split(command)
         except ValueError as error:
@@ -142,6 +156,7 @@ class RuntimeConsole:
                 "  camera capture <output_path>   Capture one JPEG to an explicit path",
                 "  presence                       Show current presence state",
                 "  simulate presence <on|off>     Inject virtual presence",
+                "  ask <message>                  Send one text cognition request",
                 "  help                           Show this help",
                 "  quit                           Stop the console and runtime",
                 "  exit                           Stop the console and runtime",

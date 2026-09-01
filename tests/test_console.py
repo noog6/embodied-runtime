@@ -9,6 +9,7 @@ from unittest.mock import patch
 from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cli import build_parser
+from embodied_runtime.cognition import CognitionError
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
@@ -106,12 +107,48 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  camera capture <output_path>   Capture one JPEG to an explicit path\n"
             "  presence                       Show current presence state\n"
             "  simulate presence <on|off>     Inject virtual presence\n"
+            "  ask <message>                  Send one text cognition request\n"
             "  help                           Show this help\n"
             "  quit                           Stop the console and runtime\n"
             "  exit                           Stop the console and runtime"
         )
         self.assertEqual(self.console.execute("help"), (expected, False))
         self.assertEqual(self.console.execute("?"), (expected, False))
+
+    async def test_ask_uses_raw_payload_and_displays_response(self):
+        calls = []
+
+        async def request(message):
+            calls.append(message)
+            return "cognition online"
+
+        self.app.request_cognition = request  # type: ignore[method-assign]
+        report, stop = await self.console.execute_async("ask What's  happening today?")
+        self.assertEqual(calls, ["What's  happening today?"])
+        self.assertEqual(report, "Test Robot: cognition online")
+        self.assertFalse(stop)
+
+    async def test_ask_errors_are_nonfatal_and_session_remains_usable(self):
+        self.assertEqual(
+            await self.console.execute_async("ask"), ("Usage: ask <message>.", False)
+        )
+        for error in (
+            RuntimeError("No cognition backend is configured"),
+            CognitionError("provider unavailable"),
+        ):
+            async def fail(_message, error=error):
+                raise error
+
+            self.app.request_cognition = fail  # type: ignore[method-assign]
+            report, stop = await self.console.execute_async("ask hello")
+            self.assertIn(str(error), report)
+            self.assertFalse(stop)
+            self.assertIn("Platform", self.console.execute("platform")[0])
+
+    def test_ask_requires_async_session(self):
+        report, stop = self.console.execute("ask What's happening?")
+        self.assertIn("active asynchronous console session", report)
+        self.assertFalse(stop)
 
     def test_camera_status_without_configured_camera(self):
         self.assertEqual(
@@ -371,6 +408,11 @@ class ConsoleCliTests(unittest.TestCase):
         self.assertFalse(defaults.console)
         self.assertFalse(defaults.diagnostics)
         self.assertTrue(build_parser().parse_args(["--console"]).console)
+        self.assertEqual(defaults.cognition, "none")
+        self.assertEqual(
+            build_parser().parse_args(["--cognition", "openai-responses"]).cognition,
+            "openai-responses",
+        )
 
     def test_console_and_diagnostics_are_exclusive(self):
         with self.assertRaises(SystemExit):

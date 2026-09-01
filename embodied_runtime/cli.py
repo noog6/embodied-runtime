@@ -10,6 +10,8 @@ import time
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
 from embodied_runtime.body.virtual import VirtualBodyBackend
+from embodied_runtime.cognition import TextCognitionBackend
+from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.hardware.fusion_hat import (
@@ -41,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--hardware", choices=("virtual", "fusion-hat"), default="virtual"
     )
     parser.add_argument("--camera", choices=("none", "picamera2"), default="none")
+    parser.add_argument(
+        "--cognition", choices=("none", "openai-responses"), default="none"
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--diagnostics", action="store_true")
     modes.add_argument("--console", action="store_true")
@@ -75,6 +80,12 @@ def build_hardware_backend(args: argparse.Namespace) -> HardwareBackend:
 def build_camera_backend(args: argparse.Namespace) -> CameraBackend | None:
     if args.camera == "picamera2":
         return Picamera2CameraBackend()
+    return None
+
+
+def build_cognition_backend(args: argparse.Namespace) -> TextCognitionBackend | None:
+    if args.cognition == "openai-responses":
+        return OpenAIResponsesBackend()
     return None
 
 
@@ -142,11 +153,13 @@ def format_platform(snapshot: PlatformSnapshot) -> str:
 async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
+    cognition = build_cognition_backend(args)
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
         camera_backend=camera,
+        cognition_backend=cognition,
     )
     if args.diagnostics:
         try:
