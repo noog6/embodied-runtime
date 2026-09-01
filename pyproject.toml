@@ -9,3 +9,7 @@ dependencies = []
 openai = [
     "openai>=3.6,<4",
 ]
+
+[tool.setuptools.packages.find]
+include = ["embodied_runtime*"]
+namespaces = false
