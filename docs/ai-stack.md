@@ -1,7 +1,12 @@
 # AI stack
 
-No AI stack has been selected yet. This evolving note records architectural
-candidates without choosing a winner.
+The first implemented AI experiment is a text-only cognition vertical slice
+using the OpenAI Responses API. It exists to test the responsibility boundary
+between the runtime and cognition; it does not select Mira's permanent AI
+architecture. Each request is independent and text-only. See
+[OpenAI text cognition setup](cognition-openai.md).
+
+Realtime, chained, and hybrid approaches remain open candidates.
 
 ## Direct speech-to-speech
 

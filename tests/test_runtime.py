@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import patch
 
 from embodied_runtime.app import ApplicationOptions, LifecycleState, RobotApplication
-from embodied_runtime.cli import build_hardware_backend, build_parser, format_platform, format_summary, main
+from embodied_runtime.cli import build_cognition_backend, build_hardware_backend, build_parser, format_platform, format_summary, main
+from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
 from embodied_runtime.hardware.fusion_hat import (
     FusionHatHardwareBackend,
     FusionHatUnavailableError,
@@ -169,6 +170,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.profile, "mira")
         self.assertEqual(args.hardware, "virtual")
         self.assertIsNone(args.startup_prompt)
+        self.assertEqual(args.cognition, "none")
+
+    def test_openai_cognition_selection_is_lazy(self) -> None:
+        args = build_parser().parse_args(["--cognition", "openai-responses"])
+        with patch.object(OpenAIResponsesBackend, "_get_client") as get_client:
+            backend = build_cognition_backend(args)
+        self.assertIsInstance(backend, OpenAIResponsesBackend)
+        get_client.assert_not_called()
 
     def test_optional_startup_prompt(self) -> None:
         args = build_parser().parse_args(["Good morning, Mira."])

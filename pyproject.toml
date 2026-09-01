@@ -5,3 +5,7 @@ description = "Reusable software runtime for embodied agents"
 requires-python = ">=3.13"
 dependencies = []
 
+[project.optional-dependencies]
+openai = [
+    "openai>=3.6,<4",
+]
