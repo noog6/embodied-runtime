@@ -3,11 +3,16 @@
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+import json
 import logging
+import math
 
 from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.cognition import (
     CognitionContext,
+    CognitionToolCall,
+    CognitionToolDefinition,
+    CognitionToolResult,
     TextCognitionBackend,
     compose_cognition_instructions,
 )
@@ -30,6 +35,20 @@ from embodied_runtime.platform import (
 from embodied_runtime.state import BodyState, LifecycleState, PresenceState, RuntimeState
 
 LOGGER = logging.getLogger(__name__)
+
+ORIENT_BODY_TOOL = CognitionToolDefinition(
+    name="orient_body",
+    description="Request an absolute semantic body orientation using numeric degrees.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "yaw_degrees": {"type": "number"},
+            "pitch_degrees": {"type": "number"},
+        },
+        "required": ["yaw_degrees", "pitch_degrees"],
+        "additionalProperties": False,
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -282,9 +301,16 @@ class RobotApplication:
         instructions = compose_cognition_instructions(
             self.cognition_context(), self.options.startup_prompt
         )
+        tools = self.cognition_tools()
         LOGGER.info("[COGNITION] backend=%s request=started", backend.identifier)
         try:
-            response = await backend.respond(message, instructions=instructions)
+            response = await backend.respond(
+                message,
+                instructions=instructions,
+                tools=tools,
+                tool_executor=self._execute_cognition_tool if tools else None,
+                refreshed_instructions=self._cognition_instructions if tools else None,
+            )
         except Exception:
             LOGGER.warning("[COGNITION] backend=%s request=failed", backend.identifier)
             raise
@@ -294,6 +320,70 @@ class RobotApplication:
             len(response),
         )
         return response
+
+    def _cognition_instructions(self) -> str:
+        return compose_cognition_instructions(
+            self.cognition_context(), self.options.startup_prompt
+        )
+
+    def cognition_tools(self) -> tuple[CognitionToolDefinition, ...]:
+        """Project currently safe cognition capabilities at request time."""
+        body = self.body_backend
+        if (
+            body is None
+            or body.is_physical
+            or "orientation" not in body.capabilities
+        ):
+            return ()
+        return (ORIENT_BODY_TOOL,)
+
+    async def _execute_cognition_tool(
+        self, call: CognitionToolCall
+    ) -> CognitionToolResult:
+        LOGGER.info("[COGNITION] tool=%s status=requested", call.name)
+        if (
+            call.name != ORIENT_BODY_TOOL.name
+            or ORIENT_BODY_TOOL not in self.cognition_tools()
+        ):
+            return self._rejected_tool(call.name, "tool is not available")
+        try:
+            arguments = json.loads(call.arguments)
+            if not isinstance(arguments, dict):
+                raise ValueError("arguments must be a JSON object")
+            if set(arguments) != {"yaw_degrees", "pitch_degrees"}:
+                raise ValueError("exactly yaw_degrees and pitch_degrees are required")
+            yaw = arguments["yaw_degrees"]
+            pitch = arguments["pitch_degrees"]
+            if any(type(value) not in (int, float) for value in (yaw, pitch)):
+                raise ValueError("yaw_degrees and pitch_degrees must be numbers")
+            if not all(math.isfinite(value) for value in (yaw, pitch)):
+                raise ValueError("yaw_degrees and pitch_degrees must be finite")
+            result = await self.set_body_orientation(
+                yaw_degrees=yaw, pitch_degrees=pitch
+            )
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
+            return self._rejected_tool(call.name, str(error))
+        LOGGER.info(
+            "[COGNITION] tool=%s status=applied yaw_deg=%s pitch_deg=%s",
+            call.name, result.yaw_degrees, result.pitch_degrees,
+        )
+        return CognitionToolResult(
+            json.dumps(
+                {
+                    "status": "applied",
+                    "yaw_degrees": result.yaw_degrees,
+                    "pitch_degrees": result.pitch_degrees,
+                },
+                sort_keys=True,
+            )
+        )
+
+    @staticmethod
+    def _rejected_tool(name: str, error: str) -> CognitionToolResult:
+        LOGGER.info("[COGNITION] tool=%s status=rejected", name)
+        return CognitionToolResult(
+            json.dumps({"status": "rejected", "error": error}, sort_keys=True)
+        )
 
     def cognition_context(self) -> CognitionContext:
         """Copy an allow-listed projection of authoritative state for one request."""
