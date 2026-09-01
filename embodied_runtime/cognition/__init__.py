@@ -2,6 +2,9 @@
 
 from embodied_runtime.cognition.base import (
     CognitionError,
+    CognitionToolCall,
+    CognitionToolDefinition,
+    CognitionToolResult,
     CognitionUnavailableError,
     TextCognitionBackend,
 )
@@ -13,6 +16,9 @@ from embodied_runtime.cognition.context import (
 __all__ = [
     "CognitionContext",
     "CognitionError",
+    "CognitionToolCall",
+    "CognitionToolDefinition",
+    "CognitionToolResult",
     "CognitionUnavailableError",
     "TextCognitionBackend",
     "compose_cognition_instructions",

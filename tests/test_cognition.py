@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 from dataclasses import FrozenInstanceError, fields
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import (
     CognitionContext,
     CognitionError,
+    CognitionToolCall,
+    CognitionToolResult,
     TextCognitionBackend,
     compose_cognition_instructions,
 )
@@ -69,8 +72,12 @@ class FakeCognition(TextCognitionBackend):
         self.response = response
         self.requests = []
 
-    async def respond(self, message, *, instructions=None):
-        self.requests.append((message, instructions))
+    async def respond(
+        self, message, *, instructions=None, tools=(), tool_executor=None,
+        refreshed_instructions=None,
+    ):
+        self.requests.append((message, instructions, tools, tool_executor,
+                              refreshed_instructions))
         return self.response
 
 
@@ -109,7 +116,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         app.events.publish = record
         self.assertEqual(await app.request_cognition("hello"), "unchanged response")
-        message, instructions = backend.requests[0]
+        message, instructions, tools, executor, refresh = backend.requests[0]
         self.assertEqual(message, "hello")
         self.assertTrue(
             instructions.startswith(
@@ -119,6 +126,9 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(app.runtime_state, state)
         self.assertEqual(published, [])
+        self.assertEqual(tools, ())
+        self.assertIsNone(executor)
+        self.assertIsNone(refresh)
         await app.stop()
 
     async def test_absent_prompt_still_passes_runtime_context(self):
@@ -190,17 +200,132 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
             await app.request_cognition("hello")
         await app.stop()
 
+    async def test_tool_definition_and_request_time_safety_gate(self):
+        virtual = VirtualBodyBackend()
+        app = self.make_application(FakeCognition(), body=virtual)
+        (tool,) = app.cognition_tools()
+        self.assertEqual(tool.name, "orient_body")
+        self.assertEqual(set(tool.parameters["properties"]), {
+            "yaw_degrees", "pitch_degrees",
+        })
+        self.assertEqual(set(tool.parameters["required"]), {
+            "yaw_degrees", "pitch_degrees",
+        })
+        self.assertFalse(tool.parameters["additionalProperties"])
+        self.assertEqual(self.make_application(FakeCognition()).cognition_tools(), ())
+
+        class NoOrientation(VirtualBodyBackend):
+            capabilities = ()
+
+        class PhysicalOrientation(VirtualBodyBackend):
+            is_physical = True
+
+        self.assertEqual(
+            self.make_application(FakeCognition(), body=NoOrientation()).cognition_tools(),
+            (),
+        )
+        physical = self.make_application(
+            FakeCognition(), body=PhysicalOrientation()
+        )
+        self.assertEqual(physical.cognition_tools(), ())
+        await physical.start()
+        result = await physical._execute_cognition_tool(CognitionToolCall(
+            "orient_body", '{"yaw_degrees":35,"pitch_degrees":-10}'
+        ))
+        self.assertEqual(json.loads(result.output)["status"], "rejected")
+        self.assertEqual(physical.runtime_state.body.yaw_degrees, 0.0)
+        await physical.stop()
+
+    async def test_dispatch_validation_success_and_rejection_preserve_state(self):
+        app = self.make_application(FakeCognition(), body=VirtualBodyBackend())
+        await app.start()
+        applied = await app._execute_cognition_tool(CognitionToolCall(
+            "orient_body", '{"yaw_degrees":35,"pitch_degrees":-10}'
+        ))
+        self.assertEqual(json.loads(applied.output), {
+            "status": "applied", "yaw_degrees": 35.0, "pitch_degrees": -10.0,
+        })
+        previous = app.runtime_state.body
+        invalid = (
+            ("orient_body", "{"),
+            ("orient_body", "[]"),
+            ("orient_body", '{"yaw_degrees":1}'),
+            ("orient_body", '{"yaw_degrees":1,"pitch_degrees":2,"extra":3}'),
+            ("orient_body", '{"yaw_degrees":"1","pitch_degrees":2}'),
+            ("orient_body", '{"yaw_degrees":true,"pitch_degrees":2}'),
+            ("orient_body", '{"yaw_degrees":500,"pitch_degrees":0}'),
+            ("unknown", '{"yaw_degrees":1,"pitch_degrees":2}'),
+        )
+        for name, arguments in invalid:
+            with self.subTest(name=name, arguments=arguments):
+                rejected = await app._execute_cognition_tool(
+                    CognitionToolCall(name, arguments)
+                )
+                self.assertEqual(json.loads(rejected.output)["status"], "rejected")
+                self.assertIs(app.runtime_state.body, previous)
+        await app.stop()
+
+    async def test_application_supplies_refreshed_authoritative_grounding(self):
+        class ToolCognition(FakeCognition):
+            async def respond(
+                self, message, *, instructions=None, tools=(), tool_executor=None,
+                refreshed_instructions=None,
+            ):
+                self.requests.append((instructions, tools))
+                result = await tool_executor(CognitionToolCall(
+                    "orient_body", '{"yaw_degrees":35,"pitch_degrees":-10}'
+                ))
+                self.result = result
+                self.after = refreshed_instructions()
+                return "done"
+
+        backend = ToolCognition()
+        app = self.make_application(backend, body=VirtualBodyBackend())
+        await app.start()
+        await app.request_cognition("move")
+        self.assertIn("yaw_deg: 0.0", backend.requests[0][0])
+        self.assertIn("pitch_deg: 0.0", backend.requests[0][0])
+        self.assertIn("yaw_deg: 35.0", backend.after)
+        self.assertIn("pitch_deg: -10.0", backend.after)
+        await app.stop()
+
+    async def test_rejected_action_refreshes_unchanged_authoritative_grounding(self):
+        class RejectingCognition(FakeCognition):
+            async def respond(
+                self, message, *, instructions=None, tools=(), tool_executor=None,
+                refreshed_instructions=None,
+            ):
+                result = await tool_executor(CognitionToolCall(
+                    "orient_body", '{"yaw_degrees":500,"pitch_degrees":0}'
+                ))
+                self.result = json.loads(result.output)
+                self.after = refreshed_instructions()
+                return "rejected"
+
+        backend = RejectingCognition()
+        app = self.make_application(backend, body=VirtualBodyBackend())
+        await app.start()
+        await app.request_cognition("invalid move")
+        self.assertEqual(backend.result["status"], "rejected")
+        self.assertIn("yaw_deg: 0.0", backend.after)
+        self.assertIn("pitch_deg: 0.0", backend.after)
+        self.assertEqual(app.runtime_state.body.yaw_degrees, 0.0)
+        await app.stop()
+
 
 class FakeResponses:
-    def __init__(self, error=None):
+    def __init__(self, error=None, results=None):
         self.calls = []
         self.error = error
+        self.results = list(results or [])
 
     async def create(self, **arguments):
         self.calls.append(arguments)
         if self.error:
             raise self.error
-        return SimpleNamespace(output_text="provider text")
+        if self.results:
+            return self.results.pop(0)
+        return SimpleNamespace(output_text="provider text", output=[], id="response")
 
 
 class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
@@ -217,6 +342,87 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
             responses.calls,
             [{"model": "test-model", "input": "operator text", "instructions": "startup"}],
         )
+
+    async def test_one_function_call_executes_once_and_continues_with_result(self):
+        first = SimpleNamespace(
+            id="response-1", output_text="", output=[SimpleNamespace(
+                type="function_call", name="orient_body", call_id="call-7",
+                arguments='{"yaw_degrees":35,"pitch_degrees":-10}',
+            )],
+        )
+        final = SimpleNamespace(id="response-2", output_text="applied", output=[])
+        responses = FakeResponses(results=[first, final])
+        backend = OpenAIResponsesBackend(
+            model="test-model", client=SimpleNamespace(responses=responses)
+        )
+        calls = []
+
+        async def execute(call):
+            calls.append(call)
+            return CognitionToolResult('{"status":"applied"}')
+
+        tool = self._tool()
+        result = await backend.respond(
+            "move", instructions="before", tools=(tool,), tool_executor=execute,
+            refreshed_instructions=lambda: "after",
+        )
+        self.assertEqual(result, "applied")
+        self.assertEqual(calls, [CognitionToolCall(
+            "orient_body", '{"yaw_degrees":35,"pitch_degrees":-10}'
+        )])
+        initial, continuation = responses.calls
+        self.assertEqual(initial["tool_choice"], "auto")
+        self.assertFalse(initial["parallel_tool_calls"])
+        self.assertEqual([item["name"] for item in initial["tools"]], ["orient_body"])
+        self.assertEqual(continuation["previous_response_id"], "response-1")
+        self.assertEqual(continuation["instructions"], "after")
+        self.assertEqual(continuation["tool_choice"], "none")
+        self.assertEqual(continuation["input"], [{
+            "type": "function_call_output", "call_id": "call-7",
+            "output": '{"status":"applied"}',
+        }])
+
+    async def test_multiple_calls_execute_none(self):
+        call = lambda identifier: SimpleNamespace(
+            type="function_call", name="orient_body", call_id=identifier,
+            arguments="{}",
+        )
+        responses = FakeResponses(results=[SimpleNamespace(
+            id="response", output_text="", output=[call("a"), call("b")]
+        )])
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        executions = []
+        with self.assertRaisesRegex(CognitionError, "multiple"):
+            await backend.respond(
+                "move", tools=(self._tool(),),
+                tool_executor=lambda invocation: executions.append(invocation),
+                refreshed_instructions=lambda: "fresh",
+            )
+        self.assertEqual(executions, [])
+
+    async def test_text_response_with_tools_does_not_execute(self):
+        responses = FakeResponses()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        executions = []
+        self.assertEqual(await backend.respond(
+            "question", tools=(self._tool(),),
+            tool_executor=lambda invocation: executions.append(invocation),
+            refreshed_instructions=lambda: "fresh",
+        ), "provider text")
+        self.assertEqual(executions, [])
+
+    async def test_continuation_is_scoped_to_each_request(self):
+        responses = FakeResponses()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        await backend.respond("first")
+        await backend.respond("second")
+        self.assertNotIn("previous_response_id", responses.calls[0])
+        self.assertNotIn("previous_response_id", responses.calls[1])
+
+    @staticmethod
+    def _tool():
+        from embodied_runtime.app import ORIENT_BODY_TOOL
+        return ORIENT_BODY_TOOL
 
     async def test_absent_instructions_are_omitted(self):
         responses = FakeResponses()
@@ -277,6 +483,8 @@ class CognitionContextTests(unittest.TestCase):
         self.assertIn("Presence\n  status: unknown\n  source: unknown", first)
         self.assertIn("Camera\n  state: unconfigured", first)
         self.assertNotIn("object at 0x", first)
+        self.assertIn("metadata describes availability only", first)
+        self.assertIn("cannot\ncapture, access, or see images", first)
 
     def test_platform_identity_hardware_and_compact_memory_are_rendered(self):
         app = RobotApplication(

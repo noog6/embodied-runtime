@@ -43,6 +43,8 @@ class CognitionContext:
             "The following context is supplied by the robot runtime and is authoritative",
             "at the moment this request began. Treat unknown or unavailable values",
             "literally. Do not invent missing robot or sensor state.",
+            "Camera resource metadata describes availability only; cognition cannot",
+            "capture, access, or see images unless image data is explicitly supplied.",
             "",
             "Robot",
             f"  id: {self.profile_id}",

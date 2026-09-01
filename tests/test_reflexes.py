@@ -3,6 +3,7 @@ import unittest
 
 from embodied_runtime.app import RobotApplication
 from embodied_runtime.body.virtual import VirtualBodyBackend
+from embodied_runtime.cognition import CognitionToolCall
 from embodied_runtime.events import EventBus, PresenceChanged
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
@@ -163,3 +164,13 @@ class ReflexApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app.state, LifecycleState.RUNNING)
         self.assertTrue(self.app.events.is_running)
         self.app.set_body_orientation = original
+
+    async def test_local_reflex_overrides_cognition_requested_pose(self):
+        result = await self.app._execute_cognition_tool(CognitionToolCall(
+            "orient_body", '{"yaw_degrees":35,"pitch_degrees":-10}'
+        ))
+        self.assertIn('"status": "applied"', result.output)
+        self.assertEqual(self.app.runtime_state.body, BodyState(35.0, -10.0))
+        await self.app.observe_presence(present=True, source="test")
+        await self.wait_for_body_calls(2)
+        self.assertEqual(self.app.runtime_state.body, BodyState(0.0, 0.0))

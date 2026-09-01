@@ -44,13 +44,33 @@ operator text v
 
 `RobotApplication` remains the ownership boundary. It creates a fresh,
 immutable, explicitly allow-listed projection immediately before each request;
-that projection is not a second state owner. The backend receives only text and
-composed instructions, cannot query or mutate the application, and cannot
-request runtime or body capabilities. Context, request, and response text are
-neither state nor events.
+that projection is not a second state owner. Phase 3 adds one explicitly
+projected request-time capability with this ownership path:
+
+```text
+model orient_body request
+          |
+          v
+runtime cognition dispatcher
+          |
+          v
+RobotApplication.set_body_orientation()
+          |
+          v
+BodyBackend -> authoritative RuntimeState
+```
+
+The provider adapter transports the request and runtime-produced result but
+never owns a body backend or state. The application validates availability and
+untrusted arguments, invokes its semantic capability, and refreshes the
+authoritative projection for the final response. Context, requests, tool-call
+identifiers, and responses are neither state nor events.
 
 Small deterministic [local reflexes](reflexes.md) may consume semantic events
 and request semantic application capabilities. The implemented path is sensing
 or semantic observation -> authoritative state and event -> reflex -> semantic
 capability -> body. A reflex neither owns state nor accesses a body backend
 directly, and configured reflex lifecycles belong to the application.
+Reflexes and cognition remain independent even though both use the same
+application-owned semantic capability; future cognition sees any pose a reflex
+subsequently establishes.
