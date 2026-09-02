@@ -15,6 +15,14 @@ Then start the local console:
 python main.py --cognition openai-responses --console
 ```
 
+Add `--initiative` to opt into Phase 6 read-only attention. An autonomous pass
+uses the same provider-neutral `TextCognitionBackend` boundary with a
+runtime-generated request and attention section, but exactly `tools=()`, no
+tool executor, and no refreshed-instructions callback. It creates no provider
+conversation or background session and does not enter WorkingMemory. Requests
+remain independent; `previous_response_id` stays confined to the continuation
+inside one ordinary tool-enabled operator ask.
+
 One independent request can be made without shell quoting:
 
 ```text
@@ -64,5 +72,5 @@ The adapter is initialized lazily on the first request. A missing SDK, missing
 key, or provider failure affects that request only and does not stop the runtime.
 Independent requests gain continuity only because the runtime explicitly
 supplies its working-memory snapshot. This phase adds no durable storage, task
-manager, planning, initiative, images, perception, audio, streaming, or
+manager, planning, autonomous action, images, perception, audio, streaming, or
 Realtime API integration.

@@ -43,6 +43,25 @@ capability is added. See
 
 Realtime, chained, and hybrid approaches remain open candidates.
 
+## Goal-directed attention and read-only initiative
+
+Phase 6 is explicitly opt-in and transition-driven:
+
+```text
+semantic runtime event + ActiveGoal
+                 -> deterministic attention gate
+                 -> one read-only autonomous cognition request
+```
+
+Only a completed semantic orientation change whose runtime-owned source begins
+with `reflex:` can wake this path, and only while a goal exists. The request is
+given fresh Runtime context, ActiveGoal, and bounded operator WorkingMemory plus
+a provider-neutral attention stimulus. It receives no tools or executor, adds no
+memory turn, changes no goal or state, and is never retried. One request may be
+in flight; later events during it are suppressed rather than queued. Initiative
+requires `--initiative` as well as a cognition backend. There is no polling,
+pursuit loop, provider session, planning, or autonomous action.
+
 ## Direct speech-to-speech
 
 Examples include OpenAI Realtime-style models and future comparable systems.

@@ -21,6 +21,11 @@ Events announce discrete facts and transitions; they neither own state nor
 serve as a state history. Diagnostics are read-only projections of the latest
 authoritative state.
 
+Attention's latest trigger, source, state, and optional bounded response are
+volatile developer diagnostics, not `RuntimeState`, WorkingMemory, ActiveGoal,
+persistent memory, provider state, or physical truth. They clear on restart and
+are never fed into later cognition.
+
 Platform state describes the host computer and operating system independently
 of the robot hardware backend. A Raspberry Pi host can therefore run the
 virtual hardware backend. Platform observations are captured at startup, on

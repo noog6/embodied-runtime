@@ -59,6 +59,7 @@ class PresenceCenteringReflexTests(unittest.IsolatedAsyncioTestCase):
                 await capabilities.called.wait()
                 self.assertEqual(capabilities.calls, [{
                     "yaw_degrees": 0.0, "pitch_degrees": 0.0,
+                    "source": "reflex:presence_centering",
                 }])
                 await reflex.stop()
                 await bus.stop()

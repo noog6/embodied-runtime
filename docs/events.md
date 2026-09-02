@@ -1,5 +1,13 @@
 # Events
 
+`BodyOrientationChanged` announces completion of one semantic logical
+orientation transition. It carries previous and resulting yaw/pitch plus the
+inherited runtime-owned `source`. The backend completes and authoritative
+`RuntimeState.body` is replaced before publication. A successful same-pose
+request and a failed request emit nothing. This event is a fact, not the
+authoritative pose, servo interpolation, PWM output, telemetry, motion-loop
+update, or a high-rate pose stream.
+
 Runtime communication distinguishes three concepts:
 
 - **State** describes what is true now, such as battery voltage, current pose,
@@ -30,8 +38,9 @@ Continuous platform telemetry does not belong on the `EventBus`.
 `PresenceChanged(previous_present, present)` announces semantic presence
 transitions. The application installs the new authoritative `PresenceState`
 before publishing, so handlers see the new truth. Repeated observations with
-the same boolean value produce no duplicate transition. Body orientation is
-authoritative state and deliberately does not produce an event.
+the same boolean value produce no duplicate transition. Body orientation
+remains authoritative state; only its completed, changed semantic transition
+produces the narrowly scoped event described above.
 
 Semantic events may drive deterministic [local reflexes](reflexes.md). They
 remain facts, not commands: the reflex independently translates a relevant fact
