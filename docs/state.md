@@ -11,6 +11,12 @@ It retains bounded, potentially stale history from completed cognition asks;
 not an event/audit history and does not capture reflex, presence, platform,
 camera, or console body activity.
 
+Application-owned `ActiveGoal` is also explicitly **not** part of
+`RuntimeState`. It is the single current, volatile intentional commitment, not
+a physical fact. `WorkingMemory` remains historical context and may remember
+old goal discussions without owning the active goal. Neither abstraction
+changes physical-state ownership.
+
 Events announce discrete facts and transitions; they neither own state nor
 serve as a state history. Diagnostics are read-only projections of the latest
 authoritative state.

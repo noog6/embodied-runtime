@@ -110,6 +110,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  ask <message>                  Send one text cognition request\n"
             "  memory                         Show working-memory metadata\n"
             "  memory clear                   Clear session working memory\n"
+            "  goal                           Show current active goal\n"
+            "  goal clear                     Clear current active goal\n"
             "  help                           Show this help\n"
             "  quit                           Stop the console and runtime\n"
             "  exit                           Stop the console and runtime"
@@ -134,6 +136,25 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertIs(self.app.runtime_state, state)
         self.assertEqual(self.app.working_memory.snapshot(), ())
+
+    def test_goal_show_and_clear_preserve_state_and_memory(self):
+        state = self.app.runtime_state
+        self.app.working_memory.append("old", "history")
+        memory = self.app.working_memory.snapshot()
+        self.assertEqual(self.console.execute("goal"), (
+            "Active goal\n  state:         none", False
+        ))
+        self.app.set_goal("keep watching")
+        self.assertEqual(self.console.execute("goal"), (
+            "Active goal\n  state:         active\n  description:   keep watching", False
+        ))
+        self.assertEqual(self.console.execute("goal clear"), (
+            "Active goal\n  cleared:       true", False
+        ))
+        self.assertIsNone(self.app.active_goal)
+        self.assertIs(self.app.runtime_state, state)
+        self.assertEqual(self.app.working_memory.snapshot(), memory)
+        self.assertTrue(self.app.events.is_running)
 
     async def test_ask_uses_raw_payload_and_displays_response(self):
         calls = []

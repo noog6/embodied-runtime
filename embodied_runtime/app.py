@@ -9,6 +9,7 @@ import math
 
 from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.cognition import (
+    ActiveGoal,
     CognitionContext,
     CognitionToolCall,
     CognitionToolDefinition,
@@ -17,6 +18,7 @@ from embodied_runtime.cognition import (
     WorkingMemory,
     WorkingMemoryToolOutcome,
     compose_cognition_instructions,
+    validate_goal_description,
 )
 from embodied_runtime.events import (
     ApplicationStarted,
@@ -48,6 +50,33 @@ ORIENT_BODY_TOOL = CognitionToolDefinition(
             "pitch_degrees": {"type": "number"},
         },
         "required": ["yaw_degrees", "pitch_degrees"],
+        "additionalProperties": False,
+    },
+)
+
+SET_GOAL_TOOL = CognitionToolDefinition(
+    name="set_goal",
+    description=(
+        "Establish one ongoing goal only when the operator clearly asks "
+        "to adopt or retain an objective. Setting it does not perform it."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"description": {"type": "string", "maxLength": 500}},
+        "required": ["description"],
+        "additionalProperties": False,
+    },
+)
+
+RESOLVE_GOAL_TOOL = CognitionToolDefinition(
+    name="resolve_goal",
+    description="Resolve the current active goal as completed or cancelled.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "outcome": {"type": "string", "enum": ["completed", "cancelled"]}
+        },
+        "required": ["outcome"],
         "additionalProperties": False,
     },
 )
@@ -108,6 +137,7 @@ class RobotApplication:
         self.working_memory = (
             working_memory if working_memory is not None else WorkingMemory()
         )
+        self._active_goal: ActiveGoal | None = None
         self._reflexes = tuple(reflexes)
         self._started_reflexes: list[Reflex] = []
         self._runtime_state = RuntimeState(LifecycleState.CREATED)
@@ -129,6 +159,42 @@ class RobotApplication:
     def state(self) -> LifecycleState:
         """Compatibility view of the authoritative lifecycle state."""
         return self._runtime_state.lifecycle
+
+    @property
+    def active_goal(self) -> ActiveGoal | None:
+        return self._active_goal
+
+    def set_goal(self, description: object) -> ActiveGoal:
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Setting a goal requires a running application")
+        normalized = validate_goal_description(description)
+        if self._active_goal is not None:
+            raise RuntimeError("an active goal already exists")
+        goal = ActiveGoal(normalized)
+        self._active_goal = goal
+        LOGGER.info("[GOAL] status=active chars=%s", len(normalized))
+        return goal
+
+    def resolve_goal(self, outcome: object) -> ActiveGoal:
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Resolving a goal requires a running application")
+        if outcome not in ("completed", "cancelled") or not isinstance(outcome, str):
+            raise ValueError("outcome must be completed or cancelled")
+        if self._active_goal is None:
+            raise RuntimeError("no active goal exists")
+        previous = self._active_goal
+        self._active_goal = None
+        LOGGER.info("[GOAL] status=%s", outcome)
+        return previous
+
+    def clear_goal(self) -> bool:
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Clearing a goal requires a running application")
+        cleared = self._active_goal is not None
+        self._active_goal = None
+        if cleared:
+            LOGGER.info("[GOAL] status=cleared")
+        return cleared
 
     def _set_lifecycle(self, lifecycle: LifecycleState) -> None:
         self._runtime_state = replace(self._runtime_state, lifecycle=lifecycle)
@@ -339,28 +405,39 @@ class RobotApplication:
         if working_memory is None:
             working_memory = self.working_memory.snapshot()
         return compose_cognition_instructions(
-            self.cognition_context(), self.options.startup_prompt, working_memory
+            self.cognition_context(), self.options.startup_prompt, working_memory,
+            self._active_goal,
         )
 
     def cognition_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project currently safe cognition capabilities at request time."""
         body = self.body_backend
+        tools = []
         if (
-            body is None
-            or body.is_physical
-            or "orientation" not in body.capabilities
+            body is not None
+            and not body.is_physical
+            and "orientation" in body.capabilities
         ):
-            return ()
-        return (ORIENT_BODY_TOOL,)
+            tools.append(ORIENT_BODY_TOOL)
+        tools.append(SET_GOAL_TOOL if self._active_goal is None else RESOLVE_GOAL_TOOL)
+        return tuple(tools)
 
     async def _execute_cognition_tool(
         self, call: CognitionToolCall
     ) -> CognitionToolResult:
         LOGGER.info("[COGNITION] tool=%s status=requested", call.name)
-        if (
-            call.name != ORIENT_BODY_TOOL.name
-            or ORIENT_BODY_TOOL not in self.cognition_tools()
-        ):
+        if call.name == ORIENT_BODY_TOOL.name:
+            return await self._execute_orient_body(call)
+        if call.name == SET_GOAL_TOOL.name:
+            return self._execute_set_goal(call)
+        if call.name == RESOLVE_GOAL_TOOL.name:
+            return self._execute_resolve_goal(call)
+        return self._rejected_tool(call.name, "tool is not available")
+
+    async def _execute_orient_body(
+        self, call: CognitionToolCall
+    ) -> CognitionToolResult:
+        if ORIENT_BODY_TOOL not in self.cognition_tools():
             return self._rejected_tool(call.name, "tool is not available")
         try:
             arguments = json.loads(call.arguments)
@@ -391,6 +468,39 @@ class RobotApplication:
                     "pitch_degrees": result.pitch_degrees,
                 },
                 sort_keys=True,
+            )
+        )
+
+    def _tool_arguments(self, call: CognitionToolCall, expected: set[str]) -> dict:
+        arguments = json.loads(call.arguments)
+        if not isinstance(arguments, dict):
+            raise ValueError("arguments must be a JSON object")
+        if set(arguments) != expected:
+            raise ValueError(f"exactly {', '.join(sorted(expected))} is required")
+        return arguments
+
+    def _execute_set_goal(self, call: CognitionToolCall) -> CognitionToolResult:
+        try:
+            arguments = self._tool_arguments(call, {"description"})
+            goal = self.set_goal(arguments["description"])
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
+            return self._rejected_tool(call.name, str(error))
+        return CognitionToolResult(
+            json.dumps(
+                {"status": "active", "description": goal.description}, sort_keys=True
+            )
+        )
+
+    def _execute_resolve_goal(self, call: CognitionToolCall) -> CognitionToolResult:
+        try:
+            arguments = self._tool_arguments(call, {"outcome"})
+            outcome = arguments["outcome"]
+            goal = self.resolve_goal(outcome)
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
+            return self._rejected_tool(call.name, str(error))
+        return CognitionToolResult(
+            json.dumps(
+                {"status": outcome, "description": goal.description}, sort_keys=True
             )
         )
 

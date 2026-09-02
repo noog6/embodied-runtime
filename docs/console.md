@@ -15,6 +15,9 @@ The supported commands are exactly:
 - `memory` for working-memory count/capacity metadata (not retained text);
 - `memory clear` to synchronously forget all retained session turns without
   changing runtime state or configured backends;
+- `goal` to show the current intentional state;
+- `goal clear` to apply an explicit local operator override without changing
+  RuntimeState or WorkingMemory;
 - `help` (or `?`), `quit`, and `exit`.
 
 Only the `simulate` namespace denotes synthetic input. It translates to the

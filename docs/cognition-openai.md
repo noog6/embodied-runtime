@@ -37,10 +37,19 @@ operator request, operator instructions, and fresh Runtime context have
 precedence. Clearing memory or restarting the process removes this continuity.
 The provider still has no cross-request conversation or retained session.
 
-Responses function calling exposes exactly one semantic capability,
-`orient_body`, only when the current body supports orientation and is
-nonphysical. The adapter offers strict numeric `yaw_degrees` and
-`pitch_degrees` arguments, automatic tool choice, and disabled parallel calls.
+Each ask also receives the current application-owned `ActiveGoal`, separately
+rendered from Runtime context and Working memory. The provider has no goal,
+task, or conversation store. Provider-neutral `set_goal` and `resolve_goal`
+calls use the existing bounded runtime dispatcher; the OpenAI adapter remains
+transport-only. A goal transition is re-grounded for the final response but
+starts no autonomous cognition or action.
+
+Responses function calling projects request-time semantic capabilities.
+`orient_body` is offered only when the current body supports orientation and is
+nonphysical; independently, `set_goal` is offered with no active goal and
+`resolve_goal` with an active goal. The adapter offers strict numeric
+`yaw_degrees` and `pitch_degrees` arguments, automatic tool choice, and disabled
+parallel calls.
 It transports at most one request to the runtime-owned dispatcher, which
 validates untrusted arguments and invokes
 `RobotApplication.set_body_orientation()`. The provider never receives a body
@@ -54,5 +63,6 @@ retained nor reused and does not provide conversation memory.
 The adapter is initialized lazily on the first request. A missing SDK, missing
 key, or provider failure affects that request only and does not stop the runtime.
 Independent requests gain continuity only because the runtime explicitly
-supplies its working-memory snapshot. This phase adds no other tools, durable
-storage, images, perception, audio, streaming, or Realtime API integration.
+supplies its working-memory snapshot. This phase adds no durable storage, task
+manager, planning, initiative, images, perception, audio, streaming, or
+Realtime API integration.
