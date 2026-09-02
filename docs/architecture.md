@@ -66,6 +66,26 @@ untrusted arguments, invokes its semantic capability, and refreshes the
 authoritative projection for the final response. Context, requests, tool-call
 identifiers, and responses are neither state nor events.
 
+For cognition continuity, `RobotApplication` separately owns current truth and
+bounded history:
+
+```text
+RobotApplication
+  |- RuntimeState       current authoritative truth
+  |- WorkingMemory      bounded cognition history
+
+RuntimeState --------\
+                      \
+WorkingMemory ---------> cognition request
+                      /
+operator request -----/
+```
+
+`WorkingMemory` is a volatile FIFO of completed cognition interactions. It is
+neither part of `RuntimeState` nor EventBus history, and unrelated state changes
+do not create memory turns. Each request receives a fresh current-state
+projection plus a snapshot of memory that predates that request.
+
 Small deterministic [local reflexes](reflexes.md) may consume semantic events
 and request semantic application capabilities. The implemented path is sensing
 or semantic observation -> authoritative state and event -> reflex -> semantic

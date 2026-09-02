@@ -108,12 +108,32 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  presence                       Show current presence state\n"
             "  simulate presence <on|off>     Inject virtual presence\n"
             "  ask <message>                  Send one text cognition request\n"
+            "  memory                         Show working-memory metadata\n"
+            "  memory clear                   Clear session working memory\n"
             "  help                           Show this help\n"
             "  quit                           Stop the console and runtime\n"
             "  exit                           Stop the console and runtime"
         )
         self.assertEqual(self.console.execute("help"), (expected, False))
         self.assertEqual(self.console.execute("?"), (expected, False))
+
+    def test_memory_metadata_and_clear_leave_runtime_state_untouched(self):
+        self.app.working_memory.append("one", "answer")
+        self.app.working_memory.append("two", "answer")
+        state = self.app.runtime_state
+        report, stop = self.console.execute("memory")
+        self.assertFalse(stop)
+        self.assertEqual(report, (
+            "Working memory\n"
+            "  turns:         2\n"
+            "  capacity:      6\n"
+            "  text_limit:    2000"
+        ))
+        self.assertEqual(self.console.execute("memory clear"), (
+            "Working memory\n  cleared:       2\n  turns:         0", False
+        ))
+        self.assertIs(self.app.runtime_state, state)
+        self.assertEqual(self.app.working_memory.snapshot(), ())
 
     async def test_ask_uses_raw_payload_and_displays_response(self):
         calls = []

@@ -1,13 +1,26 @@
 # AI stack
 
-The implemented AI experiment uses the OpenAI Responses API for grounded text
-and one bounded semantic capability request:
+The implemented AI experiment uses the OpenAI Responses API for grounded text,
+bounded runtime-owned working memory, and one semantic capability request:
 
 ```text
 operator text + request-time runtime projection -> text cognition
     -> semantic capability request -> runtime validation/execution
     -> refreshed authoritative state -> final cognition response
 ```
+
+Across asks, the application explicitly composes the current runtime projection,
+the current operator request, and up to six completed historical cognition turns:
+
+```text
+current runtime projection + bounded runtime-owned working memory
+                           + current operator request -> cognition
+```
+
+Provider requests remain independent. This volatile FIFO supplies continuity
+without provider conversations. Historical context may be stale, so the fresh
+authoritative runtime projection always wins for current robot facts. There is
+no persistent memory, retrieval, embedding, or summarization layer.
 
 It exists to test the responsibility boundary between the runtime and cognition;
 it does not select the reference robot's permanent AI architecture. The
@@ -17,7 +30,8 @@ is neither handed to nor queried by the cognition backend. Each request remains
 independent. AI intent is advisory: the runtime decides whether and how an
 action occurs. Only absolute orientation on a nonphysical body is exposed, with
 at most one execution per request; cognition-driven physical actuation is not
-approved. No memory, images, Realtime, or audio capability is added. See
+approved. No model-controlled or persistent memory, images, Realtime, or audio
+capability is added. See
 [OpenAI text cognition setup](cognition-openai.md).
 
 Realtime, chained, and hybrid approaches remain open candidates.

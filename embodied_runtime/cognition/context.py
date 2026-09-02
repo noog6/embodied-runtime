@@ -1,6 +1,12 @@
 """Allow-listed, immutable grounding for one cognition request."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+from embodied_runtime.cognition.working_memory import (
+    WorkingMemoryTurn,
+    render_working_memory,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,13 +128,16 @@ class CognitionContext:
 
 
 def compose_cognition_instructions(
-    context: CognitionContext, startup_prompt: str | None
+    context: CognitionContext,
+    startup_prompt: str | None,
+    working_memory: Sequence[WorkingMemoryTurn] = (),
 ) -> str:
     """Keep operator instructions distinct from machine-generated grounding."""
-    rendered = context.render()
-    if startup_prompt is None:
-        return rendered
-    return f"Operator instructions\n---------------------\n{startup_prompt}\n\n{rendered}"
+    sections = []
+    if startup_prompt is not None:
+        sections.append(f"Operator instructions\n---------------------\n{startup_prompt}")
+    sections.extend((context.render(), render_working_memory(working_memory)))
+    return "\n\n".join(sections)
 
 
 def _value(value: object | None, *, missing: str = "unavailable") -> str:

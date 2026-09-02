@@ -14,6 +14,8 @@ from embodied_runtime.cognition import (
     CognitionToolDefinition,
     CognitionToolResult,
     TextCognitionBackend,
+    WorkingMemory,
+    WorkingMemoryToolOutcome,
     compose_cognition_instructions,
 )
 from embodied_runtime.events import (
@@ -94,6 +96,7 @@ class RobotApplication:
         reflexes: Sequence[Reflex] = (),
         camera_backend: CameraBackend | None = None,
         cognition_backend: TextCognitionBackend | None = None,
+        working_memory: WorkingMemory | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -102,6 +105,9 @@ class RobotApplication:
         self.body_backend = body_backend
         self.camera_backend = camera_backend
         self._cognition_backend = cognition_backend
+        self.working_memory = (
+            working_memory if working_memory is not None else WorkingMemory()
+        )
         self._reflexes = tuple(reflexes)
         self._started_reflexes: list[Reflex] = []
         self._runtime_state = RuntimeState(LifecycleState.CREATED)
@@ -298,18 +304,25 @@ class RobotApplication:
         if not message or not message.strip():
             raise ValueError("Cognition message must be non-empty")
         backend = self._cognition_backend
-        instructions = compose_cognition_instructions(
-            self.cognition_context(), self.options.startup_prompt
-        )
+        prior_memory = self.working_memory.snapshot()
+        instructions = self._cognition_instructions(prior_memory)
         tools = self.cognition_tools()
+        tool_outcomes: list[WorkingMemoryToolOutcome] = []
+
+        async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
+            result = await self._execute_cognition_tool(call)
+            tool_outcomes.append(WorkingMemoryToolOutcome(call.name, result.output))
+            return result
         LOGGER.info("[COGNITION] backend=%s request=started", backend.identifier)
         try:
             response = await backend.respond(
                 message,
                 instructions=instructions,
                 tools=tools,
-                tool_executor=self._execute_cognition_tool if tools else None,
-                refreshed_instructions=self._cognition_instructions if tools else None,
+                tool_executor=execute_tool if tools else None,
+                refreshed_instructions=(
+                    lambda: self._cognition_instructions(prior_memory)
+                ) if tools else None,
             )
         except Exception:
             LOGGER.warning("[COGNITION] backend=%s request=failed", backend.identifier)
@@ -319,11 +332,14 @@ class RobotApplication:
             backend.identifier,
             len(response),
         )
+        self.working_memory.append(message, response, tool_outcomes)
         return response
 
-    def _cognition_instructions(self) -> str:
+    def _cognition_instructions(self, working_memory=None) -> str:
+        if working_memory is None:
+            working_memory = self.working_memory.snapshot()
         return compose_cognition_instructions(
-            self.cognition_context(), self.options.startup_prompt
+            self.cognition_context(), self.options.startup_prompt, working_memory
         )
 
     def cognition_tools(self) -> tuple[CognitionToolDefinition, ...]:

@@ -67,6 +67,15 @@ class RuntimeConsole:
             return self._camera(), False
         if vocabulary == ["presence"]:
             return self._presence(), False
+        if vocabulary == ["memory"]:
+            return self._memory(), False
+        if vocabulary == ["memory", "clear"]:
+            cleared = self._application.working_memory.clear()
+            return "\n".join((
+                "Working memory",
+                f"  cleared:       {cleared}",
+                "  turns:         0",
+            )), False
         if (
             vocabulary[:2] == ["body", "orient"]
             or vocabulary[:2] == ["simulate", "presence"]
@@ -157,11 +166,22 @@ class RuntimeConsole:
                 "  presence                       Show current presence state",
                 "  simulate presence <on|off>     Inject virtual presence",
                 "  ask <message>                  Send one text cognition request",
+                "  memory                         Show working-memory metadata",
+                "  memory clear                   Clear session working memory",
                 "  help                           Show this help",
                 "  quit                           Stop the console and runtime",
                 "  exit                           Stop the console and runtime",
             )
         )
+
+    def _memory(self) -> str:
+        memory = self._application.working_memory
+        return "\n".join((
+            "Working memory",
+            f"  turns:         {len(memory)}",
+            f"  capacity:      {memory.capacity}",
+            f"  text_limit:    {memory.text_limit}",
+        ))
 
     def _status(self) -> str:
         summary = self._application.summary()
