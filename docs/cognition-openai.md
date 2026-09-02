@@ -7,9 +7,11 @@ SDK nor an API key. Install the project with only this optional integration:
 python -m pip install -e '.[openai]'
 ```
 
-Set `OPENAI_API_KEY` in the environment and do not commit secret values. The
-default experimental model is `gpt-5.6-luna`; `OPENAI_MODEL` may override it.
-Then start the local console:
+`OPENAI_API_KEY` remains the runtime's application-facing authentication
+interface. Do not commit it or put it in source or command-line arguments. See
+[Secrets and API keys](secrets.md) for the recommended Raspberry Pi and local
+development storage and delivery procedure. The default experimental model is
+`gpt-5.6-luna`; `OPENAI_MODEL` may override it. Then start the local console:
 
 ```sh
 python main.py --cognition openai-responses --console
