@@ -5,6 +5,12 @@ the current immutable `RuntimeState` snapshot and replaces that snapshot
 explicitly when lifecycle or platform observations change. Callers may inspect
 the snapshot, but cannot mutate it.
 
+Application-owned `WorkingMemory` is explicitly **not** part of `RuntimeState`.
+It retains bounded, potentially stale history from completed cognition asks;
+`RuntimeState` remains the authority for what is currently true. Memory is also
+not an event/audit history and does not capture reflex, presence, platform,
+camera, or console body activity.
+
 Events announce discrete facts and transitions; they neither own state nor
 serve as a state history. Diagnostics are read-only projections of the latest
 authoritative state.

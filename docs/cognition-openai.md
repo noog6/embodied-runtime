@@ -30,6 +30,13 @@ not the OpenAI adapter, selects and renders this context. Camera metadata
 indicates resource availability only: cognition cannot capture, access, or see
 images unless image data is explicitly supplied. No frame is captured or sent.
 
+The application also explicitly renders up to six prior completed cognition
+interactions as a separate working-memory section. This session-local FIFO is
+bounded and volatile; historical text is quoted as data, while the current
+operator request, operator instructions, and fresh Runtime context have
+precedence. Clearing memory or restarting the process removes this continuity.
+The provider still has no cross-request conversation or retained session.
+
 Responses function calling exposes exactly one semantic capability,
 `orient_body`, only when the current body supports orientation and is
 nonphysical. The adapter offers strict numeric `yaw_degrees` and
@@ -46,5 +53,6 @@ retained nor reused and does not provide conversation memory.
 
 The adapter is initialized lazily on the first request. A missing SDK, missing
 key, or provider failure affects that request only and does not stop the runtime.
-Requests have no cross-request history or continuity. This phase adds no other
-tools, images, perception, audio, streaming, or Realtime API integration.
+Independent requests gain continuity only because the runtime explicitly
+supplies its working-memory snapshot. This phase adds no other tools, durable
+storage, images, perception, audio, streaming, or Realtime API integration.

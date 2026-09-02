@@ -12,6 +12,9 @@ The supported commands are exactly:
 - `presence` for current semantic presence;
 - `simulate presence <on|off>` for explicitly synthetic development input;
 - `ask <message>` for one independent text cognition request;
+- `memory` for working-memory count/capacity metadata (not retained text);
+- `memory clear` to synchronously forget all retained session turns without
+  changing runtime state or configured backends;
 - `help` (or `?`), `quit`, and `exit`.
 
 Only the `simulate` namespace denotes synthetic input. It translates to the

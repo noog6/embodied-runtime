@@ -12,6 +12,12 @@ from embodied_runtime.cognition.context import (
     CognitionContext,
     compose_cognition_instructions,
 )
+from embodied_runtime.cognition.working_memory import (
+    WorkingMemory,
+    WorkingMemoryToolOutcome,
+    WorkingMemoryTurn,
+    render_working_memory,
+)
 
 __all__ = [
     "CognitionContext",
@@ -21,5 +27,9 @@ __all__ = [
     "CognitionToolResult",
     "CognitionUnavailableError",
     "TextCognitionBackend",
+    "WorkingMemory",
+    "WorkingMemoryToolOutcome",
+    "WorkingMemoryTurn",
     "compose_cognition_instructions",
+    "render_working_memory",
 ]
