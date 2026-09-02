@@ -71,6 +71,8 @@ class RuntimeConsole:
             return self._memory(), False
         if vocabulary == ["goal"]:
             return self._goal(), False
+        if vocabulary == ["attention"]:
+            return self._attention(), False
         if vocabulary == ["goal", "clear"]:
             cleared = self._application.clear_goal()
             return "Active goal\n  cleared:       " + str(cleared).lower(), False
@@ -134,7 +136,7 @@ class RuntimeConsole:
             try:
                 yaw, pitch = float(words[2]), float(words[3])
                 await self._application.set_body_orientation(
-                    yaw_degrees=yaw, pitch_degrees=pitch
+                    yaw_degrees=yaw, pitch_degrees=pitch, source="console"
                 )
             except (ValueError, RuntimeError) as error:
                 return f"Invalid body orientation: {error}.", False
@@ -175,6 +177,7 @@ class RuntimeConsole:
                 "  memory clear                   Clear session working memory",
                 "  goal                           Show current active goal",
                 "  goal clear                     Clear current active goal",
+                "  attention                      Show initiative attention state",
                 "  help                           Show this help",
                 "  quit                           Stop the console and runtime",
                 "  exit                           Stop the console and runtime",
@@ -199,6 +202,17 @@ class RuntimeConsole:
         if goal is not None:
             lines.append(f"  description:   {goal.description}")
         return "\n".join(lines)
+
+    def _attention(self) -> str:
+        status = self._application.attention.status()
+        return "\n".join((
+            "Attention",
+            f"  enabled:       {str(status.enabled).lower()}",
+            f"  state:         {status.state}",
+            f"  last_trigger:  {status.last_trigger or 'none'}",
+            f"  last_source:   {status.last_source or 'none'}",
+            f"  last_response: {status.last_response or 'unavailable'}",
+        ))
 
     def _status(self) -> str:
         summary = self._application.summary()

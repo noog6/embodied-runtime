@@ -73,7 +73,8 @@ current truth, current intention, and bounded history:
 RobotApplication
   |- RuntimeState       current authoritative truth
   |- ActiveGoal         current intentional state (zero or one)
-  |- WorkingMemory      bounded cognition history
+  |- WorkingMemory      bounded operator cognition history
+  |- Attention          deterministic relevance gate
 
 RuntimeState ---------\
 ActiveGoal ------------\
@@ -99,3 +100,9 @@ directly, and configured reflex lifecycles belong to the application.
 Reflexes and cognition remain independent even though both use the same
 application-owned semantic capability; future cognition sees any pose a reflex
 subsequently establishes.
+
+With opt-in initiative, one narrow path is transition-driven and read-only:
+`BodyOrientationChanged` from a local reflex -> attention gate, plus an existing
+`ActiveGoal` -> optional one-shot cognition. Attention does not interpret goal
+text, own state, poll, or act. Autonomous reflection has no semantic tools and
+is not appended to WorkingMemory.

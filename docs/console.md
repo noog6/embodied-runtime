@@ -1,5 +1,11 @@
 # Local runtime console
 
+`attention` reports whether initiative is enabled, its idle/in-flight/completed/
+failed state, the latest trigger and source, and the latest bounded autonomous
+response when available. That response is volatile diagnostic state shown only
+by this command; aggregate `status` and logs exclude its content, and later
+cognition never receives it.
+
 Run `python main.py --console` for the asynchronous local console. Platform
 sampling and heartbeats continue while it waits. Reports read application-owned
 authoritative state and never probe a platform, hardware backend, or body pose.

@@ -43,7 +43,7 @@ InstructionsProvider = Callable[[], str]
 
 
 class TextCognitionBackend(ABC):
-    """One independent text request in, one text response out."""
+    """One independent operator or runtime-generated text request and response."""
 
     identifier: str
 

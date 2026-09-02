@@ -8,6 +8,7 @@ import logging
 import math
 
 from embodied_runtime.body.base import BodyBackend
+from embodied_runtime.attention import AttentionStimulus, GoalAttentionController
 from embodied_runtime.cognition import (
     ActiveGoal,
     CognitionContext,
@@ -22,6 +23,7 @@ from embodied_runtime.cognition import (
 )
 from embodied_runtime.events import (
     ApplicationStarted,
+    BodyOrientationChanged,
     EventBus,
     PresenceChanged,
 )
@@ -85,6 +87,7 @@ RESOLVE_GOAL_TOOL = CognitionToolDefinition(
 @dataclass(frozen=True)
 class ApplicationOptions:
     startup_prompt: str | None = None
+    initiative_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,13 @@ class RobotApplication:
             self._replace_platform_state,
             lambda: self.state is LifecycleState.RUNNING,
             policy=platform_monitor_policy,
+        )
+        self.attention = GoalAttentionController(
+            enabled=self.options.initiative_enabled,
+            backend=self._cognition_backend,
+            is_running=lambda: self.state is LifecycleState.RUNNING,
+            has_active_goal=lambda: self._active_goal is not None,
+            compose_instructions=self._attention_instructions,
         )
 
     @property
@@ -284,6 +294,11 @@ class RobotApplication:
                 LOGGER.exception("[EVENT] cleanup_failed")
             raise
         self._set_lifecycle(LifecycleState.RUNNING)
+        try:
+            await self.attention.start(self.events)
+        except BaseException:
+            await self.stop()
+            raise
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
         await self.events.publish(ApplicationStarted(source="application"))
         self._platform_monitor.start()
@@ -300,6 +315,10 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.STOPPING)
         LOGGER.info("[APP] stopping")
         failure: BaseException | None = None
+        try:
+            await self.attention.stop()
+        except BaseException as error:
+            failure = error
         try:
             await self._platform_monitor.stop()
         except BaseException as error:
@@ -409,6 +428,9 @@ class RobotApplication:
             self._active_goal,
         )
 
+    def _attention_instructions(self, stimulus: AttentionStimulus) -> str:
+        return f"{self._cognition_instructions()}\n\n{stimulus.render()}"
+
     def cognition_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project currently safe cognition capabilities at request time."""
         body = self.body_backend
@@ -452,7 +474,7 @@ class RobotApplication:
             if not all(math.isfinite(value) for value in (yaw, pitch)):
                 raise ValueError("yaw_degrees and pitch_degrees must be finite")
             result = await self.set_body_orientation(
-                yaw_degrees=yaw, pitch_degrees=pitch
+                yaw_degrees=yaw, pitch_degrees=pitch, source="cognition"
             )
         except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
             return self._rejected_tool(call.name, str(error))
@@ -563,7 +585,8 @@ class RobotApplication:
         )
 
     async def set_body_orientation(
-        self, *, yaw_degrees: float, pitch_degrees: float
+        self, *, yaw_degrees: float, pitch_degrees: float,
+        source: str = "application",
     ) -> BodyState:
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Body orientation requires a running application")
@@ -571,6 +594,9 @@ class RobotApplication:
             raise RuntimeError("No body backend is configured")
         if "orientation" not in self.body_backend.capabilities:
             raise RuntimeError("Body backend does not support orientation")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("Body orientation source must be non-empty")
+        previous = self._runtime_state.body
         result = await self.body_backend.set_orientation(yaw_degrees, pitch_degrees)
         self._runtime_state = replace(self._runtime_state, body=result)
         LOGGER.info(
@@ -578,6 +604,17 @@ class RobotApplication:
             result.yaw_degrees,
             result.pitch_degrees,
         )
+        if previous is not None and (
+            previous.yaw_degrees != result.yaw_degrees
+            or previous.pitch_degrees != result.pitch_degrees
+        ):
+            await self.events.publish(BodyOrientationChanged(
+                source=source,
+                previous_yaw_degrees=previous.yaw_degrees,
+                previous_pitch_degrees=previous.pitch_degrees,
+                yaw_degrees=result.yaw_degrees,
+                pitch_degrees=result.pitch_degrees,
+            ))
         return result
 
     async def observe_presence(self, *, present: bool, source: str) -> PresenceState:

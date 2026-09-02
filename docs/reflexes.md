@@ -1,5 +1,11 @@
 # Local reflexes
 
+`PresenceCenteringReflex` identifies its capability request with the fixed
+semantic source `reflex:presence_centering`. It still knows only EventBus and
+the minimal semantic body capability: it never accesses RuntimeState, a body
+backend, goals, or cognition. Opt-in attention may independently consume the
+resulting semantic orientation event after the reflex completes its request.
+
 A reflex is a small deterministic reaction from a semantic event to a semantic
 application capability. Reflexes consume facts from the transient `EventBus`,
 request capabilities through `RobotApplication`, and own no authoritative robot

@@ -171,6 +171,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.hardware, "virtual")
         self.assertIsNone(args.startup_prompt)
         self.assertEqual(args.cognition, "none")
+        self.assertFalse(args.initiative)
+
+    def test_initiative_requires_cognition_backend(self) -> None:
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            main(["--initiative"])
 
     def test_openai_cognition_selection_is_lazy(self) -> None:
         args = build_parser().parse_args(["--cognition", "openai-responses"])

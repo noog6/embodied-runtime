@@ -112,6 +112,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  memory clear                   Clear session working memory\n"
             "  goal                           Show current active goal\n"
             "  goal clear                     Clear current active goal\n"
+            "  attention                      Show initiative attention state\n"
             "  help                           Show this help\n"
             "  quit                           Stop the console and runtime\n"
             "  exit                           Stop the console and runtime"
@@ -155,6 +156,17 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.app.runtime_state, state)
         self.assertEqual(self.app.working_memory.snapshot(), memory)
         self.assertTrue(self.app.events.is_running)
+
+    def test_attention_diagnostics_are_explicit_and_not_in_status(self):
+        self.assertEqual(self.console.execute("attention"), (
+            "Attention\n"
+            "  enabled:       false\n"
+            "  state:         disabled\n"
+            "  last_trigger:  none\n"
+            "  last_source:   none\n"
+            "  last_response: unavailable", False
+        ))
+        self.assertNotIn("Attention", self.console.execute("status")[0])
 
     async def test_ask_uses_raw_payload_and_displays_response(self):
         calls = []
@@ -356,7 +368,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("yaw_deg:       30.0", report)
         self.assertEqual(
             orientation_calls,
-            [{"yaw_degrees": 30.0, "pitch_degrees": -10.0}],
+            [{"yaw_degrees": 30.0, "pitch_degrees": -10.0, "source": "console"}],
         )
 
         report, stop = await self.console.execute_async("simulate presence ON")
@@ -450,10 +462,15 @@ class ConsoleCliTests(unittest.TestCase):
         self.assertFalse(defaults.diagnostics)
         self.assertTrue(build_parser().parse_args(["--console"]).console)
         self.assertEqual(defaults.cognition, "none")
+        self.assertFalse(defaults.initiative)
         self.assertEqual(
             build_parser().parse_args(["--cognition", "openai-responses"]).cognition,
             "openai-responses",
         )
+        enabled = build_parser().parse_args([
+            "--cognition", "openai-responses", "--initiative",
+        ])
+        self.assertTrue(enabled.initiative)
 
     def test_console_and_diagnostics_are_exclusive(self):
         with self.assertRaises(SystemExit):

@@ -40,7 +40,8 @@ class PresenceCenteringReflex:
             return
         try:
             await capabilities.set_body_orientation(
-                yaw_degrees=0.0, pitch_degrees=0.0
+                yaw_degrees=0.0, pitch_degrees=0.0,
+                source="reflex:presence_centering",
             )
         except Exception:
             LOGGER.exception(
