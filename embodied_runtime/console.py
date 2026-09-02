@@ -69,6 +69,11 @@ class RuntimeConsole:
             return self._presence(), False
         if vocabulary == ["memory"]:
             return self._memory(), False
+        if vocabulary == ["goal"]:
+            return self._goal(), False
+        if vocabulary == ["goal", "clear"]:
+            cleared = self._application.clear_goal()
+            return "Active goal\n  cleared:       " + str(cleared).lower(), False
         if vocabulary == ["memory", "clear"]:
             cleared = self._application.working_memory.clear()
             return "\n".join((
@@ -168,6 +173,8 @@ class RuntimeConsole:
                 "  ask <message>                  Send one text cognition request",
                 "  memory                         Show working-memory metadata",
                 "  memory clear                   Clear session working memory",
+                "  goal                           Show current active goal",
+                "  goal clear                     Clear current active goal",
                 "  help                           Show this help",
                 "  quit                           Stop the console and runtime",
                 "  exit                           Stop the console and runtime",
@@ -182,6 +189,16 @@ class RuntimeConsole:
             f"  capacity:      {memory.capacity}",
             f"  text_limit:    {memory.text_limit}",
         ))
+
+    def _goal(self) -> str:
+        goal = self._application.active_goal
+        lines = [
+            "Active goal",
+            f"  state:         {'none' if goal is None else 'active'}",
+        ]
+        if goal is not None:
+            lines.append(f"  description:   {goal.description}")
+        return "\n".join(lines)
 
     def _status(self) -> str:
         summary = self._application.summary()

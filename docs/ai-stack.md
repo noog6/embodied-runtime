@@ -9,18 +9,25 @@ operator text + request-time runtime projection -> text cognition
     -> refreshed authoritative state -> final cognition response
 ```
 
-Across asks, the application explicitly composes the current runtime projection,
-the current operator request, and up to six completed historical cognition turns:
+Across asks, the application explicitly composes current runtime facts, one
+current active goal, the current operator request, and up to six completed turns:
 
 ```text
-current runtime projection + bounded runtime-owned working memory
-                           + current operator request -> cognition
+current runtime facts + current active goal + bounded working memory
+                                      + current operator request -> cognition
 ```
 
 Provider requests remain independent. This volatile FIFO supplies continuity
 without provider conversations. Historical context may be stale, so the fresh
 authoritative runtime projection always wins for current robot facts. There is
 no persistent memory, retrieval, embedding, or summarization layer.
+
+Phase 5 keeps the owners distinct: `RuntimeState` owns current reality,
+`ActiveGoal` owns the single current intention, and `WorkingMemory` owns bounded
+history. The provider owns none of them. Goal text cannot override current
+operator input, runtime facts, safety, or capability validation. Setting a goal
+does not perform it, and no goal wakes cognition, retries, monitors satisfaction,
+or resolves itself.
 
 It exists to test the responsibility boundary between the runtime and cognition;
 it does not select the reference robot's permanent AI architecture. The

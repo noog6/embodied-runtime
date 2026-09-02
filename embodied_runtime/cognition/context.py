@@ -7,6 +7,7 @@ from embodied_runtime.cognition.working_memory import (
     WorkingMemoryTurn,
     render_working_memory,
 )
+from embodied_runtime.cognition.goals import ActiveGoal, render_active_goal
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,12 +132,17 @@ def compose_cognition_instructions(
     context: CognitionContext,
     startup_prompt: str | None,
     working_memory: Sequence[WorkingMemoryTurn] = (),
+    active_goal: ActiveGoal | None = None,
 ) -> str:
     """Keep operator instructions distinct from machine-generated grounding."""
     sections = []
     if startup_prompt is not None:
         sections.append(f"Operator instructions\n---------------------\n{startup_prompt}")
-    sections.extend((context.render(), render_working_memory(working_memory)))
+    sections.extend((
+        context.render(),
+        render_active_goal(active_goal),
+        render_working_memory(working_memory),
+    ))
     return "\n\n".join(sections)
 
 
