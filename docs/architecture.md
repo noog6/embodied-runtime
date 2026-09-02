@@ -101,8 +101,13 @@ Reflexes and cognition remain independent even though both use the same
 application-owned semantic capability; future cognition sees any pose a reflex
 subsequently establishes.
 
-With opt-in initiative, one narrow path is transition-driven and read-only:
+With opt-in initiative, one narrow path is transition-driven:
 `BodyOrientationChanged` from a local reflex -> attention gate, plus an existing
 `ActiveGoal` -> optional one-shot cognition. Attention does not interpret goal
-text, own state, poll, or act. Autonomous reflection has no semantic tools and
-is not appended to WorkingMemory.
+text, own state, or poll. `--initiative` remains read-only. The additional
+`--initiative-actions` opt-in lets one episode request at most one `orient_body`
+capability, and only on a nonphysical body. The application owns this separate
+autonomous projection and dispatcher. Actions use source `initiative`, so they
+do not meet the gate's `reflex:` source rule and cannot recursively wake it.
+Autonomous responses and outcomes are not appended to WorkingMemory, and an
+action neither resolves nor changes ActiveGoal.

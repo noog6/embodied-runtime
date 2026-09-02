@@ -48,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--initiative", action="store_true",
                         help="enable goal-directed read-only cognition initiative")
+    parser.add_argument(
+        "--initiative-actions", action="store_true",
+        help="allow initiative one bounded nonphysical semantic body action",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--diagnostics", action="store_true")
     modes.add_argument("--console", action="store_true")
@@ -158,7 +162,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     cognition = build_cognition_backend(args)
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
-                                              initiative_enabled=args.initiative),
+                                              initiative_enabled=args.initiative,
+                                              initiative_actions_enabled=args.initiative_actions),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
         camera_backend=camera,
@@ -210,6 +215,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.initiative_actions and not args.initiative:
+        parser.error("--initiative-actions requires --initiative")
     if args.initiative and args.cognition == "none":
         parser.error("--initiative requires a cognition backend")
     if args.fusion_servo_test is not None and not args.diagnostics:

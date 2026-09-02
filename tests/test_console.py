@@ -164,6 +164,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  state:         disabled\n"
             "  last_trigger:  none\n"
             "  last_source:   none\n"
+            "  last_action:   none\n"
+            "  last_action_status: none\n"
             "  last_response: unavailable", False
         ))
         self.assertNotIn("Attention", self.console.execute("status")[0])
@@ -463,6 +465,7 @@ class ConsoleCliTests(unittest.TestCase):
         self.assertTrue(build_parser().parse_args(["--console"]).console)
         self.assertEqual(defaults.cognition, "none")
         self.assertFalse(defaults.initiative)
+        self.assertFalse(defaults.initiative_actions)
         self.assertEqual(
             build_parser().parse_args(["--cognition", "openai-responses"]).cognition,
             "openai-responses",

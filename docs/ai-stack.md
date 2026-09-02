@@ -43,7 +43,7 @@ capability is added. See
 
 Realtime, chained, and hybrid approaches remain open candidates.
 
-## Goal-directed attention and read-only initiative
+## Goal-directed attention and bounded initiative
 
 Phase 6 is explicitly opt-in and transition-driven:
 
@@ -56,11 +56,21 @@ semantic runtime event + ActiveGoal
 Only a completed semantic orientation change whose runtime-owned source begins
 with `reflex:` can wake this path, and only while a goal exists. The request is
 given fresh Runtime context, ActiveGoal, and bounded operator WorkingMemory plus
-a provider-neutral attention stimulus. It receives no tools or executor, adds no
-memory turn, changes no goal or state, and is never retried. One request may be
-in flight; later events during it are suppressed rather than queued. Initiative
-requires `--initiative` as well as a cognition backend. There is no polling,
-pursuit loop, provider session, planning, or autonomous action.
+a provider-neutral attention stimulus. The modes are deliberately distinct:
+
+- without `--initiative`, cognition occurs only for explicit operator asks;
+- `--initiative` enables autonomous noticing and thinking with exactly no
+  tools, executor, or refreshed-instructions continuation;
+- `--initiative --initiative-actions` permits at most one `orient_body`
+  request when the semantic-orientation body is nonphysical.
+
+The autonomous projection never includes `set_goal` or `resolve_goal`, and a
+physical body receives no autonomous tools. Runtime validation remains
+authoritative. A successful action is sourced as `initiative`; the final tool
+continuation receives freshly composed authoritative grounding. Every episode
+adds no memory turn and changes no goal. One request may be in flight; later
+events are suppressed rather than queued. There is no polling, retry, pursuit
+loop, provider session, planning, goal satisfaction, or physical autonomy.
 
 ## Direct speech-to-speech
 

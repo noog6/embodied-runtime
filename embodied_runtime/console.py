@@ -211,6 +211,8 @@ class RuntimeConsole:
             f"  state:         {status.state}",
             f"  last_trigger:  {status.last_trigger or 'none'}",
             f"  last_source:   {status.last_source or 'none'}",
+            f"  last_action:   {status.last_action or 'none'}",
+            f"  last_action_status: {status.last_action_status or 'none'}",
             f"  last_response: {status.last_response or 'unavailable'}",
         ))
 

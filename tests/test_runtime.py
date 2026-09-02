@@ -172,10 +172,19 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.startup_prompt)
         self.assertEqual(args.cognition, "none")
         self.assertFalse(args.initiative)
+        self.assertFalse(args.initiative_actions)
 
     def test_initiative_requires_cognition_backend(self) -> None:
         with patch("sys.stderr"), self.assertRaises(SystemExit):
             main(["--initiative"])
+
+    def test_initiative_actions_requires_explicit_initiative(self) -> None:
+        for argv in (
+            ["--initiative-actions", "--console"],
+            ["--cognition", "openai-responses", "--initiative-actions", "--console"],
+        ):
+            with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
+                main(argv)
 
     def test_openai_cognition_selection_is_lazy(self) -> None:
         args = build_parser().parse_args(["--cognition", "openai-responses"])

@@ -1,10 +1,14 @@
 import asyncio
 import unittest
 
-from embodied_runtime.app import ApplicationOptions, RobotApplication
-from embodied_runtime.attention import INITIATIVE_REQUEST
+from embodied_runtime.app import (
+    ORIENT_BODY_TOOL, ApplicationOptions, RobotApplication,
+)
+from embodied_runtime.attention import ACTION_INITIATIVE_REQUEST, INITIATIVE_REQUEST
 from embodied_runtime.body.virtual import VirtualBodyBackend
-from embodied_runtime.cognition import CognitionError, TextCognitionBackend
+from embodied_runtime.cognition import (
+    CognitionError, CognitionToolCall, TextCognitionBackend,
+)
 from embodied_runtime.events import BodyOrientationChanged
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
@@ -21,12 +25,15 @@ class Platform:
 class FakeCognition(TextCognitionBackend):
     identifier = "fake"
 
-    def __init__(self, *, blocked=False, error=None):
+    def __init__(self, *, blocked=False, error=None, tool_call=None):
         self.requests = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.blocked = blocked
         self.error = error
+        self.tool_call = tool_call
+        self.tool_results = []
+        self.refreshed = []
 
     async def respond(self, message, *, instructions=None, tools=(),
                       tool_executor=None, refreshed_instructions=None):
@@ -37,15 +44,20 @@ class FakeCognition(TextCognitionBackend):
             await self.release.wait()
         if self.error:
             raise self.error
+        if self.tool_call is not None:
+            result = await tool_executor(self.tool_call)
+            self.tool_results.append(result)
+            self.refreshed.append(refreshed_instructions())
         return "The current body differs; no action was taken."
 
 
 class AttentionTests(unittest.IsolatedAsyncioTestCase):
-    def make_app(self, backend=None, *, enabled=True, reflexes=()):
+    def make_app(self, backend=None, *, enabled=True, actions=False, reflexes=(), body=None):
         return RobotApplication(
             RobotProfile("test", "Test"), VirtualHardwareBackend(),
-            ApplicationOptions(initiative_enabled=enabled),
-            platform_provider=Platform(), body_backend=VirtualBodyBackend(),
+            ApplicationOptions(initiative_enabled=enabled,
+                               initiative_actions_enabled=actions),
+            platform_provider=Platform(), body_backend=body or VirtualBodyBackend(),
             cognition_backend=backend, reflexes=reflexes,
         )
 
@@ -113,6 +125,104 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.active_goal.description, "Keep body at 35/-10")
         self.assertEqual(app.working_memory.snapshot(), memory)
         self.assertEqual(app.attention.status().state, "completed")
+        self.assertIsNone(app.attention.status().last_action)
+        self.assertIsNone(app.attention.status().last_action_status)
+        await app.stop()
+
+    async def test_action_projection_is_narrow_running_goal_nonphysical_only(self):
+        class PhysicalBody(VirtualBodyBackend):
+            is_physical = True
+
+        app = self.make_app(FakeCognition(), actions=True)
+        self.assertEqual(app.initiative_tools(), ())
+        await app.start()
+        self.assertEqual(app.initiative_tools(), ())
+        app.set_goal("opaque")
+        self.assertEqual(app.initiative_tools(), (ORIENT_BODY_TOOL,))
+        self.assertEqual([tool.name for tool in app.initiative_tools()], ["orient_body"])
+        await app.stop()
+
+        physical = self.make_app(FakeCognition(), actions=True, body=PhysicalBody())
+        await physical.start()
+        physical.set_goal("opaque")
+        self.assertEqual(physical.initiative_tools(), ())
+        await physical.stop()
+
+    async def test_reflex_can_trigger_one_autonomous_orientation_without_mutating_goal_or_memory(self):
+        backend = FakeCognition(tool_call=CognitionToolCall(
+            "orient_body", '{"yaw_degrees": 35, "pitch_degrees": -10}'
+        ))
+        sources = []
+        app = self.make_app(
+            backend, actions=True, reflexes=(PresenceCenteringReflex(),)
+        )
+        app.events.subscribe(BodyOrientationChanged, lambda event: _record(event, sources))
+        await app.start()
+        await app.set_body_orientation(yaw_degrees=35, pitch_degrees=-10,
+                                       source="cognition")
+        goal = app.set_goal("Keep body at 35/-10")
+        app.working_memory.append("operator", "history")
+        memory = app.working_memory.snapshot()
+        await app.observe_presence(present=True, source="test")
+        await asyncio.wait_for(backend.started.wait(), 1)
+        while app.attention.status().state == "in_flight":
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertEqual(len(backend.requests), 1)
+        message, initial, tools, executor, refresh = backend.requests[0]
+        self.assertEqual(message, ACTION_INITIATIVE_REQUEST)
+        self.assertEqual(tools, (ORIENT_BODY_TOOL,))
+        self.assertIsNotNone(executor)
+        self.assertIsNotNone(refresh)
+        self.assertIn("yaw_deg: 0.0", initial)
+        self.assertIn("previous_yaw_deg: 35.0", initial)
+        self.assertIn("yaw_deg: 35.0", backend.refreshed[0])
+        self.assertEqual(app.runtime_state.body, BodyState(35.0, -10.0))
+        self.assertIs(app.active_goal, goal)
+        self.assertEqual(app.working_memory.snapshot(), memory)
+        self.assertEqual(sources, ["cognition", "reflex:presence_centering", "initiative"])
+        self.assertEqual(app.attention.status().last_action, "orient_body")
+        self.assertEqual(app.attention.status().last_action_status, "applied")
+        await app.stop()
+
+    async def test_action_is_optional_and_invalid_action_is_rejected_without_retry(self):
+        for call, expected_action in (
+            (None, None),
+            (CognitionToolCall("orient_body", '{"yaw_degrees": 500, "pitch_degrees": 0}'),
+             "orient_body"),
+        ):
+            with self.subTest(call=call):
+                backend = FakeCognition(tool_call=call)
+                app = self.make_app(backend, actions=True)
+                await app.start()
+                app.set_goal("opaque")
+                memory = app.working_memory.snapshot()
+                await app.set_body_orientation(yaw_degrees=1, pitch_degrees=0,
+                                               source="reflex:test")
+                await backend.started.wait()
+                while app.attention.status().state == "in_flight":
+                    await asyncio.sleep(0)
+                self.assertEqual(len(backend.requests), 1)
+                self.assertEqual(app.runtime_state.body, BodyState(1.0, 0.0))
+                self.assertIsNotNone(app.active_goal)
+                self.assertEqual(app.working_memory.snapshot(), memory)
+                self.assertEqual(app.attention.status().last_action, expected_action)
+                self.assertEqual(
+                    app.attention.status().last_action_status,
+                    "rejected" if call is not None else None,
+                )
+                if call is not None:
+                    self.assertIn("yaw_deg: 1.0", backend.refreshed[0])
+                await app.stop()
+
+    async def test_initiative_executor_rejects_goal_tools_without_mutation(self):
+        app = self.make_app(FakeCognition(), actions=True)
+        await app.start()
+        goal = app.set_goal("opaque")
+        for name in ("set_goal", "resolve_goal"):
+            result = await app._execute_initiative_tool(CognitionToolCall(name, "{}"))
+            self.assertEqual(__import__("json").loads(result.output)["status"], "rejected")
+            self.assertIs(app.active_goal, goal)
         await app.stop()
 
     async def test_disabled_nonreflex_and_no_goal_do_not_wake(self):
@@ -174,7 +284,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_cancels_blocking_initiative_and_closes_subscription(self):
         backend = FakeCognition(blocked=True)
-        app = self.make_app(backend)
+        app = self.make_app(backend, actions=True)
         await app.start()
         app.set_goal("opaque")
         await app.set_body_orientation(yaw_degrees=1, pitch_degrees=0,
@@ -184,3 +294,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(app.stop(), 1)
         self.assertTrue(task.cancelled())
         self.assertEqual(app.events._subscriptions, [])
+
+
+async def _record(event, sources):
+    sources.append(event.source)

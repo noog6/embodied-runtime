@@ -8,7 +8,10 @@ import logging
 import math
 
 from embodied_runtime.body.base import BodyBackend
-from embodied_runtime.attention import AttentionStimulus, GoalAttentionController
+from embodied_runtime.attention import (
+    ACTION_INITIATIVE_REQUEST, INITIATIVE_REQUEST, AttentionStimulus,
+    GoalAttentionController, InitiativeOutcome,
+)
 from embodied_runtime.cognition import (
     ActiveGoal,
     CognitionContext,
@@ -88,6 +91,7 @@ RESOLVE_GOAL_TOOL = CognitionToolDefinition(
 class ApplicationOptions:
     startup_prompt: str | None = None
     initiative_enabled: bool = False
+    initiative_actions_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -155,10 +159,10 @@ class RobotApplication:
         )
         self.attention = GoalAttentionController(
             enabled=self.options.initiative_enabled,
-            backend=self._cognition_backend,
+            backend_available=self._cognition_backend is not None,
             is_running=lambda: self.state is LifecycleState.RUNNING,
             has_active_goal=lambda: self._active_goal is not None,
-            compose_instructions=self._attention_instructions,
+            run_initiative=self._request_initiative,
         )
 
     @property
@@ -428,8 +432,78 @@ class RobotApplication:
             self._active_goal,
         )
 
-    def _attention_instructions(self, stimulus: AttentionStimulus) -> str:
-        return f"{self._cognition_instructions()}\n\n{stimulus.render()}"
+    def _attention_instructions(
+        self, stimulus: AttentionStimulus, working_memory, *, actions_enabled: bool
+    ) -> str:
+        return (
+            f"{self._cognition_instructions(working_memory)}\n\n"
+            f"{stimulus.render(actions_enabled=actions_enabled)}"
+        )
+
+    async def _request_initiative(self, stimulus: AttentionStimulus) -> InitiativeOutcome:
+        backend = self._cognition_backend
+        if backend is None:
+            raise RuntimeError("No cognition backend is configured")
+        actions_enabled = self.options.initiative_actions_enabled
+        prior_memory = self.working_memory.snapshot()
+        instructions = self._attention_instructions(
+            stimulus, prior_memory, actions_enabled=actions_enabled
+        )
+        tools = self.initiative_tools()
+        action: str | None = None
+        action_status: str | None = None
+
+        async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
+            nonlocal action, action_status
+            action = call.name
+            LOGGER.info("[INITIATIVE] tool=%s status=requested", call.name)
+            result = await self._execute_initiative_tool(call)
+            try:
+                action_status = json.loads(result.output).get("status", "rejected")
+            except (json.JSONDecodeError, AttributeError):
+                action_status = "rejected"
+            self.attention.record_action(action, action_status)
+            return result
+
+        LOGGER.info(
+            "[INITIATIVE] backend=%s request=started actions=%s",
+            backend.identifier, "enabled" if actions_enabled else "disabled",
+        )
+        try:
+            response = await backend.respond(
+                ACTION_INITIATIVE_REQUEST if actions_enabled else INITIATIVE_REQUEST,
+                instructions=instructions,
+                tools=tools,
+                tool_executor=execute_tool if tools else None,
+                refreshed_instructions=(
+                    lambda: self._attention_instructions(
+                        stimulus, prior_memory, actions_enabled=True
+                    )
+                ) if tools else None,
+            )
+        except Exception:
+            LOGGER.warning("[INITIATIVE] backend=%s request=failed", backend.identifier)
+            raise
+        LOGGER.info(
+            "[INITIATIVE] backend=%s request=completed response_chars=%s",
+            backend.identifier, len(response),
+        )
+        return InitiativeOutcome(response, action, action_status)
+
+    def initiative_tools(self) -> tuple[CognitionToolDefinition, ...]:
+        """Project the sole bounded autonomous capability at request time."""
+        body = self.body_backend
+        if (
+            self.options.initiative_enabled
+            and self.options.initiative_actions_enabled
+            and self.state is LifecycleState.RUNNING
+            and self._active_goal is not None
+            and body is not None
+            and not body.is_physical
+            and "orientation" in body.capabilities
+        ):
+            return (ORIENT_BODY_TOOL,)
+        return ()
 
     def cognition_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project currently safe cognition capabilities at request time."""
@@ -449,18 +523,36 @@ class RobotApplication:
     ) -> CognitionToolResult:
         LOGGER.info("[COGNITION] tool=%s status=requested", call.name)
         if call.name == ORIENT_BODY_TOOL.name:
-            return await self._execute_orient_body(call)
+            return await self._execute_orient_body(
+                call, available=self.cognition_tools(), source="cognition"
+            )
         if call.name == SET_GOAL_TOOL.name:
             return self._execute_set_goal(call)
         if call.name == RESOLVE_GOAL_TOOL.name:
             return self._execute_resolve_goal(call)
         return self._rejected_tool(call.name, "tool is not available")
 
-    async def _execute_orient_body(
+    async def _execute_initiative_tool(
         self, call: CognitionToolCall
     ) -> CognitionToolResult:
-        if ORIENT_BODY_TOOL not in self.cognition_tools():
-            return self._rejected_tool(call.name, "tool is not available")
+        if call.name != ORIENT_BODY_TOOL.name:
+            return self._rejected_tool(
+                call.name, "tool is not available", log_prefix="INITIATIVE"
+            )
+        return await self._execute_orient_body(
+            call, available=self.initiative_tools(), source="initiative",
+            log_prefix="INITIATIVE",
+        )
+
+    async def _execute_orient_body(
+        self, call: CognitionToolCall, *,
+        available: tuple[CognitionToolDefinition, ...], source: str,
+        log_prefix: str = "COGNITION",
+    ) -> CognitionToolResult:
+        if ORIENT_BODY_TOOL not in available:
+            return self._rejected_tool(
+                call.name, "tool is not available", log_prefix=log_prefix
+            )
         try:
             arguments = json.loads(call.arguments)
             if not isinstance(arguments, dict):
@@ -474,12 +566,13 @@ class RobotApplication:
             if not all(math.isfinite(value) for value in (yaw, pitch)):
                 raise ValueError("yaw_degrees and pitch_degrees must be finite")
             result = await self.set_body_orientation(
-                yaw_degrees=yaw, pitch_degrees=pitch, source="cognition"
+                yaw_degrees=yaw, pitch_degrees=pitch, source=source
             )
         except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
-            return self._rejected_tool(call.name, str(error))
+            return self._rejected_tool(call.name, str(error), log_prefix=log_prefix)
         LOGGER.info(
-            "[COGNITION] tool=%s status=applied yaw_deg=%s pitch_deg=%s",
+            "[%s] tool=%s status=applied yaw_deg=%s pitch_deg=%s",
+            log_prefix,
             call.name, result.yaw_degrees, result.pitch_degrees,
         )
         return CognitionToolResult(
@@ -527,8 +620,10 @@ class RobotApplication:
         )
 
     @staticmethod
-    def _rejected_tool(name: str, error: str) -> CognitionToolResult:
-        LOGGER.info("[COGNITION] tool=%s status=rejected", name)
+    def _rejected_tool(
+        name: str, error: str, *, log_prefix: str = "COGNITION"
+    ) -> CognitionToolResult:
+        LOGGER.info("[%s] tool=%s status=rejected", log_prefix, name)
         return CognitionToolResult(
             json.dumps({"status": "rejected", "error": error}, sort_keys=True)
         )
