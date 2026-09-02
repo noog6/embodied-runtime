@@ -14,6 +14,10 @@ python main.py --diagnostics
 python main.py --console
 ```
 
+Optional provider setup is documented in [OpenAI text cognition
+setup](docs/cognition-openai.md), including the linked [Secrets and API
+keys](docs/secrets.md) procedure for local credential storage and delivery.
+
 The local console projects the running runtime's current state and provides
 two deliberately narrow development controls. For example, enter `status`,
 `body`, or `presence` at the profile-derived
