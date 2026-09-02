@@ -1,10 +1,17 @@
 # Local runtime console
 
 `attention` reports whether initiative is enabled, its idle/in-flight/completed/
-failed state, the latest trigger and source, and the latest bounded autonomous
-response when available. That response is volatile diagnostic state shown only
+failed state, latest trigger and source, latest action/status, and the latest
+bounded autonomous response when available. That response is volatile diagnostic state shown only
 by this command; aggregate `status` and logs exclude its content, and later
 cognition never receives it.
+
+Initiative has three modes: no flags means operator-only cognition;
+`--initiative` enables read-only autonomous noticing/thinking; and
+`--initiative --initiative-actions` permits at most one autonomous
+`orient_body` request on a nonphysical body. The action flag requires the first
+flag and never enables it silently. It does not authorize physical motion or
+autonomous goal mutation.
 
 Run `python main.py --console` for the asynchronous local console. Platform
 sampling and heartbeats continue while it waits. Reports read application-owned

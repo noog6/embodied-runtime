@@ -21,7 +21,8 @@ Events announce discrete facts and transitions; they neither own state nor
 serve as a state history. Diagnostics are read-only projections of the latest
 authoritative state.
 
-Attention's latest trigger, source, state, and optional bounded response are
+Attention's latest trigger, source, state, optional bounded response, and latest
+initiative action/status are
 volatile developer diagnostics, not `RuntimeState`, WorkingMemory, ActiveGoal,
 persistent memory, provider state, or physical truth. They clear on restart and
 are never fed into later cognition.

@@ -1,11 +1,10 @@
 """Narrow goal-directed attention for reflex-driven body transitions."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import logging
 
-from embodied_runtime.cognition import TextCognitionBackend
 from embodied_runtime.events import BodyOrientationChanged, EventBus, Subscription
 
 LOGGER = logging.getLogger(__name__)
@@ -14,6 +13,12 @@ INITIATIVE_REQUEST = (
     "Assess the attention stimulus against your current active goal. "
     "Briefly explain whether the current robot state appears relevant to that goal. "
     "This is a read-only attention pass; do not claim to have taken action."
+)
+ACTION_INITIATIVE_REQUEST = (
+    "Assess the attention stimulus against your current active goal. "
+    "If an available semantic capability is appropriate and necessary to advance "
+    "or restore that goal, you may request it. You are not required to act. "
+    "Do not set, replace, resolve, or reinterpret the active goal."
 )
 MAX_DIAGNOSTIC_RESPONSE_CHARS = 2000
 
@@ -27,14 +32,21 @@ class AttentionStimulus:
     yaw_degrees: float
     pitch_degrees: float
 
-    def render(self) -> str:
+    def render(self, *, actions_enabled: bool = False) -> str:
+        capability_guidance = (
+            "Available tools are permissions, not obligations. Do not claim an action "
+            "succeeded until its runtime-produced tool result says so."
+            if actions_enabled else
+            "No semantic tools or actions are available in this pass. Do not claim an "
+            "action occurred unless Runtime context says it did."
+        )
         return "\n".join((
             "Attention stimulus",
-            "This is a runtime-generated reason for an unsolicited read-only cognition",
+            "This is a runtime-generated reason for an unsolicited cognition",
             "pass. It is not operator input. Runtime context is authoritative for current",
             "facts; Active goal is authoritative for current intention; Working memory is",
-            "historical and may be stale. No semantic tools or actions are available in this",
-            "pass. Do not claim an action occurred unless Runtime context says it did.",
+            "historical and may be stale.",
+            capability_guidance,
             "",
             f"  kind: {self.kind}",
             f"  source: {self.source}",
@@ -52,25 +64,36 @@ class AttentionStatus:
     last_trigger: str | None
     last_source: str | None
     last_response: str | None
+    last_action: str | None
+    last_action_status: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class InitiativeOutcome:
+    response: str
+    action: str | None = None
+    action_status: str | None = None
 
 
 class GoalAttentionController:
-    """Wake one read-only cognition request for a relevant semantic transition."""
+    """Select a relevant transition and own one initiative task's diagnostics."""
 
-    def __init__(self, *, enabled: bool, backend: TextCognitionBackend | None,
+    def __init__(self, *, enabled: bool, backend_available: bool,
                  is_running: Callable[[], bool], has_active_goal: Callable[[], bool],
-                 compose_instructions: Callable[[AttentionStimulus], str]) -> None:
+                 run_initiative: Callable[[AttentionStimulus], Awaitable[InitiativeOutcome]]) -> None:
         self.enabled = enabled
-        self._backend = backend
+        self._backend_available = backend_available
         self._is_running = is_running
         self._has_active_goal = has_active_goal
-        self._compose_instructions = compose_instructions
+        self._run_initiative = run_initiative
         self._subscription: Subscription[BodyOrientationChanged] | None = None
         self._task: asyncio.Task[None] | None = None
         self._state = "idle" if enabled else "disabled"
         self._last_trigger: str | None = None
         self._last_source: str | None = None
         self._last_response: str | None = None
+        self._last_action: str | None = None
+        self._last_action_status: str | None = None
 
     async def start(self, events: EventBus) -> None:
         if not self.enabled:
@@ -93,10 +116,16 @@ class GoalAttentionController:
 
     def status(self) -> AttentionStatus:
         return AttentionStatus(self.enabled, self._state, self._last_trigger,
-                               self._last_source, self._last_response)
+                               self._last_source, self._last_response,
+                               self._last_action, self._last_action_status)
+
+    def record_action(self, action: str, status: str) -> None:
+        """Record the latest runtime-produced result for the in-flight episode."""
+        self._last_action = action
+        self._last_action_status = status
 
     async def _on_event(self, event: BodyOrientationChanged) -> None:
-        if not self._is_running() or self._backend is None or not self._has_active_goal():
+        if not self._is_running() or not self._backend_available or not self._has_active_goal():
             return
         if not event.source.startswith("reflex:"):
             return
@@ -111,29 +140,21 @@ class GoalAttentionController:
         self._last_trigger = stimulus.kind
         self._last_source = stimulus.source
         self._last_response = None
+        self._last_action = None
+        self._last_action_status = None
         self._state = "in_flight"
         LOGGER.info("[ATTENTION] event=body_orientation_changed source=%s decision=wake", event.source)
         self._task = asyncio.create_task(self._reflect(stimulus), name="initiative:goal_attention")
 
     async def _reflect(self, stimulus: AttentionStimulus) -> None:
-        backend = self._backend
-        assert backend is not None
-        LOGGER.info("[INITIATIVE] backend=%s request=started", backend.identifier)
         try:
-            # Compose here, immediately before the provider call, so state, goal,
-            # and bounded operator memory are all fresh.
-            instructions = self._compose_instructions(stimulus)
-            response = await backend.respond(
-                INITIATIVE_REQUEST, instructions=instructions, tools=(),
-                tool_executor=None, refreshed_instructions=None,
-            )
+            outcome = await self._run_initiative(stimulus)
         except asyncio.CancelledError:
             raise
         except Exception:
             self._state = "failed"
-            LOGGER.warning("[INITIATIVE] backend=%s request=failed", backend.identifier)
             return
-        self._last_response = response[:MAX_DIAGNOSTIC_RESPONSE_CHARS]
+        self._last_response = outcome.response[:MAX_DIAGNOSTIC_RESPONSE_CHARS]
+        self._last_action = outcome.action
+        self._last_action_status = outcome.action_status
         self._state = "completed"
-        LOGGER.info("[INITIATIVE] backend=%s request=completed response_chars=%s",
-                    backend.identifier, len(response))

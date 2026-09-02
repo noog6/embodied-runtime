@@ -45,3 +45,7 @@ produces the narrowly scoped event described above.
 Semantic events may drive deterministic [local reflexes](reflexes.md). They
 remain facts, not commands: the reflex independently translates a relevant fact
 into a request through an application semantic capability.
+
+Initiative-driven orientation uses the runtime-owned source `initiative`.
+Attention accepts only sources beginning with `reflex:`, so that resulting event
+is observable but cannot recursively trigger another initiative episode.

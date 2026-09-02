@@ -17,13 +17,15 @@ development storage and delivery procedure. The default experimental model is
 python main.py --cognition openai-responses --console
 ```
 
-Add `--initiative` to opt into Phase 6 read-only attention. An autonomous pass
-uses the same provider-neutral `TextCognitionBackend` boundary with a
-runtime-generated request and attention section, but exactly `tools=()`, no
-tool executor, and no refreshed-instructions callback. It creates no provider
-conversation or background session and does not enter WorkingMemory. Requests
-remain independent; `previous_response_id` stays confined to the continuation
-inside one ordinary tool-enabled operator ask.
+Add `--initiative` for read-only noticing and thinking. It uses exactly
+`tools=()`, no tool executor, and no refreshed-instructions callback. Add the
+separate `--initiative-actions` flag to let that one autonomous episode request
+at most one `orient_body` action on a nonphysical body. This projection never
+includes `set_goal` or `resolve_goal`; physical bodies still receive no tools.
+The tool result and freshly rendered authoritative context are supplied to the
+request-local final continuation. Neither mode creates provider conversation
+state, enters WorkingMemory, or changes ActiveGoal. `previous_response_id`
+remains confined to a single tool continuation and is never carried forward.
 
 One independent request can be made without shell quoting:
 
@@ -74,5 +76,5 @@ The adapter is initialized lazily on the first request. A missing SDK, missing
 key, or provider failure affects that request only and does not stop the runtime.
 Independent requests gain continuity only because the runtime explicitly
 supplies its working-memory snapshot. This phase adds no durable storage, task
-manager, planning, autonomous action, images, perception, audio, streaming, or
-Realtime API integration.
+manager, planning, retries, physical autonomous action, images, perception,
+audio, streaming, or Realtime API integration.
