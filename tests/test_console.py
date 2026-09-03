@@ -40,6 +40,15 @@ class FakeTerminal:
         return next(self.lines)
 
 
+class TtyStringIO(io.StringIO):
+    def __init__(self, is_tty=True):
+        super().__init__()
+        self._is_tty = is_tty
+
+    def isatty(self):
+        return self._is_tty
+
+
 JPEG = b"\xff\xd8console-jpeg\xff\xd9"
 
 
@@ -446,6 +455,15 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TerminalTests(unittest.IsolatedAsyncioTestCase):
+    def test_colour_detection_and_explicit_override(self):
+        tty = TtyStringIO()
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertTrue(AsyncLineTerminal(stdout=tty).style.enabled)
+            self.assertFalse(AsyncLineTerminal(stdout=tty, no_color=True).style.enabled)
+            self.assertFalse(AsyncLineTerminal(stdout=io.StringIO()).style.enabled)
+        with patch.dict("os.environ", {"NO_COLOR": ""}):
+            self.assertFalse(AsyncLineTerminal(stdout=tty).style.enabled)
+
     async def test_pipe_eof_is_nonblocking_and_cancellable(self):
         read_fd, write_fd = __import__("os").pipe()
         reader = __import__("os").fdopen(read_fd)
@@ -470,6 +488,8 @@ class ConsoleCliTests(unittest.TestCase):
         self.assertFalse(defaults.initiative)
         self.assertFalse(defaults.initiative_actions)
         self.assertFalse(defaults.initiative_goal_closure)
+        self.assertFalse(defaults.no_color)
+        self.assertTrue(build_parser().parse_args(["--no-color"]).no_color)
         self.assertEqual(
             build_parser().parse_args(["--cognition", "openai-responses"]).cognition,
             "openai-responses",
