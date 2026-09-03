@@ -268,6 +268,35 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cpu_temp_c=unknown memory_available_mb=unknown ", unknown_logs.output[0])
         self.assertIn("memory_available_pct=unknown thermal=unknown memory=unknown", unknown_logs.output[0])
 
+    async def test_disabled_heartbeat_still_updates_state_and_emits_warnings(self):
+        warning = snapshot(
+            cpu_temperature_celsius=81,
+            memory_total_bytes=1000,
+            memory_available_bytes=50,
+        )
+        provider = Provider([warning])
+        monitor = PlatformMonitor(
+            provider,
+            self.bus,
+            lambda value: setattr(self, "current", value),
+            lambda: True,
+            policy=PlatformMonitorPolicy(heartbeat_interval_seconds=None),
+            monotonic=lambda: 120.0,
+        )
+        monitor.establish_baseline(self.current)
+        with self.assertLogs("embodied_runtime.platform.monitor", level="INFO") as logs:
+            await monitor._sample_background_once()
+            await asyncio.sleep(0)
+        self.assertIs(self.current, warning)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(
+            [type(event) for event in self.events],
+            [ThermalWarningRaised, MemoryPressureRaised],
+        )
+        self.assertTrue(any("thermal_warning=raised" in line for line in logs.output))
+        self.assertTrue(any("memory_pressure=raised" in line for line in logs.output))
+        self.assertFalse(any("heartbeat samples=" in line for line in logs.output))
+
 
 class ApplicationMonitorTests(unittest.IsolatedAsyncioTestCase):
     def app(self, provider, *, bus=None, interval=0.01):
