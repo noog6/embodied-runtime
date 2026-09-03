@@ -9,8 +9,9 @@ import math
 
 from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.attention import (
-    ACTION_INITIATIVE_REQUEST, INITIATIVE_REQUEST, AttentionStimulus,
-    GoalAttentionController, InitiativeOutcome,
+    ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST, INITIATIVE_REQUEST,
+    AttentionStimulus, GoalAttentionController, InitiativeContinuationStimulus,
+    InitiativeOutcome,
 )
 from embodied_runtime.cognition import (
     ActiveGoal,
@@ -19,6 +20,7 @@ from embodied_runtime.cognition import (
     CognitionToolDefinition,
     CognitionToolResult,
     GoalOutcomeStimulus,
+    InitiativeEffectOutcome,
     TextCognitionBackend,
     WorkingMemory,
     WorkingMemoryToolOutcome,
@@ -123,10 +125,10 @@ COMPLETE_GOAL_TOOL = CognitionToolDefinition(
 )
 
 OUTCOME_EVALUATION_REQUEST = (
-    "Evaluate the outcome of the autonomous action against the current active goal. "
+    "Evaluate the bounded autonomous effect sequence against the current active goal. "
     "Current Runtime context is authoritative for what is true now. Active goal is "
     "authoritative for current intention. Working memory is historical and may be "
-    "stale. The outcome stimulus describes the runtime-produced action result. "
+    "stale. The outcome stimulus describes one or two runtime-produced effect results. "
     "Determine whether the SAME active goal is terminally complete. Do not complete "
     "an ongoing or maintenance goal merely because it is currently satisfied. If "
     "the goal is terminally complete and the runtime provides a completion capability, "
@@ -141,6 +143,7 @@ class ApplicationOptions:
     initiative_enabled: bool = False
     initiative_actions_enabled: bool = False
     initiative_messages_enabled: bool = False
+    initiative_continuation_enabled: bool = False
     initiative_goal_closure_enabled: bool = False
 
 
@@ -485,11 +488,24 @@ class RobotApplication:
         )
 
     def _attention_instructions(
-        self, stimulus: AttentionStimulus, working_memory, *, capabilities_available: bool
+        self, stimulus: AttentionStimulus, working_memory, *, capabilities_available: bool,
+        expected_goal: ActiveGoal | None = None,
     ) -> str:
+        context = compose_cognition_instructions(
+            self.cognition_context(), self.options.startup_prompt, working_memory,
+            expected_goal if self._active_goal is expected_goal else None,
+        )
+        sequencing = (
+            "\n\nYou may request at most one semantic capability in this request. "
+            "If the active goal clearly requires two distinct semantic effects in order, "
+            "choose only the effect that should happen FIRST. After a successful first "
+            "effect, the runtime may provide one bounded continuation opportunity."
+            if self.options.initiative_continuation_enabled and capabilities_available
+            else ""
+        )
         return (
-            f"{self._cognition_instructions(working_memory)}\n\n"
-            f"{stimulus.render(actions_enabled=capabilities_available)}"
+            f"{context}\n\n{stimulus.render(actions_enabled=capabilities_available)}"
+            f"{sequencing}"
         )
 
     async def _request_initiative(self, stimulus: AttentionStimulus) -> InitiativeOutcome:
@@ -501,7 +517,8 @@ class RobotApplication:
         tools = self.initiative_tools()
         capabilities_available = bool(tools)
         instructions = self._attention_instructions(
-            stimulus, prior_memory, capabilities_available=capabilities_available
+            stimulus, prior_memory, capabilities_available=capabilities_available,
+            expected_goal=expected_goal,
         )
         action: str | None = None
         action_status: str | None = None
@@ -539,7 +556,8 @@ class RobotApplication:
                 tool_executor=execute_tool if tools else None,
                 refreshed_instructions=(
                     lambda: self._attention_instructions(
-                        stimulus, prior_memory, capabilities_available=True
+                        stimulus, prior_memory, capabilities_available=True,
+                        expected_goal=expected_goal,
                     )
                 ) if tools else None,
             )
@@ -550,17 +568,36 @@ class RobotApplication:
             "[INITIATIVE] backend=%s request=completed response_chars=%s",
             backend.identifier, len(response),
         )
+        effects = []
+        if action is not None:
+            effects.append(InitiativeEffectOutcome(
+                action, action_status or "rejected",
+                action_result or '{"status": "rejected"}',
+            ))
+        continuation_completed = True
         if (
-            self.options.initiative_goal_closure_enabled
-            and action is not None
+            self.options.initiative_continuation_enabled
+            and action is not None and action_status == "applied"
+            and expected_goal is not None
+            and self.state is LifecycleState.RUNNING
+            and self._active_goal is expected_goal
+            and self.continuation_tools(action)
+        ):
+            continuation_completed, continuation_effect = await self._request_continuation(
+                stimulus, expected_goal, prior_memory, effects[0]
+            )
+            if continuation_effect is not None:
+                effects.append(continuation_effect)
+        if (
+            continuation_completed
+            and self.options.initiative_goal_closure_enabled
+            and effects
             and expected_goal is not None
             and self.state is LifecycleState.RUNNING
             and self._active_goal is expected_goal
         ):
             stimulus_outcome = GoalOutcomeStimulus(
-                action_name=action,
-                action_status=action_status or "rejected",
-                action_result=action_result or '{"status": "rejected"}',
+                effects=tuple(effects),
                 attention_kind=stimulus.kind,
                 attention_source=stimulus.source,
             )
@@ -569,12 +606,116 @@ class RobotApplication:
             )
         return InitiativeOutcome(response, action, action_status)
 
-    def _outcome_instructions(
-        self, outcome: GoalOutcomeStimulus, stimulus: AttentionStimulus,
-        working_memory,
+    def _continuation_instructions(
+        self, continuation: InitiativeContinuationStimulus,
+        stimulus: AttentionStimulus, expected_goal: ActiveGoal, working_memory,
     ) -> str:
         return "\n\n".join((
-            self._cognition_instructions(working_memory),
+            compose_cognition_instructions(
+                self.cognition_context(), self.options.startup_prompt, working_memory,
+                expected_goal if self._active_goal is expected_goal else None,
+            ),
+            stimulus.render(actions_enabled=None),
+            continuation.render(),
+        ))
+
+    async def _request_continuation(
+        self, stimulus: AttentionStimulus, expected_goal: ActiveGoal, prior_memory,
+        first_effect: InitiativeEffectOutcome,
+    ) -> tuple[bool, InitiativeEffectOutcome | None]:
+        backend = self._cognition_backend
+        assert backend is not None
+        tools = self.continuation_tools(first_effect.name)
+        if not tools:
+            return True, None
+        continuation = InitiativeContinuationStimulus(
+            first_effect.name, first_effect.status, first_effect.runtime_result,
+            stimulus.kind, stimulus.source,
+        )
+        action = status = result_text = None
+        consumed = False
+
+        async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
+            nonlocal action, status, result_text, consumed
+            if consumed:
+                return self._rejected_tool(
+                    call.name, "continuation capability request already consumed",
+                    log_prefix="CONTINUATION",
+                )
+            consumed = True
+            action = call.name
+            self.attention.record_continuation(action=action)
+            LOGGER.info("[CONTINUATION] tool=%s status=requested", call.name)
+            available = self.continuation_tools(first_effect.name)
+            if (
+                first_effect.status != "applied"
+                or self.state is not LifecycleState.RUNNING
+                or self._active_goal is not expected_goal
+                or call.name == first_effect.name
+                or not any(tool.name == call.name for tool in available)
+            ):
+                result = self._rejected_tool(
+                    call.name, "continuation capability is not available",
+                    log_prefix="CONTINUATION",
+                )
+            else:
+                result = await self._execute_initiative_tool(
+                    call, available=available, log_prefix="CONTINUATION"
+                )
+            result_text = result.output
+            try:
+                status = json.loads(result.output).get("status", "rejected")
+            except (json.JSONDecodeError, AttributeError):
+                status = "rejected"
+            self.attention.record_continuation(action_status=status)
+            return result
+
+        LOGGER.info(
+            "[CONTINUATION] backend=%s request=started capabilities=enabled",
+            backend.identifier,
+        )
+        try:
+            response = await backend.respond(
+                CONTINUATION_INITIATIVE_REQUEST,
+                instructions=self._continuation_instructions(
+                    continuation, stimulus, expected_goal, prior_memory
+                ),
+                tools=tools,
+                tool_executor=execute_tool,
+                refreshed_instructions=lambda: self._continuation_instructions(
+                    continuation, stimulus, expected_goal, prior_memory
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.attention.record_continuation(state="failed")
+            LOGGER.warning(
+                "[CONTINUATION] backend=%s request=failed", backend.identifier
+            )
+            return False, (
+                InitiativeEffectOutcome(action, status or "rejected", result_text or "")
+                if action is not None else None
+            )
+        self.attention.record_continuation(state="completed", response=response)
+        LOGGER.info(
+            "[CONTINUATION] backend=%s request=completed response_chars=%s",
+            backend.identifier, len(response),
+        )
+        return True, (
+            InitiativeEffectOutcome(action, status or "rejected", result_text or "")
+            if action is not None else None
+        )
+
+    def _outcome_instructions(
+        self, outcome: GoalOutcomeStimulus, stimulus: AttentionStimulus,
+        expected_goal: ActiveGoal, working_memory,
+    ) -> str:
+        return "\n\n".join((
+            compose_cognition_instructions(
+                self.cognition_context(), self.options.startup_prompt, working_memory,
+                expected_goal if self._active_goal is expected_goal else None,
+            ),
             stimulus.render(actions_enabled=None),
             outcome.render(),
         ))
@@ -585,7 +726,10 @@ class RobotApplication:
     ) -> None:
         backend = self._cognition_backend
         assert backend is not None
-        tools = self.outcome_tools(expected_goal, outcome.action_status)
+        all_applied = bool(outcome.effects) and all(
+            effect.status == "applied" for effect in outcome.effects
+        )
+        tools = self.outcome_tools(expected_goal, all_applied)
         LOGGER.info(
             "[OUTCOME] backend=%s request=started closure=%s", backend.identifier,
             "enabled" if tools else "disabled",
@@ -593,20 +737,20 @@ class RobotApplication:
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
             return self._execute_outcome_tool(
-                call, expected_goal, outcome.action_status
+                call, expected_goal, all_applied
             )
 
         try:
             response = await backend.respond(
                 OUTCOME_EVALUATION_REQUEST,
                 instructions=self._outcome_instructions(
-                    outcome, stimulus, prior_memory
+                    outcome, stimulus, expected_goal, prior_memory
                 ),
                 tools=tools,
                 tool_executor=execute_tool if tools else None,
                 refreshed_instructions=(
                     lambda: self._outcome_instructions(
-                        outcome, stimulus, prior_memory
+                        outcome, stimulus, expected_goal, prior_memory
                     )
                 ) if tools else None,
             )
@@ -623,12 +767,12 @@ class RobotApplication:
         )
 
     def outcome_tools(
-        self, expected_goal: ActiveGoal, action_status: str
+        self, expected_goal: ActiveGoal, all_effects_applied: bool | str
     ) -> tuple[CognitionToolDefinition, ...]:
         """Project only same-goal successful completion for outcome evaluation."""
         if (
             self.options.initiative_goal_closure_enabled
-            and action_status == "applied"
+            and (all_effects_applied is True or all_effects_applied == "applied")
             and self.state is LifecycleState.RUNNING
             and self._active_goal is expected_goal
         ):
@@ -637,7 +781,7 @@ class RobotApplication:
 
     def _execute_outcome_tool(
         self, call: CognitionToolCall, expected_goal: ActiveGoal,
-        action_status: str,
+        all_effects_applied: bool | str,
     ) -> CognitionToolResult:
         LOGGER.info("[OUTCOME] tool=%s status=requested", call.name)
         if call.name != COMPLETE_GOAL_TOOL.name:
@@ -647,7 +791,7 @@ class RobotApplication:
         try:
             self._tool_arguments(call, set())
             if COMPLETE_GOAL_TOOL not in self.outcome_tools(
-                expected_goal, action_status
+                expected_goal, all_effects_applied
             ):
                 raise RuntimeError("expected active goal is no longer current")
             self.resolve_goal("completed")
@@ -674,6 +818,16 @@ class RobotApplication:
                 self._operator_message_sink is not None):
             tools.append(ADDRESS_OPERATOR_TOOL)
         return tuple(tools)
+
+    def continuation_tools(
+        self, first_effect_name: str
+    ) -> tuple[CognitionToolDefinition, ...]:
+        """Fresh initiative projection excluding the first semantic effect."""
+        if not self.options.initiative_continuation_enabled:
+            return ()
+        return tuple(
+            tool for tool in self.initiative_tools() if tool.name != first_effect_name
+        )
 
     def cognition_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project currently safe cognition capabilities at request time."""
@@ -703,25 +857,33 @@ class RobotApplication:
         return self._rejected_tool(call.name, "tool is not available")
 
     async def _execute_initiative_tool(
-        self, call: CognitionToolCall
+        self, call: CognitionToolCall, *,
+        available: tuple[CognitionToolDefinition, ...] | None = None,
+        log_prefix: str = "INITIATIVE",
     ) -> CognitionToolResult:
+        projected = self.initiative_tools() if available is None else available
         if call.name == ORIENT_BODY_TOOL.name:
             return await self._execute_orient_body(
-                call, available=self.initiative_tools(), source="initiative",
-                log_prefix="INITIATIVE",
+                call, available=projected, source="initiative",
+                log_prefix=log_prefix,
             )
         if call.name == ADDRESS_OPERATOR_TOOL.name:
-            return await self._execute_address_operator(call)
+            return await self._execute_address_operator(
+                call, available=projected, log_prefix=log_prefix
+            )
         return self._rejected_tool(
-            call.name, "tool is not available", log_prefix="INITIATIVE"
+            call.name, "tool is not available", log_prefix=log_prefix
         )
 
     async def _execute_address_operator(
-        self, call: CognitionToolCall
+        self, call: CognitionToolCall, *,
+        available: tuple[CognitionToolDefinition, ...] | None = None,
+        log_prefix: str = "INITIATIVE",
     ) -> CognitionToolResult:
-        if ADDRESS_OPERATOR_TOOL not in self.initiative_tools():
+        projected = self.initiative_tools() if available is None else available
+        if ADDRESS_OPERATOR_TOOL not in projected:
             return self._rejected_tool(
-                call.name, "tool is not available", log_prefix="INITIATIVE"
+                call.name, "tool is not available", log_prefix=log_prefix
             )
         try:
             arguments = self._tool_arguments(call, {"message"})
@@ -749,12 +911,12 @@ class RobotApplication:
             LOGGER.info(
                 "[INTERACTION] recipient=operator source=initiative status=rejected"
             )
-            return self._rejected_tool(call.name, str(error), log_prefix="INITIATIVE")
+            return self._rejected_tool(call.name, str(error), log_prefix=log_prefix)
         LOGGER.info(
             "[INTERACTION] recipient=operator source=initiative chars=%s status=delivered",
             len(message),
         )
-        LOGGER.info("[INITIATIVE] tool=%s status=applied", call.name)
+        LOGGER.info("[%s] tool=%s status=applied", log_prefix, call.name)
         return CognitionToolResult(json.dumps({
             "status": "applied", "recipient": "operator", "message": message,
         }, sort_keys=True))

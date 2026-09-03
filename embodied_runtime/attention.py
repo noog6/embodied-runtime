@@ -22,6 +22,16 @@ ACTION_INITIATIVE_REQUEST = (
     "a response. "
     "Do not set, replace, resolve, or reinterpret the active goal."
 )
+CONTINUATION_INITIATIVE_REQUEST = (
+    "Review the first autonomous effect and fresh current Runtime context against "
+    "the SAME active goal. The first effect and its runtime-produced result are "
+    "authoritative. If one remaining DISTINCT semantic capability is still necessary, "
+    "you may request at most one; you are not required to act. Do not repeat the first "
+    "capability or retry a rejected operation. Do not create, replace, reinterpret, "
+    "resolve, or cancel goals. Do not assume another continuation will occur. After "
+    "this request, autonomous semantic execution stops. Available capabilities are "
+    "permissions, not obligations."
+)
 MAX_DIAGNOSTIC_RESPONSE_CHARS = 2000
 
 
@@ -68,6 +78,28 @@ class AttentionStimulus:
 
 
 @dataclass(frozen=True, slots=True)
+class InitiativeContinuationStimulus:
+    """Provider-neutral facts grounding the sole continuation decision."""
+
+    first_effect_name: str
+    first_effect_status: str
+    first_effect_result: str
+    attention_kind: str
+    attention_source: str
+
+    def render(self) -> str:
+        return "\n".join((
+            "Initiative continuation stimulus",
+            "The first effect already occurred; this runtime-produced result is authoritative.",
+            f"  first_effect_name: {self.first_effect_name}",
+            f"  first_effect_status: {self.first_effect_status}",
+            f"  first_effect_result: {self.first_effect_result}",
+            f"  attention_kind: {self.attention_kind}",
+            f"  attention_source: {self.attention_source}",
+        ))
+
+
+@dataclass(frozen=True, slots=True)
 class AttentionStatus:
     enabled: bool
     state: str
@@ -76,6 +108,10 @@ class AttentionStatus:
     last_response: str | None
     last_action: str | None
     last_action_status: str | None
+    last_continuation_state: str
+    last_continuation_action: str | None
+    last_continuation_action_status: str | None
+    last_continuation_response: str | None
     last_outcome_state: str
     last_goal_closure: str
     last_outcome_response: str | None
@@ -107,6 +143,10 @@ class GoalAttentionController:
         self._last_response: str | None = None
         self._last_action: str | None = None
         self._last_action_status: str | None = None
+        self._last_continuation_state = "not_run"
+        self._last_continuation_action: str | None = None
+        self._last_continuation_action_status: str | None = None
+        self._last_continuation_response: str | None = None
         self._last_outcome_state = "not_run"
         self._last_goal_closure = "none"
         self._last_outcome_response: str | None = None
@@ -134,6 +174,10 @@ class GoalAttentionController:
         return AttentionStatus(self.enabled, self._state, self._last_trigger,
                                self._last_source, self._last_response,
                                self._last_action, self._last_action_status,
+                               self._last_continuation_state,
+                               self._last_continuation_action,
+                               self._last_continuation_action_status,
+                               self._last_continuation_response,
                                self._last_outcome_state, self._last_goal_closure,
                                self._last_outcome_response)
 
@@ -154,6 +198,20 @@ class GoalAttentionController:
         if response is not None:
             self._last_outcome_response = response[:MAX_DIAGNOSTIC_RESPONSE_CHARS]
 
+    def record_continuation(
+        self, *, state: str | None = None, action: str | None = None,
+        action_status: str | None = None, response: str | None = None,
+    ) -> None:
+        """Update volatile continuation diagnostics without owning execution."""
+        if state is not None:
+            self._last_continuation_state = state
+        if action is not None:
+            self._last_continuation_action = action
+        if action_status is not None:
+            self._last_continuation_action_status = action_status
+        if response is not None:
+            self._last_continuation_response = response[:MAX_DIAGNOSTIC_RESPONSE_CHARS]
+
     async def _on_event(self, event: BodyOrientationChanged) -> None:
         if not self._is_running() or not self._backend_available or not self._has_active_goal():
             return
@@ -172,6 +230,10 @@ class GoalAttentionController:
         self._last_response = None
         self._last_action = None
         self._last_action_status = None
+        self._last_continuation_state = "not_run"
+        self._last_continuation_action = None
+        self._last_continuation_action_status = None
+        self._last_continuation_response = None
         self._last_outcome_state = "not_run"
         self._last_goal_closure = "none"
         self._last_outcome_response = None

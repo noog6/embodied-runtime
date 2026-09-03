@@ -11,8 +11,8 @@ cognition; `--initiative` is exactly read-only; `--initiative-actions` permits
 `orient_body` on a nonphysical body; and `--initiative-messages` permits
 `address_operator`. The latter currently requires `--console`, because the local
 console is the only configured operator transport. No flag silently enables
-another. With both effect permissions, both tools are offered but the runtime
-accepts only one request total. Goal closure requires initiative plus at least
+another. With both effect permissions, both tools are offered but the runtime accepts
+only one request total unless bounded continuation is explicitly enabled. Goal closure requires initiative plus at least
 one effect permission.
 
 The console concurrently waits for selector-based input and a transient outbound
@@ -64,3 +64,12 @@ tokens and reports malformed quoting without a traceback. EOF also ends cleanly.
 The text following `ask` is instead treated as raw natural-language payload, so
 apostrophes and punctuation do not require shell quoting. Cognition errors are
 reported without ending the console session.
+
+With `--initiative-continuation`, `attention` additionally reports the latest
+continuation state, action, action status, and bounded response. The flag
+requires initiative plus both action and message permissions; the latter still
+requires `--console`. It permits one independent second request only after an
+applied first effect, and that request may use at most one different capability.
+Thus one attention episode can request at most two distinct semantic effects.
+Rejected first effects are not retried or followed by a continuation. The
+`CONTINUATION` log category uses the existing high-attention colour palette.

@@ -176,6 +176,10 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  last_action:   none\n"
             "  last_action_status: none\n"
             "  last_response: unavailable\n"
+            "  last_continuation_state: not_run\n"
+            "  last_continuation_action: none\n"
+            "  last_continuation_status: none\n"
+            "  last_continuation_response: unavailable\n"
             "  last_outcome_state: not_run\n"
             "  last_goal_closure: none\n"
             "  last_outcome_response: unavailable", False
@@ -487,6 +491,7 @@ class ConsoleCliTests(unittest.TestCase):
         self.assertEqual(defaults.cognition, "none")
         self.assertFalse(defaults.initiative)
         self.assertFalse(defaults.initiative_actions)
+        self.assertFalse(defaults.initiative_continuation)
         self.assertFalse(defaults.initiative_goal_closure)
         self.assertFalse(defaults.no_color)
         self.assertTrue(build_parser().parse_args(["--no-color"]).no_color)

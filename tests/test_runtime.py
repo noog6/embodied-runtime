@@ -174,6 +174,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(args.initiative)
         self.assertFalse(args.initiative_actions)
         self.assertFalse(args.initiative_messages)
+        self.assertFalse(args.initiative_continuation)
         self.assertFalse(args.initiative_goal_closure)
 
     def test_initiative_requires_cognition_backend(self) -> None:
@@ -203,6 +204,19 @@ class CliTests(unittest.TestCase):
             ["--initiative-goal-closure", "--console"],
             ["--cognition", "openai-responses", "--initiative",
              "--initiative-goal-closure", "--console"],
+        ):
+            with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
+                main(argv)
+
+    def test_initiative_continuation_requires_all_effect_permissions(self) -> None:
+        for argv in (
+            ["--initiative-continuation", "--console"],
+            ["--cognition", "openai-responses", "--initiative",
+             "--initiative-continuation", "--console"],
+            ["--cognition", "openai-responses", "--initiative",
+             "--initiative-actions", "--initiative-continuation", "--console"],
+            ["--cognition", "openai-responses", "--initiative",
+             "--initiative-messages", "--initiative-continuation", "--console"],
         ):
             with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
                 main(argv)

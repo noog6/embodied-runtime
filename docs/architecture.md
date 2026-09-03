@@ -108,8 +108,8 @@ With opt-in initiative, one narrow path is transition-driven:
 events, owns the one-in-flight lifecycle, cancellation, and volatile diagnostics.
 `--initiative` remains exactly read-only. Independent effect permissions project
 `orient_body` for a nonphysical body and/or `address_operator` when an operator
-message sink is configured. The application accepts at most one capability
-request total, even if both are offered.
+message sink is configured. Without the Phase 10 continuation opt-in, the application accepts at most one
+capability request total, even if both are offered.
 
 For outward initiative, cognition chooses only bounded message text.
 `RobotApplication` validates it and delivers an immutable
@@ -124,5 +124,26 @@ WorkingMemory nor RuntimeState and create no history. With explicit
 `--initiative-goal-closure`, one requested effect may receive one independent
 outcome evaluation using fresh reality and the same request-local goal and memory
 snapshot. An applied effect may expose only `complete_goal`, guarded by same-goal
-identity; a rejected effect is evaluated read-only. No second effect, retry,
-planning, pursuit loop, or goal replacement is available.
+identity; a rejected effect is evaluated read-only. Without continuation, no second effect is available; retry, planning, pursuit
+loops, and goal replacement remain unavailable in every mode.
+
+Phase 10 optionally extends application orchestration—not attention or the
+provider adapter—with one bounded continuation:
+
+```text
+attention -> independent Initiative A -> optional effect #1
+          -> fresh runtime -> independent Continuation B -> optional distinct effect #2
+          -> fresh runtime -> optional independent Outcome C -> stop
+```
+
+`--initiative-continuation` requires both current effect permissions. The
+application snapshots WorkingMemory once, captures the exact ActiveGoal object,
+and reuses both across A, B, and C while rendering fresh RuntimeState for each.
+B is eligible only after an applied first effect, while running with that same
+goal, and only when a different capability is freshly available. Each request
+accepts at most one call; B cannot repeat A's tool. Outcome grounding contains
+one or two effect results and exposes completion only if all requested effects
+applied. Attention still owns event selection, one in-flight task, cancellation,
+and volatile diagnostics; `RobotApplication` owns projection, validation,
+execution, identity checks, and ordering. There is no planner, loop, retry,
+persistent memory, or provider session.
