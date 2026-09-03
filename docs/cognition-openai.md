@@ -24,7 +24,18 @@ at most one `orient_body` action on a nonphysical body. This projection never
 includes `set_goal` or `resolve_goal`; physical bodies still receive no tools.
 The tool result and freshly rendered authoritative context are supplied to the
 request-local final continuation. Neither mode creates provider conversation
-state, enters WorkingMemory, or changes ActiveGoal. `previous_response_id`
+state, enters WorkingMemory, or changes ActiveGoal. Add
+`--initiative-goal-closure` (which requires `--initiative-actions`) to permit
+one second, independent outcome-evaluation request after an initiative action
+was actually requested. It receives fresh Runtime context, the same captured
+ActiveGoal and WorkingMemory snapshot, the original attention stimulus, and a
+provider-neutral action-result stimulus. After an applied action its only tool
+is argument-free `complete_goal`; after rejection it receives no tools. The
+runtime checks that the same goal instance remains current before evaluation
+and again before completion. Applied action does not imply completion:
+currently satisfying an ongoing maintenance commitment is not terminally
+completing it. No autonomous cancellation, goal creation, or second body action
+is exposed. `previous_response_id`
 remains confined to a single tool continuation and is never carried forward.
 
 One independent request can be made without shell quoting:

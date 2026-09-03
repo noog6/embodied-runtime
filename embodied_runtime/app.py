@@ -18,6 +18,7 @@ from embodied_runtime.cognition import (
     CognitionToolCall,
     CognitionToolDefinition,
     CognitionToolResult,
+    GoalOutcomeStimulus,
     TextCognitionBackend,
     WorkingMemory,
     WorkingMemoryToolOutcome,
@@ -86,12 +87,39 @@ RESOLVE_GOAL_TOOL = CognitionToolDefinition(
     },
 )
 
+COMPLETE_GOAL_TOOL = CognitionToolDefinition(
+    name="complete_goal",
+    description=(
+        "Complete the same active goal only when the action outcome makes that "
+        "goal terminally complete. Current satisfaction alone is insufficient."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    },
+)
+
+OUTCOME_EVALUATION_REQUEST = (
+    "Evaluate the outcome of the autonomous action against the current active goal. "
+    "Current Runtime context is authoritative for what is true now. Active goal is "
+    "authoritative for current intention. Working memory is historical and may be "
+    "stale. The outcome stimulus describes the runtime-produced action result. "
+    "Determine whether the SAME active goal is terminally complete. Do not complete "
+    "an ongoing or maintenance goal merely because it is currently satisfied. If "
+    "the goal is terminally complete and the runtime provides a completion capability, "
+    "you may request it. Otherwise leave the goal active. Do not create, replace, "
+    "reinterpret, or cancel goals. Do not request another body action."
+)
+
 
 @dataclass(frozen=True)
 class ApplicationOptions:
     startup_prompt: str | None = None
     initiative_enabled: bool = False
     initiative_actions_enabled: bool = False
+    initiative_goal_closure_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -446,15 +474,17 @@ class RobotApplication:
             raise RuntimeError("No cognition backend is configured")
         actions_enabled = self.options.initiative_actions_enabled
         prior_memory = self.working_memory.snapshot()
+        expected_goal = self._active_goal
         instructions = self._attention_instructions(
             stimulus, prior_memory, actions_enabled=actions_enabled
         )
         tools = self.initiative_tools()
         action: str | None = None
         action_status: str | None = None
+        action_result: str | None = None
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
-            nonlocal action, action_status
+            nonlocal action, action_status, action_result
             action = call.name
             LOGGER.info("[INITIATIVE] tool=%s status=requested", call.name)
             result = await self._execute_initiative_tool(call)
@@ -462,6 +492,7 @@ class RobotApplication:
                 action_status = json.loads(result.output).get("status", "rejected")
             except (json.JSONDecodeError, AttributeError):
                 action_status = "rejected"
+            action_result = result.output
             self.attention.record_action(action, action_status)
             return result
 
@@ -488,7 +519,115 @@ class RobotApplication:
             "[INITIATIVE] backend=%s request=completed response_chars=%s",
             backend.identifier, len(response),
         )
+        if (
+            self.options.initiative_goal_closure_enabled
+            and action is not None
+            and expected_goal is not None
+            and self.state is LifecycleState.RUNNING
+            and self._active_goal is expected_goal
+        ):
+            stimulus_outcome = GoalOutcomeStimulus(
+                action_name=action,
+                action_status=action_status or "rejected",
+                action_result=action_result or '{"status": "rejected"}',
+                attention_kind=stimulus.kind,
+                attention_source=stimulus.source,
+            )
+            await self._request_outcome_evaluation(
+                stimulus_outcome, stimulus, expected_goal, prior_memory
+            )
         return InitiativeOutcome(response, action, action_status)
+
+    def _outcome_instructions(
+        self, outcome: GoalOutcomeStimulus, stimulus: AttentionStimulus,
+        working_memory,
+    ) -> str:
+        return "\n\n".join((
+            self._cognition_instructions(working_memory),
+            stimulus.render(actions_enabled=None),
+            outcome.render(),
+        ))
+
+    async def _request_outcome_evaluation(
+        self, outcome: GoalOutcomeStimulus, stimulus: AttentionStimulus,
+        expected_goal: ActiveGoal, prior_memory,
+    ) -> None:
+        backend = self._cognition_backend
+        assert backend is not None
+        tools = self.outcome_tools(expected_goal, outcome.action_status)
+        LOGGER.info(
+            "[OUTCOME] backend=%s request=started closure=%s", backend.identifier,
+            "enabled" if tools else "disabled",
+        )
+
+        async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
+            return self._execute_outcome_tool(
+                call, expected_goal, outcome.action_status
+            )
+
+        try:
+            response = await backend.respond(
+                OUTCOME_EVALUATION_REQUEST,
+                instructions=self._outcome_instructions(
+                    outcome, stimulus, prior_memory
+                ),
+                tools=tools,
+                tool_executor=execute_tool if tools else None,
+                refreshed_instructions=(
+                    lambda: self._outcome_instructions(
+                        outcome, stimulus, prior_memory
+                    )
+                ) if tools else None,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.attention.record_outcome(state="failed")
+            LOGGER.warning("[OUTCOME] backend=%s request=failed", backend.identifier)
+            return
+        self.attention.record_outcome(state="completed", response=response)
+        LOGGER.info(
+            "[OUTCOME] backend=%s request=completed response_chars=%s",
+            backend.identifier, len(response),
+        )
+
+    def outcome_tools(
+        self, expected_goal: ActiveGoal, action_status: str
+    ) -> tuple[CognitionToolDefinition, ...]:
+        """Project only same-goal successful completion for outcome evaluation."""
+        if (
+            self.options.initiative_goal_closure_enabled
+            and action_status == "applied"
+            and self.state is LifecycleState.RUNNING
+            and self._active_goal is expected_goal
+        ):
+            return (COMPLETE_GOAL_TOOL,)
+        return ()
+
+    def _execute_outcome_tool(
+        self, call: CognitionToolCall, expected_goal: ActiveGoal,
+        action_status: str,
+    ) -> CognitionToolResult:
+        LOGGER.info("[OUTCOME] tool=%s status=requested", call.name)
+        if call.name != COMPLETE_GOAL_TOOL.name:
+            return self._rejected_tool(
+                call.name, "tool is not available", log_prefix="OUTCOME"
+            )
+        try:
+            self._tool_arguments(call, set())
+            if COMPLETE_GOAL_TOOL not in self.outcome_tools(
+                expected_goal, action_status
+            ):
+                raise RuntimeError("expected active goal is no longer current")
+            self.resolve_goal("completed")
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
+            self.attention.record_outcome(closure="rejected")
+            return self._rejected_tool(
+                call.name, str(error), log_prefix="OUTCOME"
+            )
+        self.attention.record_outcome(closure="completed")
+        LOGGER.info("[OUTCOME] tool=%s status=applied", call.name)
+        return CognitionToolResult(json.dumps({"status": "completed"}, sort_keys=True))
 
     def initiative_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project the sole bounded autonomous capability at request time."""

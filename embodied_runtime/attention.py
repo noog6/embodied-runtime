@@ -32,21 +32,28 @@ class AttentionStimulus:
     yaw_degrees: float
     pitch_degrees: float
 
-    def render(self, *, actions_enabled: bool = False) -> str:
+    def render(self, *, actions_enabled: bool | None = False) -> str:
         capability_guidance = (
-            "Available tools are permissions, not obligations. Do not claim an action "
-            "succeeded until its runtime-produced tool result says so."
+            (
+                "Available tools are permissions, not obligations. Do not claim an action "
+                "succeeded until its runtime-produced tool result says so."
+            )
             if actions_enabled else
-            "No semantic tools or actions are available in this pass. Do not claim an "
-            "action occurred unless Runtime context says it did."
+            (
+                "No semantic tools or actions are available in this pass. Do not claim an "
+                "action occurred unless Runtime context says it did."
+            )
         )
-        return "\n".join((
+        lines = [
             "Attention stimulus",
             "This is a runtime-generated reason for an unsolicited cognition",
             "pass. It is not operator input. Runtime context is authoritative for current",
             "facts; Active goal is authoritative for current intention; Working memory is",
             "historical and may be stale.",
-            capability_guidance,
+        ]
+        if actions_enabled is not None:
+            lines.append(capability_guidance)
+        lines.extend((
             "",
             f"  kind: {self.kind}",
             f"  source: {self.source}",
@@ -55,6 +62,7 @@ class AttentionStimulus:
             f"  yaw_deg: {self.yaw_degrees}",
             f"  pitch_deg: {self.pitch_degrees}",
         ))
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +74,9 @@ class AttentionStatus:
     last_response: str | None
     last_action: str | None
     last_action_status: str | None
+    last_outcome_state: str
+    last_goal_closure: str
+    last_outcome_response: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +105,9 @@ class GoalAttentionController:
         self._last_response: str | None = None
         self._last_action: str | None = None
         self._last_action_status: str | None = None
+        self._last_outcome_state = "not_run"
+        self._last_goal_closure = "none"
+        self._last_outcome_response: str | None = None
 
     async def start(self, events: EventBus) -> None:
         if not self.enabled:
@@ -117,12 +131,26 @@ class GoalAttentionController:
     def status(self) -> AttentionStatus:
         return AttentionStatus(self.enabled, self._state, self._last_trigger,
                                self._last_source, self._last_response,
-                               self._last_action, self._last_action_status)
+                               self._last_action, self._last_action_status,
+                               self._last_outcome_state, self._last_goal_closure,
+                               self._last_outcome_response)
 
     def record_action(self, action: str, status: str) -> None:
         """Record the latest runtime-produced result for the in-flight episode."""
         self._last_action = action
         self._last_action_status = status
+
+    def record_outcome(
+        self, *, state: str | None = None, closure: str | None = None,
+        response: str | None = None,
+    ) -> None:
+        """Update volatile outcome diagnostics without interpreting goal semantics."""
+        if state is not None:
+            self._last_outcome_state = state
+        if closure is not None:
+            self._last_goal_closure = closure
+        if response is not None:
+            self._last_outcome_response = response[:MAX_DIAGNOSTIC_RESPONSE_CHARS]
 
     async def _on_event(self, event: BodyOrientationChanged) -> None:
         if not self._is_running() or not self._backend_available or not self._has_active_goal():
@@ -142,6 +170,9 @@ class GoalAttentionController:
         self._last_response = None
         self._last_action = None
         self._last_action_status = None
+        self._last_outcome_state = "not_run"
+        self._last_goal_closure = "none"
+        self._last_outcome_response = None
         self._state = "in_flight"
         LOGGER.info("[ATTENTION] event=body_orientation_changed source=%s decision=wake", event.source)
         self._task = asyncio.create_task(self._reflect(stimulus), name="initiative:goal_attention")

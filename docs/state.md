@@ -21,11 +21,14 @@ Events announce discrete facts and transitions; they neither own state nor
 serve as a state history. Diagnostics are read-only projections of the latest
 authoritative state.
 
-Attention's latest trigger, source, state, optional bounded response, and latest
-initiative action/status are
+Attention's latest trigger, source, state, optional bounded response, latest
+initiative action/status, outcome request state, goal-closure result, and
+bounded outcome response are
 volatile developer diagnostics, not `RuntimeState`, WorkingMemory, ActiveGoal,
 persistent memory, provider state, or physical truth. They clear on restart and
-are never fed into later cognition.
+outcome fields reset when a new episode begins. They are never fed into later
+cognition. A recorded successful closure remains in
+diagnostics even if the provider's post-tool continuation fails.
 
 Platform state describes the host computer and operating system independently
 of the robot hardware backend. A Raspberry Pi host can therefore run the
