@@ -104,19 +104,25 @@ subsequently establishes.
 
 With opt-in initiative, one narrow path is transition-driven:
 `BodyOrientationChanged` from a local reflex -> attention gate, plus an existing
-`ActiveGoal` -> optional one-shot cognition. Attention does not interpret goal
-text, own state, or poll. `--initiative` remains read-only. The additional
-`--initiative-actions` opt-in lets one episode request at most one `orient_body`
-capability, and only on a nonphysical body. The application owns this separate
-autonomous projection and dispatcher. Actions use source `initiative`, so they
-do not meet the gate's `reflex:` source rule and cannot recursively wake it.
-Autonomous responses and outcomes are not appended to WorkingMemory. An action
-alone neither resolves nor changes `ActiveGoal`. With the additional explicit
-`--initiative-goal-closure` permission, an episode that requested an action may
-make one independent outcome-evaluation cognition request. That request sees
-fresh reality, the same request-local history snapshot, and the original
-stimulus. After an applied action it may request only `complete_goal`; the
-application rechecks that the exact same goal object is still active and maps
-the request to `resolve_goal("completed")`. A rejected action is evaluated with
-no tools. No second body action, retry, cancellation, or goal replacement is
-available. Current satisfaction is not synonymous with terminal completion.
+`ActiveGoal` -> optional one-shot cognition. Attention only selects semantic
+events, owns the one-in-flight lifecycle, cancellation, and volatile diagnostics.
+`--initiative` remains exactly read-only. Independent effect permissions project
+`orient_body` for a nonphysical body and/or `address_operator` when an operator
+message sink is configured. The application accepts at most one capability
+request total, even if both are offered.
+
+For outward initiative, cognition chooses only bounded message text.
+`RobotApplication` validates it and delivers an immutable
+`OperatorMessage(text, source="initiative")` through a provider-neutral sink. The
+local console is today's concrete transport; speech, web, and mobile transports
+are possible replacements but are not implemented. Recipient, source, routing,
+and presentation remain runtime-owned. Questions do not wait for or correlate a
+reply.
+
+Autonomous responses, messages, tool results, and outcomes enter neither
+WorkingMemory nor RuntimeState and create no history. With explicit
+`--initiative-goal-closure`, one requested effect may receive one independent
+outcome evaluation using fresh reality and the same request-local goal and memory
+snapshot. An applied effect may expose only `complete_goal`, guarded by same-goal
+identity; a rejected effect is evaluated read-only. No second effect, retry,
+planning, pursuit loop, or goal replacement is available.

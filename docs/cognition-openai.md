@@ -18,25 +18,24 @@ python main.py --cognition openai-responses --console
 ```
 
 Add `--initiative` for read-only noticing and thinking. It uses exactly
-`tools=()`, no tool executor, and no refreshed-instructions callback. Add the
-separate `--initiative-actions` flag to let that one autonomous episode request
-at most one `orient_body` action on a nonphysical body. This projection never
-includes `set_goal` or `resolve_goal`; physical bodies still receive no tools.
-The tool result and freshly rendered authoritative context are supplied to the
-request-local final continuation. Neither mode creates provider conversation
-state, enters WorkingMemory, or changes ActiveGoal. Add
-`--initiative-goal-closure` (which requires `--initiative-actions`) to permit
-one second, independent outcome-evaluation request after an initiative action
-was actually requested. It receives fresh Runtime context, the same captured
-ActiveGoal and WorkingMemory snapshot, the original attention stimulus, and a
-provider-neutral action-result stimulus. After an applied action its only tool
-is argument-free `complete_goal`; after rejection it receives no tools. The
-runtime checks that the same goal instance remains current before evaluation
-and again before completion. Applied action does not imply completion:
-currently satisfying an ongoing maintenance commitment is not terminally
-completing it. No autonomous cancellation, goal creation, or second body action
-is exposed. `previous_response_id`
-remains confined to a single tool continuation and is never carried forward.
+`tools=()`, no tool executor, and no refreshed-instructions callback.
+`--initiative-actions` independently offers `orient_body` on a nonphysical body.
+`--initiative-messages --console` offers the transport-neutral
+`address_operator(message)` capability, with the console as today's concrete
+operator channel. A statement or question is delivered once and never waits for
+a reply. With both permissions the adapter may receive both definitions, while
+`RobotApplication` independently enforces one capability request total.
+
+`--initiative-goal-closure` requires initiative and at least one effect
+permission. One requested effect receives one independent outcome evaluation
+using fresh Runtime context, the same captured ActiveGoal and WorkingMemory
+snapshot, the original stimulus, and the runtime-produced result. An applied
+effect may expose only argument-free `complete_goal`; rejection is read-only.
+Same-goal identity is rechecked before evaluation and completion. Outgoing text
+is not WorkingMemory, RuntimeState, persistent history, or reply-correlation
+state. No autonomous cancellation, replacement, second effect, or wait for a
+human is exposed. `previous_response_id` remains confined to a single tool
+continuation and is never carried forward.
 
 One independent request can be made without shell quoting:
 

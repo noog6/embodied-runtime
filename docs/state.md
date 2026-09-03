@@ -17,6 +17,11 @@ a physical fact. `WorkingMemory` remains historical context and may remember
 old goal discussions without owning the active goal. Neither abstraction
 changes physical-state ownership.
 
+An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
+or persistent history. It is one transient delivery effect through an
+application-supplied interaction sink. Its text is not retained for reply
+correlation, and a question creates no pending state.
+
 Events announce discrete facts and transitions; they neither own state nor
 serve as a state history. Diagnostics are read-only projections of the latest
 authoritative state.
