@@ -1,26 +1,43 @@
-"""Provider-neutral grounding for one autonomous action outcome."""
+"""Provider-neutral grounding for a bounded autonomous effect sequence."""
 
 from dataclasses import dataclass
 import json
 
 
 @dataclass(frozen=True, slots=True)
-class GoalOutcomeStimulus:
-    """Immutable semantic facts produced by one initiative action attempt."""
+class InitiativeEffectOutcome:
+    """One immutable runtime-produced semantic effect result."""
 
-    action_name: str
-    action_status: str
-    action_result: str
+    name: str
+    status: str
+    runtime_result: str
+
+
+@dataclass(frozen=True, slots=True)
+class GoalOutcomeStimulus:
+    """Immutable semantic facts produced by one or two initiative attempts."""
+
+    effects: tuple[InitiativeEffectOutcome, ...]
     attention_kind: str
     attention_source: str
+
+    def __post_init__(self) -> None:
+        if len(self.effects) not in (1, 2):
+            raise ValueError("outcome stimulus requires one or two effects")
 
     def render(self) -> str:
         return "\n".join((
             "Goal outcome stimulus",
-            "This is the runtime-produced result of the autonomous action attempt.",
-            f"  action: {self.action_name}",
-            f"  status: {self.action_status}",
-            f"  result: {json.dumps(self.action_result, ensure_ascii=False)}",
+            "These are the runtime-produced results of the bounded autonomous effects.",
+            *(
+                line
+                for index, effect in enumerate(self.effects, start=1)
+                for line in (
+                    f"  effect_{index}_name: {effect.name}",
+                    f"  effect_{index}_status: {effect.status}",
+                    f"  effect_{index}_result: {json.dumps(effect.runtime_result, ensure_ascii=False)}",
+                )
+            ),
             f"  attention_kind: {self.attention_kind}",
             f"  attention_source: {self.attention_source}",
         ))

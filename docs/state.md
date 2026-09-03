@@ -27,11 +27,11 @@ serve as a state history. Diagnostics are read-only projections of the latest
 authoritative state.
 
 Attention's latest trigger, source, state, optional bounded response, latest
-initiative action/status, outcome request state, goal-closure result, and
-bounded outcome response are
+initiative action/status, continuation request/action/status/response, outcome
+request state, goal-closure result, and bounded outcome response are
 volatile developer diagnostics, not `RuntimeState`, WorkingMemory, ActiveGoal,
 persistent memory, provider state, or physical truth. They clear on restart and
-outcome fields reset when a new episode begins. They are never fed into later
+continuation and outcome fields reset when a new episode begins. They are never fed into later
 cognition. A recorded successful closure remains in
 diagnostics even if the provider's post-tool continuation fails.
 
@@ -71,3 +71,14 @@ Backends, the console, and events do not independently own these facts.
 Local reflexes do not add or own authoritative state; they consume semantic
 events and request application capabilities that update state through its
 existing owner.
+
+Phase 10 continuation data is request-local, not authoritative state. One
+immutable WorkingMemory snapshot and exact ActiveGoal identity are captured at
+the attention episode's start and reused for initiative, the optional
+continuation, and optional outcome evaluation. RuntimeState is freshly projected
+for each request. `InitiativeContinuationStimulus` contains only the first effect
+name/status/runtime result and original attention identity; outcome grounding
+contains one or two immutable effect results. Neither stimulus, autonomous
+response, effect result, nor operator message is persisted or appended to
+WorkingMemory. Continuation diagnostics are latest-episode volatile metadata
+only.

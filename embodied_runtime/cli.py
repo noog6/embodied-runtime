@@ -60,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow initiative one bounded message to the operator",
     )
     parser.add_argument(
+        "--initiative-continuation", action="store_true",
+        help="allow one independent, distinct second initiative effect",
+    )
+    parser.add_argument(
         "--initiative-goal-closure", action="store_true",
         help="allow one post-action evaluation to complete the same active goal",
     )
@@ -186,6 +190,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
                                               initiative_enabled=args.initiative,
                                               initiative_actions_enabled=args.initiative_actions,
                                               initiative_messages_enabled=args.initiative_messages,
+                                              initiative_continuation_enabled=args.initiative_continuation,
                                               initiative_goal_closure_enabled=args.initiative_goal_closure),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
@@ -257,6 +262,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--initiative-messages requires --initiative")
     if args.initiative_messages and not args.console:
         parser.error("--initiative-messages requires --console")
+    if args.initiative_continuation and not args.initiative:
+        parser.error("--initiative-continuation requires --initiative")
+    if args.initiative_continuation and not args.initiative_actions:
+        parser.error("--initiative-continuation requires --initiative-actions")
+    if args.initiative_continuation and not args.initiative_messages:
+        parser.error("--initiative-continuation requires --initiative-messages")
     if args.initiative and args.cognition == "none":
         parser.error("--initiative requires a cognition backend")
     if args.fusion_servo_test is not None and not args.diagnostics:

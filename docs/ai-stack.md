@@ -37,7 +37,7 @@ is neither handed to nor queried by the cognition backend. Each request remains
 independent. AI intent is advisory: the runtime decides whether and how an
 action occurs. Autonomous semantic capabilities are explicitly projected:
 `orient_body` remains limited to a nonphysical body, while `address_operator`
-is independent of body physicality. The runtime accepts at most one initiative
+is independent of body physicality. Without continuation, the runtime accepts at most one initiative
 capability request per episode. Cognition-driven physical actuation is not
 approved. No model-controlled or persistent memory, images, Realtime, or audio
 capability is added. See
@@ -64,7 +64,7 @@ a provider-neutral attention stimulus. Initiative now has independent capability
 - `--initiative` is read-only with exactly no tools or continuation;
 - `--initiative-actions` permits `orient_body` only on a nonphysical body;
 - `--initiative-messages` permits `address_operator` only with a configured sink;
-- enabling both offers both, but the runtime accepts at most one request total;
+- enabling both offers both, but without continuation the runtime accepts at most one request total;
 - `--initiative-goal-closure` requires at least one effect permission and permits
   one independent post-effect evaluation and same-goal completion after an
   applied effect.
@@ -76,8 +76,7 @@ message, not that the human read or acknowledged it. Messages and questions are
 volatile effects: they do not enter WorkingMemory, RuntimeState, EventBus history,
 or a transcript, and establish no pending answer or reply correlation. Attention
 continues to own only selection, one-in-flight lifecycle, cancellation, and
-latest diagnostics. There is no polling, retry, second effect, or physical
-autonomy.
+latest diagnostics. There is no polling, retry, unbounded effect sequence, or physical autonomy.
 
 ## Direct speech-to-speech
 
@@ -116,3 +115,27 @@ APIs.
 
 Architecture experiments should compare responsibility boundaries and
 behaviour, not merely benchmark model names.
+
+## Phase 10: bounded sequential initiative
+
+`--initiative-continuation` is an explicit opt-in requiring `--initiative`,
+`--initiative-actions`, and `--initiative-messages` (and therefore today's
+`--console` message sink). Request A retains its Phase 9 one-call budget. Only
+when its requested effect is `applied`, the application is still running, the
+exact episode-start `ActiveGoal` object remains current, and a different freshly
+projected capability remains does the application issue one independent Request
+B. Request B excludes the first tool and has its own one-call budget, giving a
+hard ceiling of two distinct semantic effect requests. A rejection, missing
+first effect, stale goal, stopped runtime, or missing remaining capability ends
+the sequence without retry or fallback.
+
+Both requests use the one WorkingMemory snapshot captured at episode start;
+autonomous text and effects are never appended. Request B receives fresh
+RuntimeState plus the original attention stimulus and an immutable
+`InitiativeContinuationStimulus` describing the first runtime-produced result.
+If goal closure is enabled, one independent outcome evaluation follows the
+finished sequence and receives one or two immutable effect outcomes. Completion
+is available only when every requested effect applied and same-goal/running
+checks still pass. Maintenance goals remain active unless the evaluator actually
+requests completion. This is one continuation, not planning, pursuit, retry,
+provider state, or a conversation session.

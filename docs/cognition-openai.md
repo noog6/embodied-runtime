@@ -33,8 +33,8 @@ snapshot, the original stimulus, and the runtime-produced result. An applied
 effect may expose only argument-free `complete_goal`; rejection is read-only.
 Same-goal identity is rechecked before evaluation and completion. Outgoing text
 is not WorkingMemory, RuntimeState, persistent history, or reply-correlation
-state. No autonomous cancellation, replacement, second effect, or wait for a
-human is exposed. `previous_response_id` remains confined to a single tool
+state. No autonomous cancellation, replacement, unbounded effect sequence, or wait for
+a human is exposed. `previous_response_id` remains confined to a single tool
 continuation and is never carried forward.
 
 One independent request can be made without shell quoting:
@@ -88,3 +88,24 @@ Independent requests gain continuity only because the runtime explicitly
 supplies its working-memory snapshot. This phase adds no durable storage, task
 manager, planning, retries, physical autonomous action, images, perception,
 audio, streaming, or Realtime API integration.
+
+## Bounded continuation
+
+Add `--initiative-continuation` only together with `--initiative`,
+`--initiative-actions`, `--initiative-messages`, and today's required
+`--console` transport. Initiative Request A remains a one-tool request. After an
+applied effect, the runtime may make exactly one new independent continuation
+request with fresh Runtime context, the same captured ActiveGoal identity, the
+same episode-start WorkingMemory snapshot, the original attention stimulus, and
+the first runtime-produced effect result. Its tool projection is fresh and
+excludes the first tool; its first call consumes its budget even when rejected.
+There is no continuation after a rejected or absent first effect.
+
+The optional outcome request follows the continuation and describes one or two
+effect results. `complete_goal` is available only when every requested effect
+applied and the same goal remains active. Ongoing maintenance goals are not
+automatically completed. The OpenAI adapter is unchanged: A, B, and outcome C
+are separate `respond()` calls. Any `previous_response_id` is confined to the
+adapter's internal tool-result continuation for one call and is never carried
+from A to B or B to C. This adds no planning, retries, pursuit loop, or provider
+conversation state.
