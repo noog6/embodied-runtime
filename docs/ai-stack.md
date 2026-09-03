@@ -63,14 +63,23 @@ a provider-neutral attention stimulus. The modes are deliberately distinct:
   tools, executor, or refreshed-instructions continuation;
 - `--initiative --initiative-actions` permits at most one `orient_body`
   request when the semantic-orientation body is nonphysical.
+- `--initiative --initiative-actions --initiative-goal-closure` additionally
+  permits one independent post-action outcome evaluation and, after an applied
+  action only, a request to complete that same still-active goal.
 
 The autonomous projection never includes `set_goal` or `resolve_goal`, and a
 physical body receives no autonomous tools. Runtime validation remains
 authoritative. A successful action is sourced as `initiative`; the final tool
 continuation receives freshly composed authoritative grounding. Every episode
-adds no memory turn and changes no goal. One request may be in flight; later
+adds no memory turn, and action does not automatically change its goal. The
+outcome model, not runtime prose parsing or body equality, distinguishes a goal
+that is merely currently satisfied from one that is terminally complete. The
+completion executor checks running state and session-local goal identity and
+exposes no cancellation, creation, replacement, or body capability. One request
+may be in flight; later
 events are suppressed rather than queued. There is no polling, retry, pursuit
-loop, provider session, planning, goal satisfaction, or physical autonomy.
+loop, provider session, planning, deterministic goal-satisfaction engine/monitor,
+or physical autonomy.
 
 ## Direct speech-to-speech
 

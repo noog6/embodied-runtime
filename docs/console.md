@@ -6,12 +6,15 @@ bounded autonomous response when available. That response is volatile diagnostic
 by this command; aggregate `status` and logs exclude its content, and later
 cognition never receives it.
 
-Initiative has three modes: no flags means operator-only cognition;
+Initiative has four modes: no flags means operator-only cognition;
 `--initiative` enables read-only autonomous noticing/thinking; and
 `--initiative --initiative-actions` permits at most one autonomous
-`orient_body` request on a nonphysical body. The action flag requires the first
-flag and never enables it silently. It does not authorize physical motion or
-autonomous goal mutation.
+`orient_body` request on a nonphysical body. Adding
+`--initiative-goal-closure` permits one post-action outcome request and the
+narrow completion of the same goal after an applied action. Each flag requires
+its prerequisite and never enables it silently. Action alone does not authorize
+physical motion or autonomous goal mutation. A currently satisfied maintenance
+goal is not necessarily terminally complete.
 
 Run `python main.py --console` for the asynchronous local console. Platform
 sampling and heartbeats continue while it waits. Reports read application-owned
@@ -31,6 +34,7 @@ The supported commands are exactly:
 - `goal` to show the current intentional state;
 - `goal clear` to apply an explicit local operator override without changing
   RuntimeState or WorkingMemory;
+- `attention` to show the latest volatile initiative and outcome diagnostics;
 - `help` (or `?`), `quit`, and `exit`.
 
 Only the `simulate` namespace denotes synthetic input. It translates to the

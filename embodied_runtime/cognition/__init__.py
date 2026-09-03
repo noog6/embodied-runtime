@@ -18,6 +18,7 @@ from embodied_runtime.cognition.goals import (
     render_active_goal,
     validate_goal_description,
 )
+from embodied_runtime.cognition.outcome import GoalOutcomeStimulus
 from embodied_runtime.cognition.working_memory import (
     WorkingMemory,
     WorkingMemoryToolOutcome,
@@ -27,6 +28,7 @@ from embodied_runtime.cognition.working_memory import (
 
 __all__ = [
     "CognitionContext",
+    "GoalOutcomeStimulus",
     "ActiveGoal",
     "MAX_GOAL_DESCRIPTION_CHARS",
     "CognitionError",

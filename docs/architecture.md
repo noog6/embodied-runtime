@@ -90,7 +90,8 @@ projection plus a snapshot of memory that predates that request.
 `ActiveGoal` is a separate volatile, immutable description of the application's
 single current commitment. It is neither physical truth nor conversation
 history. Establishing it causes no action, and actions or reflex-driven state
-changes neither satisfy nor clear it. Cognition runs only on an explicit ask.
+changes neither satisfy nor clear it. Without explicitly enabled initiative,
+cognition runs only on an explicit ask.
 
 Small deterministic [local reflexes](reflexes.md) may consume semantic events
 and request semantic application capabilities. The implemented path is sensing
@@ -109,5 +110,13 @@ text, own state, or poll. `--initiative` remains read-only. The additional
 capability, and only on a nonphysical body. The application owns this separate
 autonomous projection and dispatcher. Actions use source `initiative`, so they
 do not meet the gate's `reflex:` source rule and cannot recursively wake it.
-Autonomous responses and outcomes are not appended to WorkingMemory, and an
-action neither resolves nor changes ActiveGoal.
+Autonomous responses and outcomes are not appended to WorkingMemory. An action
+alone neither resolves nor changes `ActiveGoal`. With the additional explicit
+`--initiative-goal-closure` permission, an episode that requested an action may
+make one independent outcome-evaluation cognition request. That request sees
+fresh reality, the same request-local history snapshot, and the original
+stimulus. After an applied action it may request only `complete_goal`; the
+application rechecks that the exact same goal object is still active and maps
+the request to `resolve_goal("completed")`. A rejected action is evaluated with
+no tools. No second body action, retry, cancellation, or goal replacement is
+available. Current satisfaction is not synonymous with terminal completion.

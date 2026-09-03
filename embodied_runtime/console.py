@@ -214,6 +214,9 @@ class RuntimeConsole:
             f"  last_action:   {status.last_action or 'none'}",
             f"  last_action_status: {status.last_action_status or 'none'}",
             f"  last_response: {status.last_response or 'unavailable'}",
+            f"  last_outcome_state: {status.last_outcome_state}",
+            f"  last_goal_closure: {status.last_goal_closure}",
+            f"  last_outcome_response: {status.last_outcome_response or 'unavailable'}",
         ))
 
     def _status(self) -> str:

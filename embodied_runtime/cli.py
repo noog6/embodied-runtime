@@ -52,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--initiative-actions", action="store_true",
         help="allow initiative one bounded nonphysical semantic body action",
     )
+    parser.add_argument(
+        "--initiative-goal-closure", action="store_true",
+        help="allow one post-action evaluation to complete the same active goal",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--diagnostics", action="store_true")
     modes.add_argument("--console", action="store_true")
@@ -163,7 +167,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
                                               initiative_enabled=args.initiative,
-                                              initiative_actions_enabled=args.initiative_actions),
+                                              initiative_actions_enabled=args.initiative_actions,
+                                              initiative_goal_closure_enabled=args.initiative_goal_closure),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
         camera_backend=camera,
@@ -215,6 +220,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.initiative_goal_closure and not args.initiative_actions:
+        parser.error("--initiative-goal-closure requires --initiative-actions")
     if args.initiative_actions and not args.initiative:
         parser.error("--initiative-actions requires --initiative")
     if args.initiative and args.cognition == "none":
