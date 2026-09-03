@@ -6,15 +6,21 @@ bounded autonomous response when available. That response is volatile diagnostic
 by this command; aggregate `status` and logs exclude its content, and later
 cognition never receives it.
 
-Initiative has four modes: no flags means operator-only cognition;
-`--initiative` enables read-only autonomous noticing/thinking; and
-`--initiative --initiative-actions` permits at most one autonomous
-`orient_body` request on a nonphysical body. Adding
-`--initiative-goal-closure` permits one post-action outcome request and the
-narrow completion of the same goal after an applied action. Each flag requires
-its prerequisite and never enables it silently. Action alone does not authorize
-physical motion or autonomous goal mutation. A currently satisfied maintenance
-goal is not necessarily terminally complete.
+Initiative uses independent permissions. No flags means operator-only
+cognition; `--initiative` is exactly read-only; `--initiative-actions` permits
+`orient_body` on a nonphysical body; and `--initiative-messages` permits
+`address_operator`. The latter currently requires `--console`, because the local
+console is the only configured operator transport. No flag silently enables
+another. With both effect permissions, both tools are offered but the runtime
+accepts only one request total. Goal closure requires initiative plus at least
+one effect permission.
+
+The console concurrently waits for selector-based input and a transient outbound
+message queue. It renders an accepted message immediately as `Mira: ...`, cancels
+the losing wait, and redraws the prompt. This uses no stdin executor, polling, or
+sleep loop. EOF, quit, cancellation, and shutdown clean pending waits. Questions
+are delivered once and create no pending reply. Messages are not a console
+history, RuntimeState, WorkingMemory, or EventBus history.
 
 Run `python main.py --console` for the asynchronous local console. Platform
 sampling and heartbeats continue while it waits. Reports read application-owned

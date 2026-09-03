@@ -32,6 +32,9 @@ from embodied_runtime.events import (
     PresenceChanged,
 )
 from embodied_runtime.hardware.base import HardwareBackend
+from embodied_runtime.interaction import (
+    MAX_OPERATOR_MESSAGE_CHARS, OperatorMessage, OperatorMessageSink,
+)
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.reflexes import Reflex
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
@@ -56,6 +59,24 @@ ORIENT_BODY_TOOL = CognitionToolDefinition(
             "pitch_degrees": {"type": "number"},
         },
         "required": ["yaw_degrees", "pitch_degrees"],
+        "additionalProperties": False,
+    },
+)
+
+ADDRESS_OPERATOR_TOOL = CognitionToolDefinition(
+    name="address_operator",
+    description=(
+        "Send one short plain-text statement or question to the operator. A question "
+        "does not wait for a reply. An applied result means the configured operator "
+        "channel accepted the message, not that the human read or acknowledged it. "
+        "Available capabilities are permissions, not obligations."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "message": {"type": "string", "maxLength": MAX_OPERATOR_MESSAGE_CHARS}
+        },
+        "required": ["message"],
         "additionalProperties": False,
     },
 )
@@ -119,6 +140,7 @@ class ApplicationOptions:
     startup_prompt: str | None = None
     initiative_enabled: bool = False
     initiative_actions_enabled: bool = False
+    initiative_messages_enabled: bool = False
     initiative_goal_closure_enabled: bool = False
 
 
@@ -161,6 +183,7 @@ class RobotApplication:
         camera_backend: CameraBackend | None = None,
         cognition_backend: TextCognitionBackend | None = None,
         working_memory: WorkingMemory | None = None,
+        operator_message_sink: OperatorMessageSink | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -169,6 +192,7 @@ class RobotApplication:
         self.body_backend = body_backend
         self.camera_backend = camera_backend
         self._cognition_backend = cognition_backend
+        self._operator_message_sink = operator_message_sink
         self.working_memory = (
             working_memory if working_memory is not None else WorkingMemory()
         )
@@ -461,30 +485,37 @@ class RobotApplication:
         )
 
     def _attention_instructions(
-        self, stimulus: AttentionStimulus, working_memory, *, actions_enabled: bool
+        self, stimulus: AttentionStimulus, working_memory, *, capabilities_available: bool
     ) -> str:
         return (
             f"{self._cognition_instructions(working_memory)}\n\n"
-            f"{stimulus.render(actions_enabled=actions_enabled)}"
+            f"{stimulus.render(actions_enabled=capabilities_available)}"
         )
 
     async def _request_initiative(self, stimulus: AttentionStimulus) -> InitiativeOutcome:
         backend = self._cognition_backend
         if backend is None:
             raise RuntimeError("No cognition backend is configured")
-        actions_enabled = self.options.initiative_actions_enabled
         prior_memory = self.working_memory.snapshot()
         expected_goal = self._active_goal
-        instructions = self._attention_instructions(
-            stimulus, prior_memory, actions_enabled=actions_enabled
-        )
         tools = self.initiative_tools()
+        capabilities_available = bool(tools)
+        instructions = self._attention_instructions(
+            stimulus, prior_memory, capabilities_available=capabilities_available
+        )
         action: str | None = None
         action_status: str | None = None
         action_result: str | None = None
+        capability_requested = False
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
-            nonlocal action, action_status, action_result
+            nonlocal action, action_status, action_result, capability_requested
+            if capability_requested:
+                return self._rejected_tool(
+                    call.name, "initiative capability request already consumed",
+                    log_prefix="INITIATIVE",
+                )
+            capability_requested = True
             action = call.name
             LOGGER.info("[INITIATIVE] tool=%s status=requested", call.name)
             result = await self._execute_initiative_tool(call)
@@ -497,18 +528,18 @@ class RobotApplication:
             return result
 
         LOGGER.info(
-            "[INITIATIVE] backend=%s request=started actions=%s",
-            backend.identifier, "enabled" if actions_enabled else "disabled",
+            "[INITIATIVE] backend=%s request=started capabilities=%s",
+            backend.identifier, "enabled" if capabilities_available else "disabled",
         )
         try:
             response = await backend.respond(
-                ACTION_INITIATIVE_REQUEST if actions_enabled else INITIATIVE_REQUEST,
+                ACTION_INITIATIVE_REQUEST if capabilities_available else INITIATIVE_REQUEST,
                 instructions=instructions,
                 tools=tools,
                 tool_executor=execute_tool if tools else None,
                 refreshed_instructions=(
                     lambda: self._attention_instructions(
-                        stimulus, prior_memory, actions_enabled=True
+                        stimulus, prior_memory, capabilities_available=True
                     )
                 ) if tools else None,
             )
@@ -630,19 +661,19 @@ class RobotApplication:
         return CognitionToolResult(json.dumps({"status": "completed"}, sort_keys=True))
 
     def initiative_tools(self) -> tuple[CognitionToolDefinition, ...]:
-        """Project the sole bounded autonomous capability at request time."""
+        """Project bounded autonomous capabilities at request time."""
         body = self.body_backend
-        if (
-            self.options.initiative_enabled
-            and self.options.initiative_actions_enabled
-            and self.state is LifecycleState.RUNNING
-            and self._active_goal is not None
-            and body is not None
-            and not body.is_physical
-            and "orientation" in body.capabilities
-        ):
-            return (ORIENT_BODY_TOOL,)
-        return ()
+        if not (self.options.initiative_enabled and
+                self.state is LifecycleState.RUNNING and self._active_goal is not None):
+            return ()
+        tools = []
+        if (self.options.initiative_actions_enabled and body is not None and
+                not body.is_physical and "orientation" in body.capabilities):
+            tools.append(ORIENT_BODY_TOOL)
+        if (self.options.initiative_messages_enabled and
+                self._operator_message_sink is not None):
+            tools.append(ADDRESS_OPERATOR_TOOL)
+        return tuple(tools)
 
     def cognition_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project currently safe cognition capabilities at request time."""
@@ -674,14 +705,59 @@ class RobotApplication:
     async def _execute_initiative_tool(
         self, call: CognitionToolCall
     ) -> CognitionToolResult:
-        if call.name != ORIENT_BODY_TOOL.name:
+        if call.name == ORIENT_BODY_TOOL.name:
+            return await self._execute_orient_body(
+                call, available=self.initiative_tools(), source="initiative",
+                log_prefix="INITIATIVE",
+            )
+        if call.name == ADDRESS_OPERATOR_TOOL.name:
+            return await self._execute_address_operator(call)
+        return self._rejected_tool(
+            call.name, "tool is not available", log_prefix="INITIATIVE"
+        )
+
+    async def _execute_address_operator(
+        self, call: CognitionToolCall
+    ) -> CognitionToolResult:
+        if ADDRESS_OPERATOR_TOOL not in self.initiative_tools():
             return self._rejected_tool(
                 call.name, "tool is not available", log_prefix="INITIATIVE"
             )
-        return await self._execute_orient_body(
-            call, available=self.initiative_tools(), source="initiative",
-            log_prefix="INITIATIVE",
+        try:
+            arguments = self._tool_arguments(call, {"message"})
+            value = arguments["message"]
+            if not isinstance(value, str):
+                raise ValueError("message must be a string")
+            message = value.strip()
+            if not message:
+                raise ValueError("message must be non-empty")
+            if len(message) > MAX_OPERATOR_MESSAGE_CHARS:
+                raise ValueError(
+                    f"message must be at most {MAX_OPERATOR_MESSAGE_CHARS} characters"
+                )
+            if any(ord(character) < 32 or ord(character) == 127 for character in message):
+                raise ValueError("message must not contain control characters")
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("operator messaging requires a running application")
+            if not self.options.initiative_messages_enabled:
+                raise RuntimeError("initiative messages are disabled")
+            sink = self._operator_message_sink
+            if sink is None:
+                raise RuntimeError("no operator message channel is configured")
+            await sink.deliver(OperatorMessage(message, "initiative"))
+        except Exception as error:
+            LOGGER.info(
+                "[INTERACTION] recipient=operator source=initiative status=rejected"
+            )
+            return self._rejected_tool(call.name, str(error), log_prefix="INITIATIVE")
+        LOGGER.info(
+            "[INTERACTION] recipient=operator source=initiative chars=%s status=delivered",
+            len(message),
         )
+        LOGGER.info("[INITIATIVE] tool=%s status=applied", call.name)
+        return CognitionToolResult(json.dumps({
+            "status": "applied", "recipient": "operator", "message": message,
+        }, sort_keys=True))
 
     async def _execute_orient_body(
         self, call: CognitionToolCall, *,

@@ -35,8 +35,10 @@ application creates an allow-listed immutable projection of its current state
 immediately before every request. Authoritative state remains runtime-owned and
 is neither handed to nor queried by the cognition backend. Each request remains
 independent. AI intent is advisory: the runtime decides whether and how an
-action occurs. Only absolute orientation on a nonphysical body is exposed, with
-at most one execution per request; cognition-driven physical actuation is not
+action occurs. Autonomous semantic capabilities are explicitly projected:
+`orient_body` remains limited to a nonphysical body, while `address_operator`
+is independent of body physicality. The runtime accepts at most one initiative
+capability request per episode. Cognition-driven physical actuation is not
 approved. No model-controlled or persistent memory, images, Realtime, or audio
 capability is added. See
 [OpenAI text cognition setup](cognition-openai.md).
@@ -56,30 +58,26 @@ semantic runtime event + ActiveGoal
 Only a completed semantic orientation change whose runtime-owned source begins
 with `reflex:` can wake this path, and only while a goal exists. The request is
 given fresh Runtime context, ActiveGoal, and bounded operator WorkingMemory plus
-a provider-neutral attention stimulus. The modes are deliberately distinct:
+a provider-neutral attention stimulus. Initiative now has independent capability permissions:
 
 - without `--initiative`, cognition occurs only for explicit operator asks;
-- `--initiative` enables autonomous noticing and thinking with exactly no
-  tools, executor, or refreshed-instructions continuation;
-- `--initiative --initiative-actions` permits at most one `orient_body`
-  request when the semantic-orientation body is nonphysical.
-- `--initiative --initiative-actions --initiative-goal-closure` additionally
-  permits one independent post-action outcome evaluation and, after an applied
-  action only, a request to complete that same still-active goal.
+- `--initiative` is read-only with exactly no tools or continuation;
+- `--initiative-actions` permits `orient_body` only on a nonphysical body;
+- `--initiative-messages` permits `address_operator` only with a configured sink;
+- enabling both offers both, but the runtime accepts at most one request total;
+- `--initiative-goal-closure` requires at least one effect permission and permits
+  one independent post-effect evaluation and same-goal completion after an
+  applied effect.
 
-The autonomous projection never includes `set_goal` or `resolve_goal`, and a
-physical body receives no autonomous tools. Runtime validation remains
-authoritative. A successful action is sourced as `initiative`; the final tool
-continuation receives freshly composed authoritative grounding. Every episode
-adds no memory turn, and action does not automatically change its goal. The
-outcome model, not runtime prose parsing or body equality, distinguishes a goal
-that is merely currently satisfied from one that is terminally complete. The
-completion executor checks running state and session-local goal identity and
-exposes no cancellation, creation, replacement, or body capability. One request
-may be in flight; later
-events are suppressed rather than queued. There is no polling, retry, pursuit
-loop, provider session, planning, deterministic goal-satisfaction engine/monitor,
-or physical autonomy.
+`address_operator` accepts one trimmed, non-empty, control-character-free
+plain-text value of at most 1000 characters. Cognition cannot select recipient,
+source, transport, or routing. Delivery means the configured sink accepted the
+message, not that the human read or acknowledged it. Messages and questions are
+volatile effects: they do not enter WorkingMemory, RuntimeState, EventBus history,
+or a transcript, and establish no pending answer or reply correlation. Attention
+continues to own only selection, one-in-flight lifecycle, cancellation, and
+latest diagnostics. There is no polling, retry, second effect, or physical
+autonomy.
 
 ## Direct speech-to-speech
 

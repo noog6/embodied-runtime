@@ -16,8 +16,10 @@ INITIATIVE_REQUEST = (
 )
 ACTION_INITIATIVE_REQUEST = (
     "Assess the attention stimulus against your current active goal. "
-    "If an available semantic capability is appropriate and necessary to advance "
-    "or restore that goal, you may request it. You are not required to act. "
+    "If one available semantic capability is appropriate and necessary, you may "
+    "request at most one. Available capabilities are permissions, not obligations. "
+    "If you address the operator, do not assume they will reply and do not wait for "
+    "a response. "
     "Do not set, replace, resolve, or reinterpret the active goal."
 )
 MAX_DIAGNOSTIC_RESPONSE_CHARS = 2000

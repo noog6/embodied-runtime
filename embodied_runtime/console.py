@@ -13,6 +13,7 @@ from typing import TextIO
 from embodied_runtime.app import RobotApplication
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.platform import PlatformSnapshot
+from embodied_runtime.interaction import ConsoleOperatorMessageChannel
 
 
 class ConsoleTerminalError(RuntimeError):
@@ -38,6 +39,10 @@ class RuntimeConsole:
     @property
     def heading(self) -> str:
         return f"{self._application.profile.name} Runtime Console"
+
+    @property
+    def operator_message_prefix(self) -> str:
+        return self._application.profile.name
 
     def execute(self, command: str) -> tuple[str, bool]:
         """Return report text and whether the session should terminate."""
@@ -416,12 +421,33 @@ class AsyncLineTerminal:
 
 
 async def run_console_session(
-    console: RuntimeConsole, terminal: AsyncLineTerminal
+    console: RuntimeConsole, terminal: AsyncLineTerminal,
+    messages: ConsoleOperatorMessageChannel | None = None,
 ) -> None:
     """Run a terminal session until quit, exit, or EOF."""
     terminal.write(f"\n{console.heading}\nType 'help' for commands.\n\n")
     while True:
-        line = await terminal.read_line(console.prompt)
+        if messages is None:
+            line = await terminal.read_line(console.prompt)
+        else:
+            input_task = asyncio.create_task(terminal.read_line(console.prompt))
+            message_task = asyncio.create_task(messages.receive())
+            done, pending = await asyncio.wait(
+                (input_task, message_task), return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if message_task in done:
+                message = message_task.result()
+                terminal.write(f"\n{console.operator_message_prefix}: {message.text}\n\n")
+                if input_task in done and input_task.result() is not None:
+                    # Input and delivery became ready together; process input next.
+                    line = input_task.result()
+                else:
+                    continue
+            else:
+                line = input_task.result()
         if line is None:
             return
         report, should_exit = await console.execute_async(line)

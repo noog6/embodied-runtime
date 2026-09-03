@@ -23,6 +23,7 @@ from embodied_runtime.hardware.fusion_hat import (
 )
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
+from embodied_runtime.interaction import ConsoleOperatorMessageChannel
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.reflexes import PresenceCenteringReflex
 from embodied_runtime.platform import PlatformSnapshot
@@ -51,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--initiative-actions", action="store_true",
         help="allow initiative one bounded nonphysical semantic body action",
+    )
+    parser.add_argument(
+        "--initiative-messages", action="store_true",
+        help="allow initiative one bounded message to the operator",
     )
     parser.add_argument(
         "--initiative-goal-closure", action="store_true",
@@ -164,15 +169,18 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
     cognition = build_cognition_backend(args)
+    message_channel = ConsoleOperatorMessageChannel() if args.console else None
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
                                               initiative_enabled=args.initiative,
                                               initiative_actions_enabled=args.initiative_actions,
+                                              initiative_messages_enabled=args.initiative_messages,
                                               initiative_goal_closure_enabled=args.initiative_goal_closure),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
         camera_backend=camera,
         cognition_backend=cognition,
+        operator_message_sink=message_channel,
     )
     if args.diagnostics:
         try:
@@ -205,7 +213,9 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         try:
             await application.start()
             LOGGER.info("[CONSOLE] mode=local status=ready")
-            await run_console_session(RuntimeConsole(application), AsyncLineTerminal())
+            await run_console_session(
+                RuntimeConsole(application), AsyncLineTerminal(), message_channel
+            )
         except asyncio.CancelledError:
             LOGGER.info("[APP] interrupted")
             raise
@@ -220,10 +230,20 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.initiative_goal_closure and not args.initiative_actions:
-        parser.error("--initiative-goal-closure requires --initiative-actions")
+    if args.initiative_goal_closure and not args.initiative:
+        parser.error("--initiative-goal-closure requires --initiative")
+    if (args.initiative_goal_closure and
+            not (args.initiative_actions or args.initiative_messages)):
+        parser.error(
+            "--initiative-goal-closure requires --initiative-actions or "
+            "--initiative-messages"
+        )
     if args.initiative_actions and not args.initiative:
         parser.error("--initiative-actions requires --initiative")
+    if args.initiative_messages and not args.initiative:
+        parser.error("--initiative-messages requires --initiative")
+    if args.initiative_messages and not args.console:
+        parser.error("--initiative-messages requires --console")
     if args.initiative and args.cognition == "none":
         parser.error("--initiative requires a cognition backend")
     if args.fusion_servo_test is not None and not args.diagnostics:
