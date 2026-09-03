@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.body.virtual import VirtualBodyBackend
-from embodied_runtime.cli import build_parser
+from embodied_runtime.cli import build_parser, build_platform_monitor_policy
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
@@ -498,6 +498,15 @@ class ConsoleCliTests(unittest.TestCase):
             "--cognition", "openai-responses", "--initiative",
         ])
         self.assertTrue(enabled.initiative)
+
+    def test_console_disables_only_monitor_heartbeat_logging(self):
+        self.assertIsNone(build_platform_monitor_policy(build_parser().parse_args([])))
+        policy = build_platform_monitor_policy(
+            build_parser().parse_args(["--console"])
+        )
+        self.assertIsNotNone(policy)
+        self.assertIsNone(policy.heartbeat_interval_seconds)
+        self.assertEqual(policy.interval_seconds, 5.0)
 
     def test_console_and_diagnostics_are_exclusive(self):
         with self.assertRaises(SystemExit):

@@ -26,7 +26,7 @@ from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.interaction import ConsoleOperatorMessageChannel
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.reflexes import PresenceCenteringReflex
-from embodied_runtime.platform import PlatformSnapshot
+from embodied_runtime.platform import PlatformMonitorPolicy, PlatformSnapshot
 from embodied_runtime.sensing.camera import CameraBackend
 from embodied_runtime.sensing.camera.picamera2 import (
     Picamera2CameraBackend,
@@ -103,6 +103,15 @@ def build_camera_backend(args: argparse.Namespace) -> CameraBackend | None:
 def build_cognition_backend(args: argparse.Namespace) -> TextCognitionBackend | None:
     if args.cognition == "openai-responses":
         return OpenAIResponsesBackend()
+    return None
+
+
+def build_platform_monitor_policy(
+    args: argparse.Namespace,
+) -> PlatformMonitorPolicy | None:
+    """Return the mode-specific monitor policy, preserving headless defaults."""
+    if args.console:
+        return PlatformMonitorPolicy(heartbeat_interval_seconds=None)
     return None
 
 
@@ -183,6 +192,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         camera_backend=camera,
         cognition_backend=cognition,
         operator_message_sink=message_channel,
+        platform_monitor_policy=build_platform_monitor_policy(args),
     )
     if args.diagnostics:
         try:

@@ -7,7 +7,7 @@ import sys
 from typing import TextIO
 
 from embodied_runtime.console_style import (
-    BRIGHT_RED, RESET, YELLOW, LOG_CATEGORIES, colour_enabled,
+    BRIGHT_RED, DIM, RESET, YELLOW, LOG_CATEGORIES, colour_enabled,
 )
 
 
@@ -24,6 +24,9 @@ class SemanticColourFormatter(LocalISO8601Formatter):
     """Decorate first-party category prefixes without changing log messages."""
 
     _CATEGORY = re.compile(r"\[([A-Z]+)\]")
+    _TIMESTAMP = re.compile(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}"
+    )
     _ERROR_STATE = re.compile(r"(?:^|\s)(?:status=)?(?:rejected|failed|error)(?:\s|$)")
     _WARNING_STATE = re.compile(r"(?:^|\s)(?:status=)?(?:in_flight|warning)(?:\s|$)")
 
@@ -46,7 +49,14 @@ class SemanticColourFormatter(LocalISO8601Formatter):
             else LOG_CATEGORIES[match.group(1)]
         )
         start, end = match.span()
-        return f"{rendered[:start]}{ansi}{rendered[start:end]}{RESET}{rendered[end:]}"
+        prefix = rendered[:start]
+        timestamp = self._TIMESTAMP.match(prefix)
+        if timestamp is not None:
+            timestamp_end = timestamp.end()
+            prefix = (
+                f"{DIM}{prefix[:timestamp_end]}{RESET}{prefix[timestamp_end:]}"
+            )
+        return f"{prefix}{ansi}{rendered[start:end]}{RESET}{rendered[end:]}"
 
 
 def configure_logging(
