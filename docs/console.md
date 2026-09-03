@@ -26,6 +26,14 @@ Run `python main.py --console` for the asynchronous local console. Platform
 sampling and heartbeats continue while it waits. Reports read application-owned
 authoritative state and never probe a platform, hardware backend, or body pose.
 
+The interactive console uses restrained semantic ANSI colours solely to improve
+human scanability. Mira's operator messages are presented in bright magenta/pink,
+the prompt is subdued cyan, and known diagnostic states and first-party log
+categories receive consistent semantic colours. The underlying messages, state,
+and log words remain plain semantic text. Colour is enabled only when the output
+stream is a TTY; redirected output and logs are therefore plain. Set `NO_COLOR`
+(to any value), or pass `--no-color`, to disable colour explicitly.
+
 The supported commands are exactly:
 
 - `status`, `platform`, and `hardware` for existing reports;

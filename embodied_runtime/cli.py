@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--hardware", choices=("virtual", "fusion-hat"), default="virtual"
     )
     parser.add_argument("--camera", choices=("none", "picamera2"), default="none")
+    parser.add_argument("--no-color", action="store_true",
+                        help="disable ANSI colour in console and runtime logs")
     parser.add_argument(
         "--cognition", choices=("none", "openai-responses"), default="none"
     )
@@ -214,7 +216,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
             await application.start()
             LOGGER.info("[CONSOLE] mode=local status=ready")
             await run_console_session(
-                RuntimeConsole(application), AsyncLineTerminal(), message_channel
+                RuntimeConsole(application), AsyncLineTerminal(no_color=args.no_color),
+                message_channel,
             )
         except asyncio.CancelledError:
             LOGGER.info("[APP] interrupted")
@@ -254,7 +257,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--camera-test requires --diagnostics")
     if args.camera_test is not None and args.camera == "none":
         parser.error("--camera-test requires a selected camera")
-    configure_logging()
+    configure_logging(no_color=args.no_color)
     try:
         profile = load_profile(args.profile)
     except ProfileLoadError as error:

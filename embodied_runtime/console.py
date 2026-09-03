@@ -14,6 +14,7 @@ from embodied_runtime.app import RobotApplication
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.platform import PlatformSnapshot
 from embodied_runtime.interaction import ConsoleOperatorMessageChannel
+from embodied_runtime.console_style import ConsoleStyle, colour_enabled
 
 
 class ConsoleTerminalError(RuntimeError):
@@ -360,11 +361,15 @@ class RuntimeConsole:
 class AsyncLineTerminal:
     """Unix-selector line input without a blocked executor thread."""
 
-    def __init__(self, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
+    def __init__(
+        self, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout, *,
+        no_color: bool = False,
+    ) -> None:
         self._stdin = stdin
         self._stdout = stdout
         self._buffer = bytearray()
         self._eof = False
+        self.style = ConsoleStyle(colour_enabled(stdout, disabled=no_color))
 
     def write(self, text: str) -> None:
         self._stdout.write(text)
@@ -425,12 +430,13 @@ async def run_console_session(
     messages: ConsoleOperatorMessageChannel | None = None,
 ) -> None:
     """Run a terminal session until quit, exit, or EOF."""
+    style = getattr(terminal, "style", ConsoleStyle(False))
     terminal.write(f"\n{console.heading}\nType 'help' for commands.\n\n")
     while True:
         if messages is None:
-            line = await terminal.read_line(console.prompt)
+            line = await terminal.read_line(style.prompt(console.prompt))
         else:
-            input_task = asyncio.create_task(terminal.read_line(console.prompt))
+            input_task = asyncio.create_task(terminal.read_line(style.prompt(console.prompt)))
             message_task = asyncio.create_task(messages.receive())
             done, pending = await asyncio.wait(
                 (input_task, message_task), return_when=asyncio.FIRST_COMPLETED
@@ -440,7 +446,10 @@ async def run_console_session(
             await asyncio.gather(*pending, return_exceptions=True)
             if message_task in done:
                 message = message_task.result()
-                terminal.write(f"\n{console.operator_message_prefix}: {message.text}\n\n")
+                rendered = style.operator_message(
+                    console.operator_message_prefix, message.text
+                )
+                terminal.write(f"\n{rendered}\n\n")
                 if input_task in done and input_task.result() is not None:
                     # Input and delivery became ready together; process input next.
                     line = input_task.result()
@@ -452,6 +461,6 @@ async def run_console_session(
             return
         report, should_exit = await console.execute_async(line)
         if report:
-            terminal.write(f"\n{report}\n\n")
+            terminal.write(f"\n{style.report(report)}\n\n")
         if should_exit:
             return
