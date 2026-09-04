@@ -139,3 +139,18 @@ is available only when every requested effect applied and same-goal/running
 checks still pass. Maintenance goals remain active unless the evaluator actually
 requests completion. This is one continuation, not planning, pursuit, retry,
 provider state, or a conversation session.
+
+## Phase 11: general semantic observations
+
+Each accepted transition becomes a provider-neutral
+`SemanticObservation(kind, source, facts)`. Ordered immutable facts contain
+previous/resulting orientation for `body_orientation_changed`, or condition and
+transition for `thermal_warning_raised`, `thermal_warning_cleared`,
+`memory_pressure_raised`, and `memory_pressure_cleared`. Platform observations
+are enabled with `--initiative-platform-attention`, which requires
+`--initiative`; effect flags remain independent. Every source remains backend-,
+running-, and active-goal-gated, and one in-flight episode suppresses other
+sources without queue or replay. Observations and autonomous results are
+request-local and never enter WorkingMemory. There is no cognition polling,
+observation history, new semantic capability, or direct `PresenceChanged`
+attention. Phase 10 works identically for every supported observation kind.

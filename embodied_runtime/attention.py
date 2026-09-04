@@ -1,11 +1,19 @@
-"""Narrow goal-directed attention for reflex-driven body transitions."""
+"""Narrow goal-directed attention for selected semantic transitions."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import logging
 
-from embodied_runtime.events import BodyOrientationChanged, EventBus, Subscription
+from embodied_runtime.events import (
+    BodyOrientationChanged, Event, EventBus, MemoryPressureCleared,
+    MemoryPressureRaised, Subscription, ThermalWarningCleared,
+    ThermalWarningRaised,
+)
+from embodied_runtime.observations import (
+    SemanticObservation, SemanticObservationFact,
+    observation_from_body_orientation, observation_from_platform_transition,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,14 +43,35 @@ CONTINUATION_INITIATIVE_REQUEST = (
 MAX_DIAGNOSTIC_RESPONSE_CHARS = 2000
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class AttentionStimulus:
-    kind: str
-    source: str
-    previous_yaw_degrees: float
-    previous_pitch_degrees: float
-    yaw_degrees: float
-    pitch_degrees: float
+    observation: SemanticObservation
+
+    def __init__(self, observation: SemanticObservation | str, *legacy: object) -> None:
+        """Wrap an observation; temporarily accept the Phase 6 positional shape."""
+        if isinstance(observation, SemanticObservation):
+            if legacy:
+                raise TypeError("unexpected arguments with SemanticObservation")
+            value = observation
+        else:
+            if len(legacy) != 5:
+                raise TypeError("legacy AttentionStimulus requires six arguments")
+            source, previous_yaw, previous_pitch, yaw, pitch = legacy
+            value = SemanticObservation(observation, str(source), (
+                SemanticObservationFact("previous_yaw_deg", str(previous_yaw)),
+                SemanticObservationFact("previous_pitch_deg", str(previous_pitch)),
+                SemanticObservationFact("yaw_deg", str(yaw)),
+                SemanticObservationFact("pitch_deg", str(pitch)),
+            ))
+        object.__setattr__(self, "observation", value)
+
+    @property
+    def kind(self) -> str:
+        return self.observation.kind
+
+    @property
+    def source(self) -> str:
+        return self.observation.source
 
     def render(self, *, actions_enabled: bool | None = False) -> str:
         capability_guidance = (
@@ -67,13 +96,11 @@ class AttentionStimulus:
             lines.append(capability_guidance)
         lines.extend((
             "",
+            "Semantic observation:",
             f"  kind: {self.kind}",
             f"  source: {self.source}",
-            f"  previous_yaw_deg: {self.previous_yaw_degrees}",
-            f"  previous_pitch_deg: {self.previous_pitch_degrees}",
-            f"  yaw_deg: {self.yaw_degrees}",
-            f"  pitch_deg: {self.pitch_degrees}",
         ))
+        lines.extend(f"  {fact.name}: {fact.value}" for fact in self.observation.facts)
         return "\n".join(lines)
 
 
@@ -127,15 +154,17 @@ class InitiativeOutcome:
 class GoalAttentionController:
     """Select a relevant transition and own one initiative task's diagnostics."""
 
-    def __init__(self, *, enabled: bool, backend_available: bool,
+    def __init__(self, *, enabled: bool, platform_attention_enabled: bool = False,
+                 backend_available: bool,
                  is_running: Callable[[], bool], has_active_goal: Callable[[], bool],
                  run_initiative: Callable[[AttentionStimulus], Awaitable[InitiativeOutcome]]) -> None:
         self.enabled = enabled
+        self.platform_attention_enabled = platform_attention_enabled
         self._backend_available = backend_available
         self._is_running = is_running
         self._has_active_goal = has_active_goal
         self._run_initiative = run_initiative
-        self._subscription: Subscription[BodyOrientationChanged] | None = None
+        self._subscriptions: list[Subscription[Event]] = []
         self._task: asyncio.Task[None] | None = None
         self._state = "idle" if enabled else "disabled"
         self._last_trigger: str | None = None
@@ -154,14 +183,21 @@ class GoalAttentionController:
     async def start(self, events: EventBus) -> None:
         if not self.enabled:
             return
-        if self._subscription is not None:
+        if self._subscriptions:
             raise RuntimeError("Attention controller is already started")
-        self._subscription = events.subscribe(BodyOrientationChanged, self._on_event)
-        LOGGER.info("[ATTENTION] policy=goal_reflex_orientation status=ready")
+        self._subscriptions.append(events.subscribe(BodyOrientationChanged, self._on_body_event))
+        if self.platform_attention_enabled:
+            for event_type in (
+                ThermalWarningRaised, ThermalWarningCleared,
+                MemoryPressureRaised, MemoryPressureCleared,
+            ):
+                self._subscriptions.append(events.subscribe(event_type, self._on_platform_event))
+        LOGGER.info("[ATTENTION] policy=goal_semantic_transitions platform=%s status=ready",
+                    "enabled" if self.platform_attention_enabled else "disabled")
 
     async def stop(self) -> None:
-        subscription, self._subscription = self._subscription, None
-        if subscription is not None:
+        subscriptions, self._subscriptions = tuple(self._subscriptions), []
+        for subscription in subscriptions:
             await subscription.close()
         task, self._task = self._task, None
         if task is not None and not task.done():
@@ -212,19 +248,26 @@ class GoalAttentionController:
         if response is not None:
             self._last_continuation_response = response[:MAX_DIAGNOSTIC_RESPONSE_CHARS]
 
-    async def _on_event(self, event: BodyOrientationChanged) -> None:
-        if not self._is_running() or not self._backend_available or not self._has_active_goal():
-            return
+    async def _on_body_event(self, event: BodyOrientationChanged) -> None:
         if not event.source.startswith("reflex:"):
             return
-        if self._task is not None and not self._task.done():
-            LOGGER.info("[ATTENTION] event=body_orientation_changed decision=suppressed reason=in_flight")
+        await self._consider(observation_from_body_orientation(event))
+
+    async def _on_platform_event(self, event: Event) -> None:
+        assert isinstance(event, (ThermalWarningRaised, ThermalWarningCleared,
+                                  MemoryPressureRaised, MemoryPressureCleared))
+        if event.source != "platform_monitor":
             return
-        stimulus = AttentionStimulus(
-            "body_orientation_changed", event.source,
-            event.previous_yaw_degrees, event.previous_pitch_degrees,
-            event.yaw_degrees, event.pitch_degrees,
-        )
+        await self._consider(observation_from_platform_transition(event))
+
+    async def _consider(self, observation: SemanticObservation) -> None:
+        if not self._is_running() or not self._backend_available or not self._has_active_goal():
+            return
+        if self._task is not None and not self._task.done():
+            LOGGER.info("[ATTENTION] event=%s decision=suppressed reason=in_flight",
+                        observation.kind)
+            return
+        stimulus = AttentionStimulus(observation)
         self._last_trigger = stimulus.kind
         self._last_source = stimulus.source
         self._last_response = None
@@ -238,7 +281,8 @@ class GoalAttentionController:
         self._last_goal_closure = "none"
         self._last_outcome_response = None
         self._state = "in_flight"
-        LOGGER.info("[ATTENTION] event=body_orientation_changed source=%s decision=wake", event.source)
+        LOGGER.info("[ATTENTION] event=%s source=%s decision=wake",
+                    stimulus.kind, stimulus.source)
         self._task = asyncio.create_task(self._reflect(stimulus), name="initiative:goal_attention")
 
     async def _reflect(self, stimulus: AttentionStimulus) -> None:
