@@ -23,6 +23,9 @@ class ConsoleStyleTests(unittest.TestCase):
         self.assertEqual(LOG_CATEGORIES["INSPECTION"], BRIGHT_BLUE)
         self.assertNotIn("inspection", ConsoleStyle._VALUES)
 
+    def test_perception_is_a_structured_log_category(self):
+        self.assertEqual(LOG_CATEGORIES["PERCEPTION"], DIM_CYAN)
+
     def test_tty_no_color_and_non_tty_detection(self):
         self.assertTrue(colour_enabled(FakeStream(True), environ={}))
         self.assertFalse(colour_enabled(FakeStream(False), environ={}))

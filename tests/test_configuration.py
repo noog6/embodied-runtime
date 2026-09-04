@@ -10,7 +10,8 @@ from embodied_runtime.config import (
 
 
 EXPLICIT_AGENTIC = [
-    "--camera", "picamera2", "--cognition", "openai-responses", "--initiative",
+    "--camera", "picamera2", "--cognition", "openai-responses",
+    "--vision", "openai-responses", "--initiative",
     "--initiative-platform-attention", "--initiative-actions",
     "--initiative-messages", "--initiative-continuation",
     "--initiative-goal-closure", "--console",
@@ -58,6 +59,27 @@ class ConfigurationTests(unittest.TestCase):
                          ("picamera2", "openai-responses", "console"))
         effective = self.effective("[runtime]\nmode='console'\n", ("--diagnostics",))
         self.assertEqual(effective.mode, "diagnostics")
+
+    def test_vision_defaults_toml_and_cli_precedence(self):
+        self.assertEqual(HISTORICAL_DEFAULTS.vision, "none")
+        configured = self.effective(
+            "[runtime]\ncamera='picamera2'\ncognition='openai-responses'\n"
+            "vision='openai-responses'\n"
+        )
+        self.assertEqual(configured.vision, "openai-responses")
+        overridden = self.effective(
+            "[runtime]\nvision='openai-responses'\n", ("--vision", "none")
+        )
+        self.assertEqual(overridden.vision, "none")
+
+    def test_vision_dependencies_are_validated_after_merge(self):
+        for contents in (
+            "[runtime]\nvision='openai-responses'\ncognition='openai-responses'\n",
+            "[runtime]\nvision='openai-responses'\ncamera='picamera2'\n",
+        ):
+            path = self.write(contents)
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
+                main(["--config", str(path)])
 
     def test_positive_boolean_flags_override_false_and_absence_preserves_true(self):
         effective = self.effective(
@@ -110,7 +132,7 @@ class ConfigurationTests(unittest.TestCase):
                 load_runtime_config(self.write(contents))
 
     def test_unsupported_enums_are_rejected(self):
-        for key in ("hardware", "camera", "cognition", "mode"):
+        for key in ("hardware", "camera", "cognition", "vision", "mode"):
             with self.subTest(key=key), self.assertRaisesRegex(
                 ConfigurationError, f"unsupported value for runtime.{key}"
             ):

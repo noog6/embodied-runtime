@@ -31,6 +31,9 @@ from embodied_runtime.interaction import ConsoleOperatorMessageChannel
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.reflexes import PresenceCenteringReflex
 from embodied_runtime.platform import PlatformMonitorPolicy, PlatformSnapshot
+from embodied_runtime.perception import (
+    OpenAIResponsesVisualPerceptionBackend, VisualPerceptionBackend,
+)
 from embodied_runtime.sensing.camera import CameraBackend
 from embodied_runtime.sensing.camera.picamera2 import (
     Picamera2CameraBackend,
@@ -60,6 +63,10 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     parser.add_argument(
         "--cognition", choices=("none", "openai-responses"),
         default=configurable_default("none")
+    )
+    parser.add_argument(
+        "--vision", choices=("none", "openai-responses"),
+        default=configurable_default("none"),
     )
     parser.add_argument("--initiative", action="store_true",
                         default=configurable_default(False),
@@ -124,6 +131,7 @@ def parse_launch_arguments(
     args.hardware = effective.hardware
     args.camera = effective.camera
     args.cognition = effective.cognition
+    args.vision = effective.vision
     args.console = effective.mode == "console"
     args.diagnostics = effective.mode == "diagnostics"
     args.initiative = effective.initiative
@@ -157,6 +165,14 @@ def build_camera_backend(args: argparse.Namespace) -> CameraBackend | None:
 def build_cognition_backend(args: argparse.Namespace) -> TextCognitionBackend | None:
     if args.cognition == "openai-responses":
         return OpenAIResponsesBackend()
+    return None
+
+
+def build_visual_perception_backend(
+    args: argparse.Namespace,
+) -> VisualPerceptionBackend | None:
+    if args.vision == "openai-responses":
+        return OpenAIResponsesVisualPerceptionBackend()
     return None
 
 
@@ -234,6 +250,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
     cognition = build_cognition_backend(args)
+    vision = build_visual_perception_backend(args)
     message_channel = ConsoleOperatorMessageChannel() if args.console else None
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
@@ -247,6 +264,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         reflexes=(PresenceCenteringReflex(),),
         camera_backend=camera,
         cognition_backend=cognition,
+        visual_perception_backend=vision,
         operator_message_sink=message_channel,
         platform_monitor_policy=build_platform_monitor_policy(args),
     )
@@ -322,6 +340,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--initiative-continuation requires --initiative-messages")
     if args.initiative and args.cognition == "none":
         parser.error("--initiative requires a cognition backend")
+    if args.vision != "none" and args.camera == "none":
+        parser.error("--vision requires a camera backend")
+    if args.vision != "none" and args.cognition == "none":
+        parser.error("--vision requires a cognition backend")
     if args.fusion_servo_test is not None and not args.diagnostics:
         parser.error("--fusion-servo-test requires --diagnostics")
     if args.fusion_servo_test is not None and args.hardware != "fusion-hat":

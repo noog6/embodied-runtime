@@ -21,6 +21,7 @@ class GoalOutcomeStimulus:
     attention_kind: str
     attention_source: str
     inspection_result: object | None = None
+    perception_result: object | None = None
 
     def __post_init__(self) -> None:
         if len(self.effects) not in (1, 2):
@@ -49,4 +50,12 @@ class GoalOutcomeStimulus:
                 f"  prior_self_inspection.{fact.name}: {fact.value}"
                 for fact in result.facts
             )
+        if self.perception_result is not None:
+            result = self.perception_result
+            lines.extend((
+                "This is a model-generated interpretation of one current camera frame; "
+                "it may be incomplete or uncertain. Runtime context remains authoritative.",
+                f"  prior_visual_focus: {result.focus}",
+                f"  prior_visual_description: {result.description}",
+            ))
         return "\n".join(lines)

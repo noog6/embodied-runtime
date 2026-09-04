@@ -21,6 +21,7 @@ profile = "mira"
 hardware = "virtual"
 camera = "picamera2"
 cognition = "openai-responses"
+vision = "openai-responses"
 mode = "console"
 
 [initiative]
@@ -47,6 +48,7 @@ The file may be partial. Omitted values retain the historical defaults:
 | `runtime.hardware` | `"virtual"` |
 | `runtime.camera` | `"none"` |
 | `runtime.cognition` | `"none"` |
+| `runtime.vision` | `"none"` |
 | `runtime.mode` | `"run"` |
 | every `[initiative]` value | `false` |
 
@@ -66,6 +68,11 @@ another configuration file.
 Dependencies are checked once against the final merged values. For example,
 initiative messages configured with `mode = "run"` become valid when the
 operator explicitly adds `--console`.
+
+`runtime.vision` accepts `"none"` or `"openai-responses"`; the matching explicit
+CLI override is `--vision`. A final effective vision value other than `none`
+requires both an effective camera and cognition backend. The checked-in
+`config/mira-agentic.toml` enables `openai-responses` vision.
 
 Configuration is loaded once at startup. There is no discovery, inheritance,
 layering, named preset, environment interpolation, or hot reload. Relative
@@ -88,6 +95,7 @@ The explicit equivalent remains available for testing and diagnostics:
 python main.py \
   --camera picamera2 \
   --cognition openai-responses \
+  --vision openai-responses \
   --initiative \
   --initiative-platform-attention \
   --initiative-actions \

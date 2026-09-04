@@ -114,6 +114,7 @@ class InitiativeContinuationStimulus:
     attention_kind: str
     attention_source: str
     inspection_result: object | None = None
+    perception_result: object | None = None
 
     def render(self) -> str:
         lines = [
@@ -127,6 +128,14 @@ class InitiativeContinuationStimulus:
         ]
         if self.inspection_result is not None:
             lines.append(f"  prior_self_inspection: {self.inspection_result!s}")
+        if self.perception_result is not None:
+            result = self.perception_result
+            lines.extend((
+                "The prior visual interpretation is model-generated and may be incomplete "
+                "or uncertain; Runtime context remains authoritative for runtime facts.",
+                f"  prior_visual_focus: {result.focus}",
+                f"  prior_visual_description: {result.description}",
+            ))
         return "\n".join(lines)
 
 
@@ -154,6 +163,27 @@ class InspectionFollowupStimulus:
 
 
 @dataclass(frozen=True, slots=True)
+class VisualPerceptionFollowupStimulus:
+    """Ground the sole independent effect decision after deliberate looking."""
+
+    perception_result: object
+
+    def render(self) -> str:
+        result = self.perception_result
+        return "\n".join((
+            "Visual-perception follow-up stimulus",
+            "This is a model-generated interpretation of one current camera frame.",
+            "It may be incomplete or uncertain.",
+            "Runtime context remains authoritative for runtime facts.",
+            f"  visual_focus: {result.focus}",
+            f"  visual_description: {result.description}",
+            f"  visual_description_truncated: {str(result.truncated).lower()}",
+            "You may request at most one available semantic effect if necessary.",
+            "Do not inspect or observe again, or change goals.",
+        ))
+
+
+@dataclass(frozen=True, slots=True)
 class AttentionStatus:
     enabled: bool
     state: str
@@ -172,6 +202,9 @@ class AttentionStatus:
     last_inspection_state: str
     last_inspection_area: str | None
     last_inspection_status: str | None
+    last_visual_state: str
+    last_visual_focus: str | None
+    last_visual_status: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +245,9 @@ class GoalAttentionController:
         self._last_inspection_state = "not_run"
         self._last_inspection_area: str | None = None
         self._last_inspection_status: str | None = None
+        self._last_visual_state = "not_run"
+        self._last_visual_focus: str | None = None
+        self._last_visual_status: str | None = None
 
     async def start(self, events: EventBus) -> None:
         if not self.enabled:
@@ -250,7 +286,18 @@ class GoalAttentionController:
                                self._last_outcome_state, self._last_goal_closure,
                                self._last_outcome_response,
                                self._last_inspection_state, self._last_inspection_area,
-                               self._last_inspection_status)
+                               self._last_inspection_status,
+                               self._last_visual_state, self._last_visual_focus,
+                               self._last_visual_status)
+
+    def record_visual(self, *, state: str | None = None,
+                      focus: str | None = None, status: str | None = None) -> None:
+        if state is not None:
+            self._last_visual_state = state
+        if focus is not None:
+            self._last_visual_focus = focus[:300]
+        if status is not None:
+            self._last_visual_status = status
 
     def record_inspection(self, *, state: str | None = None,
                           area: str | None = None, status: str | None = None) -> None:
@@ -327,6 +374,9 @@ class GoalAttentionController:
         self._last_inspection_state = "not_run"
         self._last_inspection_area = None
         self._last_inspection_status = None
+        self._last_visual_state = "not_run"
+        self._last_visual_focus = None
+        self._last_visual_status = None
         self._state = "in_flight"
         LOGGER.info("[ATTENTION] event=%s source=%s decision=wake",
                     stimulus.kind, stimulus.source)
