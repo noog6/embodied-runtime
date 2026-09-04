@@ -154,7 +154,7 @@ attention -> independent Initiative A -> optional effect #1
           -> fresh runtime -> optional independent Outcome C -> stop
 ```
 
-`--initiative-continuation` requires both current effect permissions. The
+`--initiative-continuation` requires initiative and at least one of action or message permission. The
 application snapshots WorkingMemory once, captures the exact ActiveGoal object,
 and reuses both across A, B, and C while rendering fresh RuntimeState for each.
 B is eligible only after an applied first effect, while running with that same
@@ -193,3 +193,19 @@ state, goals, or memory. It owns at most one goal-identity-bound monotonic timer
 and publishes a transient due event that enters normal attention. Fresh cognition
 is created only when due; no old authority or provider request crosses the delay.
 See [Bounded temporal follow-up](temporal-followup.md).
+
+## Current bounded autonomy episode grammar
+
+Semantic attention makes an initial decision. It either stops, applies semantic
+**effect #1** and may request one distinct effect continuation, or performs one
+read-only acquisition (`inspect_self` or `observe_scene`), makes one independent
+acquisition-informed effect decision, and may then request one distinct effect
+continuation. Optional effect-outcome evaluation follows semantic effects only;
+there is intentionally no evidence-only goal-closure path.
+
+The fixed budgets are: one acquisition, two semantic effects, one effect
+continuation, one autonomous cognition episode in flight, one temporal
+commitment, and zero autonomous WorkingMemory writes. A `TemporalFollowupDue`
+starts a new episode; it never continues the scheduling episode. Acquisition
+follow-up and effect continuation are separate provider requests, but only the
+latter is controlled by `--initiative-continuation`.

@@ -106,3 +106,8 @@ relative delay, remaining seconds, and purpose. `followup clear` cancels it.
 There is intentionally no add/list/scheduler command. `[TEMPORAL]` logs use a
 restrained colour and omit purpose text. See
 [Bounded temporal follow-up](temporal-followup.md).
+
+A temporal `followup` state of `due_pending` means its timer is due and its one
+exact-goal attention opportunity is waiting for the current single-flight episode
+to finish. Self-inspection remains `temporal_followup_pending=true` in both
+`pending` and `due_pending`; goal change, clear, completion, or shutdown removes it.

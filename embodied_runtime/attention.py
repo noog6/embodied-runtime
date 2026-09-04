@@ -231,6 +231,7 @@ class GoalAttentionController:
                  backend_available: bool,
                  is_running: Callable[[], bool], has_active_goal: Callable[[], bool],
                  current_goal: Callable[[], object | None],
+                 claim_temporal_due: Callable[..., TemporalFollowupDue | None],
                  run_initiative: Callable[[AttentionStimulus], Awaitable[InitiativeOutcome]]) -> None:
         self.enabled = enabled
         self.platform_attention_enabled = platform_attention_enabled
@@ -238,6 +239,7 @@ class GoalAttentionController:
         self._is_running = is_running
         self._has_active_goal = has_active_goal
         self._current_goal = current_goal
+        self._claim_temporal_due = claim_temporal_due
         self._run_initiative = run_initiative
         self._subscriptions: list[Subscription[Event]] = []
         self._task: asyncio.Task[None] | None = None
@@ -375,6 +377,21 @@ class GoalAttentionController:
                 "reason=goal_changed"
             )
             return
+        if self._task is not None and not self._task.done():
+            LOGGER.info(
+                "[ATTENTION] event=temporal_followup_due decision=deferred reason=in_flight"
+            )
+            return
+        claimed = self._claim_temporal_due(
+            event.bound_goal, delay_seconds=event.delay_seconds, purpose=event.purpose
+        )
+        if claimed is None:
+            return
+        # claim_due and _consider contain no suspension point: the temporal slot
+        # remains occupied until this new single-flight episode is accepted.
+        await self._deliver_claimed_temporal(claimed)
+
+    async def _deliver_claimed_temporal(self, event: TemporalFollowupDue) -> None:
         await self._consider(
             observation_from_temporal_followup(event), required_goal=event.bound_goal
         )
@@ -414,6 +431,24 @@ class GoalAttentionController:
             self._reflect(stimulus, required_goal=required_goal),
             name="initiative:goal_attention",
         )
+        self._task.add_done_callback(self._attention_done)
+
+    def _attention_done(self, task: asyncio.Task[None]) -> None:
+        """Release only the temporal handoff after the current task fully ends."""
+        if not self._is_running():
+            return
+        asyncio.create_task(self._release_temporal_due())
+
+    async def _release_temporal_due(self) -> None:
+        """Atomically claim and accept due work when attention is actually idle."""
+        if self._task is not None and not self._task.done():
+            return
+        due = self._claim_temporal_due(self._current_goal())
+        if due is None:
+            return
+        # Neither this await nor the nested _consider suspends before it installs
+        # the new attention task, so no observation can win after the claim.
+        await self._deliver_claimed_temporal(due)
 
     async def _reflect(
         self, stimulus: AttentionStimulus, *, required_goal: object | None = None,

@@ -126,8 +126,9 @@ behaviour, not merely benchmark model names.
 ## Phase 10: bounded sequential initiative
 
 `--initiative-continuation` is an explicit opt-in requiring `--initiative`,
-`--initiative-actions`, and `--initiative-messages` (and therefore today's
-`--console` message sink). Request A retains its Phase 9 one-call budget. Only
+plus at least one of `--initiative-actions` or `--initiative-messages` (the
+latter still requires today's `--console` message sink). Temporal scheduling
+supplies the base semantic effect. Request A retains its one-call budget. Only
 when its requested effect is `applied`, the application is still running, the
 exact episode-start `ActiveGoal` object remains current, and a different freshly
 projected capability remains does the application issue one independent Request
@@ -176,3 +177,10 @@ One volatile monotonic timer can produce a fresh, same-goal attention episode;
 there is no recurrence, persistence, provider session, or attention queue. The
 due request takes fresh runtime context and a fresh WorkingMemory snapshot. See
 [Bounded temporal follow-up](temporal-followup.md).
+
+## Current episode bounds
+
+The normative current episode grammar and fixed budgets are summarized in
+[architecture](architecture.md#current-bounded-autonomy-episode-grammar). In
+particular, acquisition follow-up is not effect continuation, temporal due work
+starts a fresh single-flight episode, and goal closure remains post-effect only.

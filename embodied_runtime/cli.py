@@ -70,7 +70,7 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     )
     parser.add_argument("--initiative", action="store_true",
                         default=configurable_default(False),
-                        help="enable goal-directed read-only cognition initiative")
+                        help="enable bounded goal-directed cognition initiative")
     parser.add_argument(
         "--initiative-platform-attention", action="store_true",
         default=configurable_default(False),
@@ -328,10 +328,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--initiative-messages requires --console")
     if args.initiative_continuation and not args.initiative:
         parser.error("--initiative-continuation requires --initiative")
-    if args.initiative_continuation and not args.initiative_actions:
-        parser.error("--initiative-continuation requires --initiative-actions")
-    if args.initiative_continuation and not args.initiative_messages:
-        parser.error("--initiative-continuation requires --initiative-messages")
+    if (args.initiative_continuation and
+            not (args.initiative_actions or args.initiative_messages)):
+        parser.error(
+            "--initiative-continuation requires --initiative-actions or "
+            "--initiative-messages"
+        )
     if args.initiative and args.cognition == "none":
         parser.error("--initiative requires a cognition backend")
     if args.vision != "none" and args.camera == "none":
