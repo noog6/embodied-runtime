@@ -140,6 +140,23 @@ class PlatformAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend.requests, [])
         await app.stop()
 
+    async def test_thermal_warning_from_non_monitor_source_does_not_wake(self):
+        backend = RecordingCognition()
+        app = self.make_app(backend)
+        await app.start()
+        app.set_goal("opaque")
+        for source in ("test", "platform_monitor:other", "reflex:thermal"):
+            with self.subTest(source=source):
+                await app.events.publish(ThermalWarningRaised(
+                    source=source,
+                    cpu_temperature_celsius=81.0,
+                    warning_threshold_celsius=80.0,
+                ))
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertEqual(backend.requests, [])
+        await app.stop()
+
     async def test_different_source_is_suppressed_not_queued(self):
         backend = RecordingCognition(blocked=True)
         app = self.make_app(backend)

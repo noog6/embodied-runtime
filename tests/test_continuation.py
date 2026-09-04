@@ -8,6 +8,7 @@ from embodied_runtime.attention import (
 )
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import CognitionError, CognitionToolCall, TextCognitionBackend
+from embodied_runtime.events import ThermalWarningRaised
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.interaction import OperatorMessageSink
 from embodied_runtime.profile import RobotProfile
@@ -53,12 +54,13 @@ class SequenceBackend(TextCognitionBackend):
 
 
 class ContinuationTests(unittest.IsolatedAsyncioTestCase):
-    def make_app(self, backend, *, closure=False):
+    def make_app(self, backend, *, closure=False, platform_attention=False):
         sink = Sink()
         app = RobotApplication(
             RobotProfile("test", "Test"), VirtualHardwareBackend(),
             ApplicationOptions(
                 initiative_enabled=True,
+                initiative_platform_attention_enabled=platform_attention,
                 initiative_actions_enabled=True,
                 initiative_messages_enabled=True,
                 initiative_continuation_enabled=True,
@@ -107,6 +109,45 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
                           status.last_continuation_action,
                           status.last_continuation_action_status),
                          ("completed", "orient_body", "applied"))
+        await app.stop()
+
+    async def test_platform_thermal_message_can_continue_without_second_effect(self):
+        backend = SequenceBackend((
+            (CognitionToolCall(
+                "address_operator", '{"message":"Platform temperature is elevated."}'
+            ),),
+            (),
+        ))
+        app, sink = self.make_app(backend, platform_attention=True)
+        await app.start()
+        goal = app.set_goal("monitor platform health")
+        app.working_memory.append("operator context", "remembered context")
+        memory = app.working_memory.snapshot()
+
+        await app.events.publish(ThermalWarningRaised(
+            source="platform_monitor",
+            cpu_temperature_celsius=81.0,
+            warning_threshold_celsius=80.0,
+        ))
+        await self.wait_for_episode(app, backend, 2)
+
+        self.assertEqual(
+            [request[0] for request in backend.requests],
+            [ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST],
+        )
+        self.assertIn("operator context", backend.requests[0][1])
+        self.assertIn("operator context", backend.requests[1][1])
+        self.assertEqual([tool.name for tool in backend.requests[1][2]], ["orient_body"])
+        self.assertIs(app.active_goal, goal)
+        self.assertEqual(app.working_memory.snapshot(), memory)
+        self.assertEqual(len(sink.messages), 1)
+        status = app.attention.status()
+        self.assertEqual((status.last_action, status.last_action_status),
+                         ("address_operator", "applied"))
+        self.assertEqual((status.last_continuation_state,
+                          status.last_continuation_action,
+                          status.last_continuation_action_status),
+                         ("completed", None, None))
         await app.stop()
 
     async def test_reverse_order_and_one_continuation_call_budget(self):
