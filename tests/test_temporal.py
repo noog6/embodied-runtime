@@ -113,6 +113,17 @@ class Backend(TextCognitionBackend):
         return "no action"
 
 
+class FailingAfterReleaseBackend(Backend):
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((message, instructions, tools))
+        self.started.set()
+        if len(self.requests) == 1:
+            await self.release.wait()
+            raise RuntimeError("provider failed")
+        return "no action"
+
+
 class TemporalTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, *, enabled=True, backend=None, sink=None, continuation=False,
                  closure=False, events=None, camera=None, vision=None):
@@ -244,6 +255,21 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(app.active_goal, goal_b)
         await app.stop()
 
+    async def test_clear_prevents_already_queued_due_event_from_running(self):
+        events = HoldingEventBus()
+        backend = Backend()
+        app = self.make_app(backend=backend, events=events)
+        await app.start(); app.set_goal("Goal A"); await self.schedule(app)
+        await self.timer.advance()
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+        due = events.temporal_events[0]
+        self.assertTrue(app.clear_temporal_followup())
+        self.assertEqual(app.temporal_followup_status().state, "none")
+        await app.attention._on_temporal_event(due)
+        await asyncio.sleep(0)
+        self.assertEqual(backend.requests, [])
+        await app.stop()
+
     async def test_temporal_event_rejects_non_runtime_source(self):
         backend = Backend()
         app = self.make_app(backend=backend)
@@ -258,16 +284,18 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         await app.stop()
 
     async def test_task_start_rechecks_goal_after_temporal_acceptance(self):
+        events = HoldingEventBus()
         backend = Backend([CognitionToolCall(
             "schedule_followup", '{"delay_seconds":30,"purpose":"must not run"}'
         )])
-        app = self.make_app(backend=backend)
+        app = self.make_app(backend=backend, events=events)
         await app.start()
         goal_a = app.set_goal("Goal A")
-        due = TemporalFollowupDue(
-            source="temporal_followup", purpose="Goal A purpose",
-            delay_seconds=30, bound_goal=goal_a,
+        await self.schedule(
+            app, '{"delay_seconds":30,"purpose":"Goal A purpose"}'
         )
+        await self.timer.advance()
+        due = events.temporal_events[0]
 
         # _on_temporal_event accepts and creates the task without yielding to it.
         await app.attention._on_temporal_event(due)
@@ -470,7 +498,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(app.temporal.pending.goal, goal)
         await app.stop()
 
-    async def test_due_during_attention_is_suppressed_without_queue_or_retry(self):
+    async def test_due_during_attention_is_deferred_once(self):
         backend = Backend(blocked=True)
         app = self.make_app(backend=backend)
         await app.start(); app.set_goal("goal")
@@ -480,8 +508,147 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
             yaw_degrees=1, pitch_degrees=0,
         ))
         await backend.started.wait(); await self.schedule(app); await self.timer.advance()
-        backend.release.set()
-        while app.attention.status().state == "in_flight": await asyncio.sleep(0)
         self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+        self.assertIn("state:         due_pending", RuntimeConsole(app).execute("followup")[0])
+        result, _ = app._execute_self_inspection(
+            CognitionToolCall("inspect_self", '{"area":"runtime"}')
+        )
+        facts = {fact["name"]: fact["value"] for fact in json.loads(result.output)["facts"]}
+        self.assertEqual(facts["temporal_followup_pending"], "true")
+        self.assertNotIn(SCHEDULE_FOLLOWUP_TOOL, app.effect_tools())
+        rejected = await self.schedule(
+            app, '{"delay_seconds":40,"purpose":"must not replace handoff"}'
+        )
+        self.assertEqual(json.loads(rejected.output)["status"], "rejected")
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+        backend.release.set()
+        for _ in range(100):
+            if len(backend.requests) == 2 and app.attention.status().state != "in_flight":
+                break
+            await asyncio.sleep(0)
+        self.assertEqual(len(backend.requests), 2)
         self.assertIsNone(app.temporal.pending)
+        await app.stop()
+
+    async def test_new_observation_winning_release_race_preserves_due_slot(self):
+        events = HoldingEventBus()
+        backend = Backend(blocked=True)
+        app = self.make_app(backend=backend, events=events)
+        await app.start(); app.set_goal("goal"); await self.schedule(app)
+        await self.timer.advance()
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+
+        async def finished():
+            return None
+
+        old_task = asyncio.create_task(finished())
+        await old_task
+        app.attention._task = old_task
+        app.attention._attention_done(old_task)
+
+        from embodied_runtime.events import BodyOrientationChanged
+        await app.attention._on_body_event(BodyOrientationChanged(
+            source="reflex:test", previous_yaw_degrees=0, previous_pitch_degrees=0,
+            yaw_degrees=1, pitch_degrees=0,
+        ))
+        await asyncio.sleep(0)
+        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+        self.assertNotIn(SCHEDULE_FOLLOWUP_TOOL, app.effect_tools())
+        rejected = await self.schedule(app)
+        self.assertEqual(json.loads(rejected.output)["status"], "rejected")
+
+        backend.release.set()
+        for _ in range(100):
+            if len(backend.requests) == 2 and app.attention.status().state != "in_flight":
+                break
+            await asyncio.sleep(0)
+        self.assertEqual(len(backend.requests), 2)
+        self.assertEqual(app.temporal_followup_status().state, "none")
+        await app.stop()
+
+    async def test_goal_clear_discards_due_handoff(self):
+        backend = Backend(blocked=True)
+        app = self.make_app(backend=backend)
+        await app.start(); app.set_goal("goal")
+        from embodied_runtime.events import BodyOrientationChanged
+        await app.events.publish(BodyOrientationChanged(
+            source="reflex:test", previous_yaw_degrees=0, previous_pitch_degrees=0,
+            yaw_degrees=1, pitch_degrees=0,
+        ))
+        await backend.started.wait(); await self.schedule(app); await self.timer.advance()
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+        app.clear_goal()
+        self.assertEqual(app.temporal_followup_status().state, "none")
+        backend.release.set()
+        for _ in range(10): await asyncio.sleep(0)
+        self.assertEqual(len(backend.requests), 1)
+        await app.stop()
+
+    async def test_due_handoff_is_removed_by_replace_resolve_or_shutdown(self):
+        for operation in ("replace", "resolve", "shutdown"):
+            with self.subTest(operation=operation):
+                backend = Backend(blocked=True)
+                app = self.make_app(backend=backend)
+                await app.start(); app.set_goal("Goal A")
+                from embodied_runtime.events import BodyOrientationChanged
+                await app.events.publish(BodyOrientationChanged(
+                    source="reflex:test", previous_yaw_degrees=0,
+                    previous_pitch_degrees=0, yaw_degrees=1, pitch_degrees=0,
+                ))
+                await backend.started.wait(); await self.schedule(app)
+                await self.timer.advance()
+                self.assertEqual(app.temporal_followup_status().state, "due_pending")
+                if operation == "replace":
+                    app.clear_goal(); app.set_goal("Goal B")
+                elif operation == "resolve":
+                    app.resolve_goal("completed")
+                else:
+                    await app.stop()
+                self.assertEqual(app.temporal_followup_status().state, "none")
+                backend.release.set()
+                for _ in range(20): await asyncio.sleep(0)
+                self.assertEqual(len(backend.requests), 1)
+                if operation != "shutdown": await app.stop()
+
+    async def test_provider_failure_releases_one_deferred_temporal_episode(self):
+        backend = FailingAfterReleaseBackend(blocked=True)
+        app = self.make_app(backend=backend)
+        await app.start(); app.set_goal("goal")
+        from embodied_runtime.events import BodyOrientationChanged
+        await app.events.publish(BodyOrientationChanged(
+            source="reflex:test", previous_yaw_degrees=0, previous_pitch_degrees=0,
+            yaw_degrees=1, pitch_degrees=0,
+        ))
+        await backend.started.wait(); await self.schedule(app); await self.timer.advance()
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+        backend.release.set()
+        for _ in range(100):
+            if len(backend.requests) == 2 and app.attention.status().state != "in_flight":
+                break
+            await asyncio.sleep(0)
+        self.assertEqual(len(backend.requests), 2)
+        self.assertEqual(app.temporal_followup_status().state, "none")
+        await app.stop()
+
+    async def test_non_temporal_event_remains_lossy_while_busy(self):
+        backend = Backend(blocked=True)
+        app = self.make_app(backend=backend)
+        await app.start(); app.set_goal("goal")
+        from embodied_runtime.events import BodyOrientationChanged
+        event = BodyOrientationChanged(
+            source="reflex:test", previous_yaw_degrees=0, previous_pitch_degrees=0,
+            yaw_degrees=1, pitch_degrees=0,
+        )
+        await app.events.publish(event); await backend.started.wait()
+        await app.events.publish(event)
+        from embodied_runtime.events import ThermalWarningRaised
+        await app.attention._on_platform_event(ThermalWarningRaised(
+            source="platform_monitor", cpu_temperature_celsius=85.0,
+            warning_threshold_celsius=80.0,
+        ))
+        backend.release.set()
+        for _ in range(20): await asyncio.sleep(0)
+        self.assertEqual(len(backend.requests), 1)
         await app.stop()

@@ -66,6 +66,10 @@ competing episodes without timers, priorities, or coalescing.
 
 A valid one-shot timer publishes one `TemporalFollowupDue` with bounded purpose
 and relative delay. Attention projects it as `temporal_followup_due` regardless
-of platform-attention configuration. Stale/cancelled timers publish nothing;
-in-flight attention suppresses the event without queue or retry. See
-[Bounded temporal follow-up](temporal-followup.md).
+of platform-attention configuration. Stale or cancelled commitments cannot be
+claimed and therefore cannot start cognition. Unlike every other attention event,
+a valid `TemporalFollowupDue` encountered
+while attention is in flight occupies the one temporal `due_pending` handoff.
+It is released after the current episode ends and passes RUNNING and exact-goal
+identity fences. Body and platform events remain lossy and are never replayed.
+See [Bounded temporal follow-up](temporal-followup.md).

@@ -304,6 +304,7 @@ class RobotApplication:
             is_running=lambda: self.state is LifecycleState.RUNNING,
             has_active_goal=lambda: self._active_goal is not None,
             current_goal=lambda: self._active_goal,
+            claim_temporal_due=self.temporal.claim_due,
             run_initiative=self._request_initiative,
         )
 
@@ -1039,14 +1040,15 @@ class RobotApplication:
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project only currently permitted autonomous semantic effects."""
-        body = self.body_backend
-        tools = []
-        if (
+        if not (
             self.options.initiative_enabled
             and self.state is LifecycleState.RUNNING
             and self._active_goal is not None
-            and self.temporal.pending is None
         ):
+            return ()
+        body = self.body_backend
+        tools = []
+        if self.temporal.pending is None:
             tools.append(SCHEDULE_FOLLOWUP_TOOL)
         if (self.options.initiative_actions_enabled and body is not None and
                 not body.is_physical and "orientation" in body.capabilities):

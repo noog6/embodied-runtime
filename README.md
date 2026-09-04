@@ -69,3 +69,8 @@ When initiative is enabled, cognition may spend one semantic-effect slot to
 schedule one session-local relative follow-up. When due, it creates fresh
 same-goal attention rather than preserving an old decision or provider session.
 See [bounded temporal follow-up](docs/temporal-followup.md).
+
+The current autonomy budgets and episode grammar are summarized in
+[architecture](docs/architecture.md#current-bounded-autonomy-episode-grammar).
+A due temporal commitment waits in one goal-bound slot when cognition is busy;
+it does not interrupt cognition or reserve an action.

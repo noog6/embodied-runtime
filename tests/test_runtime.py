@@ -225,18 +225,21 @@ class CliTests(unittest.TestCase):
         self.assertFalse(args.initiative_actions)
         self.assertFalse(args.initiative_messages)
 
-    def test_initiative_continuation_requires_all_effect_permissions(self) -> None:
+    def test_initiative_continuation_requires_initiative_and_an_extra_effect(self) -> None:
         for argv in (
             ["--initiative-continuation", "--console"],
             ["--cognition", "openai-responses", "--initiative",
              "--initiative-continuation", "--console"],
-            ["--cognition", "openai-responses", "--initiative",
-             "--initiative-actions", "--initiative-continuation", "--console"],
-            ["--cognition", "openai-responses", "--initiative",
-             "--initiative-messages", "--initiative-continuation", "--console"],
         ):
             with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
                 main(argv)
+        for permission in ("--initiative-actions", "--initiative-messages"):
+            argv = ["--cognition", "openai-responses", "--initiative", permission,
+                    "--initiative-continuation", "--console"]
+            with self.subTest(permission=permission), patch(
+                "embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)
+            ):
+                self.assertEqual(main(argv), 0)
 
     def test_openai_cognition_selection_is_lazy(self) -> None:
         args = build_parser().parse_args(["--cognition", "openai-responses"])

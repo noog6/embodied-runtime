@@ -95,8 +95,9 @@ audio, streaming, or Realtime API integration.
 ## Bounded continuation
 
 Add `--initiative-continuation` only together with `--initiative`,
-`--initiative-actions`, `--initiative-messages`, and today's required
-`--console` transport. Initiative Request A remains a one-tool request. After an
+plus at least one of `--initiative-actions` or `--initiative-messages`; messages
+still require today's `--console` transport. Scheduling supplies the base
+temporal effect. Initiative Request A remains a one-tool request. After an
 applied effect, the runtime may make exactly one new independent continuation
 request with fresh Runtime context, the same captured ActiveGoal identity, the
 same episode-start WorkingMemory snapshot, the original attention stimulus, and
@@ -138,3 +139,10 @@ semantic effect. Provider tool-result finalization is confined to the scheduling
 request. No `previous_response_id` or request survives the wait; due-time
 attention is independent and uses fresh runtime/capability/memory projections.
 See [Bounded temporal follow-up](temporal-followup.md).
+
+## Current request boundaries
+
+See the [current bounded episode grammar](architecture.md#current-bounded-autonomy-episode-grammar).
+Provider state and response IDs never cross a temporal wait. An acquisition-informed
+request and the optional distinct effect continuation are independent calls with
+different policy gates.

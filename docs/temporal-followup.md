@@ -1,6 +1,6 @@
 # Bounded temporal follow-up
 
-Phase 15 adds one provider-neutral semantic effect:
+The runtime provides one provider-neutral semantic effect:
 
 ```text
 schedule_followup(delay_seconds, purpose)
@@ -39,7 +39,7 @@ projected, serialized, persisted, or exposed to cognition, and creates no ID.
 
 ## Due-time attention
 
-A valid due timer clears pending state and publishes exactly one
+A valid due timer changes the commitment to `due_pending` and publishes exactly one
 `TemporalFollowupDue(source="temporal_followup", purpose, delay_seconds)`.
 Its semantic projection has kind `temporal_followup_due`, the same source, and
 only purpose/delay facts. No task data or internal monotonic timestamp is
@@ -49,8 +49,14 @@ Attention subscribes whenever initiative is enabled, independently of platform
 attention. Due starts a completely new episode with fresh `RuntimeState`, the
 same current goal object, current capabilities, and a current WorkingMemory
 snapshot. The prior request reserved no authority. Autonomous episodes still do
-not append to WorkingMemory. If another episode is in flight, normal lossy
-suppression applies: no queue, replay, retry, or hidden guarantee.
+not append to WorkingMemory. If another episode is in flight, the temporal controller retains its single
+`due_pending` handoff. When that episode ends (including provider failure),
+attention rechecks RUNNING state and exact goal identity, atomically releases the
+slot, and accepts one fresh episode without an intervening event-loop suspension.
+If another observation has already started an episode, the slot remains
+`due_pending` until that episode ends. A queued event whose commitment was
+cancelled cannot be claimed and starts no cognition. Other observation types remain lossy; this is
+not a general queue, replay, retry, priority, or recurrence mechanism.
 
 `schedule_followup` is a semantic effect, not read-only acquisition. It consumes
 one of the existing maximum two effect positions. An episode may still use at
@@ -58,12 +64,12 @@ most one `inspect_self` **or** `observe_scene`; that acquisition does not consum
 an effect. Successfully applied scheduling remains authoritative if provider
 finalization fails, and no continuation, outcome evaluation, or retry follows.
 
-There is no automatic recurrence. Once due clears the slot, fresh cognition may
+There is no automatic recurrence. Once the due episode is accepted and clears the slot, fresh cognition may
 explicitly request one new follow-up if the same current goal still warrants it.
 
 ## Operator diagnostics
 
-`followup` reports `none`, or bounded delay, remaining seconds, and purpose.
+`followup` reports `none`, `pending`, or `due_pending`, plus bounded delay, remaining seconds, and purpose.
 `followup clear` cancels the pending commitment. Runtime self-inspection exposes
 only `temporal_followup_pending=true|false`; it does not expose task internals.
 Structured `[TEMPORAL]` logs report schedule, due, and cancellation reason but
