@@ -172,3 +172,10 @@ request occurred. No observation is stored, queued, polled, or added to working
 memory. `PresenceChanged` is intentionally excluded because its centering reflex
 already produces the richer body transition. Phase 10 continuation and outcome
 orchestration are independent of observation kind and gain no new effect tool.
+
+## Bounded semantic self-inspection
+
+Bounded situational facts use the single runtime-owned `inspect_self(area)`
+capability described in [Bounded semantic self-inspection](self-inspection.md).
+It increases request-local information, not authority, state, events, or effect
+budgets.

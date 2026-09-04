@@ -20,13 +20,14 @@ class GoalOutcomeStimulus:
     effects: tuple[InitiativeEffectOutcome, ...]
     attention_kind: str
     attention_source: str
+    inspection_result: object | None = None
 
     def __post_init__(self) -> None:
         if len(self.effects) not in (1, 2):
             raise ValueError("outcome stimulus requires one or two effects")
 
     def render(self) -> str:
-        return "\n".join((
+        lines = [
             "Goal outcome stimulus",
             "These are the runtime-produced results of the bounded autonomous effects.",
             *(
@@ -40,4 +41,12 @@ class GoalOutcomeStimulus:
             ),
             f"  attention_kind: {self.attention_kind}",
             f"  attention_source: {self.attention_source}",
-        ))
+        ]
+        if self.inspection_result is not None:
+            result = self.inspection_result
+            lines.append(f"  prior_self_inspection_area: {result.area}")
+            lines.extend(
+                f"  prior_self_inspection.{fact.name}: {fact.value}"
+                for fact in result.facts
+            )
+        return "\n".join(lines)

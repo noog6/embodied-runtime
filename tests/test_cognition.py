@@ -126,7 +126,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(app.runtime_state, state)
         self.assertEqual(published, [])
-        self.assertEqual([tool.name for tool in tools], ["set_goal"])
+        self.assertEqual([tool.name for tool in tools], ["set_goal", "inspect_self"])
         self.assertIsNotNone(executor)
         self.assertIsNotNone(refresh)
         await app.stop()
@@ -214,7 +214,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(tool.parameters["additionalProperties"])
         self.assertEqual(
             [tool.name for tool in self.make_application(FakeCognition()).cognition_tools()],
-            ["set_goal"],
+            ["set_goal", "inspect_self"],
         )
 
         class NoOrientation(VirtualBodyBackend):
@@ -224,11 +224,11 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
             is_physical = True
 
         self.assertEqual([tool.name for tool in self.make_application(
-            FakeCognition(), body=NoOrientation()).cognition_tools()], ["set_goal"])
+            FakeCognition(), body=NoOrientation()).cognition_tools()], ["set_goal", "inspect_self"])
         physical = self.make_application(
             FakeCognition(), body=PhysicalOrientation()
         )
-        self.assertEqual([tool.name for tool in physical.cognition_tools()], ["set_goal"])
+        self.assertEqual([tool.name for tool in physical.cognition_tools()], ["set_goal", "inspect_self"])
         await physical.start()
         result = await physical._execute_cognition_tool(CognitionToolCall(
             "orient_body", '{"yaw_degrees":35,"pitch_degrees":-10}'

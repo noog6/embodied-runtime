@@ -17,8 +17,11 @@ development storage and delivery procedure. The default experimental model is
 python main.py --cognition openai-responses --console
 ```
 
-Add `--initiative` for read-only noticing and thinking. It uses exactly
-`tools=()`, no tool executor, and no refreshed-instructions callback.
+Add `--initiative` for read-only noticing and thinking. Historically this used
+exactly `tools=()`. Phase 13 may now provide the read-only `inspect_self` tool,
+its executor, and request-local refreshed instructions. It still provides no
+semantic effect capability unless one is separately enabled: effect-free is no
+longer tool-free.
 `--initiative-actions` independently offers `orient_body` on a nonphysical body.
 `--initiative-messages --console` offers the transport-neutral
 `address_operator(message)` capability, with the console as today's concrete
@@ -120,3 +123,10 @@ context and Active goal remain authoritative; WorkingMemory may be stale.
 raised/cleared transitions into the same goal-gated, one-in-flight Phase 10
 path. It adds no OpenAI tool, provider conversation, polling, or persistent
 observation data.
+
+## Self-inspection tool transport
+
+The provider may receive the one exact `inspect_self(area)` tool. Tool-result
+continuation remains scoped to that request; an autonomous post-inspection
+decision is a fresh independent request without a previous response identifier.
+See [Bounded semantic self-inspection](self-inspection.md).

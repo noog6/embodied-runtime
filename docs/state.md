@@ -91,3 +91,9 @@ platform state before the corresponding event is published, so cognition gets
 fresh authoritative temperature and memory facts from `RuntimeState`; attention
 never resamples the provider. Observations are not retained in state,
 WorkingMemory, event history, or a queue.
+
+## Self-inspection results
+
+Self-inspection results are immutable request-local grounding, not `RuntimeState`,
+working memory, event history, or persistent state. See
+[Bounded semantic self-inspection](self-inspection.md).

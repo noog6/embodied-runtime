@@ -7,7 +7,8 @@ by this command; aggregate `status` and logs exclude its content, and later
 cognition never receives it.
 
 Initiative uses independent permissions. No flags means operator-only
-cognition; `--initiative` is exactly read-only; `--initiative-actions` permits
+cognition; `--initiative` is exactly effect-free but may use the read-only
+`inspect_self` tool; `--initiative-actions` permits
 `orient_body` on a nonphysical body; and `--initiative-messages` permits
 `address_operator`. The latter currently requires `--console`, because the local
 console is the only configured operator transport. No flag silently enables
@@ -88,3 +89,9 @@ permissions remain independent. The `attention` command naturally reports the
 latest observation kind and source through its existing trigger/source fields;
 it is not an event viewer. Contending observations are deliberately suppressed,
 not queued.
+
+## Inspection diagnostics
+
+`attention` includes volatile last-inspection state, area, and status. There is no
+inspection console command; use ordinary `ask` cognition. Inspection facts are
+not retained in diagnostics. See [Bounded semantic self-inspection](self-inspection.md).
