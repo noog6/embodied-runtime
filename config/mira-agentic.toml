@@ -3,6 +3,7 @@ profile = "mira"
 hardware = "virtual"
 camera = "picamera2"
 cognition = "openai-responses"
+vision = "openai-responses"
 mode = "console"
 
 [initiative]

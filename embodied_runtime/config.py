@@ -15,6 +15,7 @@ class RuntimeFileConfig:
     hardware: str | None = None
     camera: str | None = None
     cognition: str | None = None
+    vision: str | None = None
     mode: str | None = None
 
 
@@ -42,6 +43,7 @@ class LaunchConfiguration:
     hardware: str
     camera: str
     cognition: str
+    vision: str
     mode: str
     initiative: bool
     initiative_platform_attention: bool
@@ -52,13 +54,13 @@ class LaunchConfiguration:
 
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
-    profile="mira", hardware="virtual", camera="none", cognition="none", mode="run",
+    profile="mira", hardware="virtual", camera="none", cognition="none", vision="none", mode="run",
     initiative=False, initiative_platform_attention=False,
     initiative_actions=False, initiative_messages=False,
     initiative_continuation=False, initiative_goal_closure=False,
 )
 
-_RUNTIME_KEYS = {"profile", "hardware", "camera", "cognition", "mode"}
+_RUNTIME_KEYS = {"profile", "hardware", "camera", "cognition", "vision", "mode"}
 _INITIATIVE_KEYS = {
     "enabled", "platform_attention", "actions", "messages", "continuation",
     "goal_closure",
@@ -67,6 +69,7 @@ _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
     "runtime.camera": {"none", "picamera2"},
     "runtime.cognition": {"none", "openai-responses"},
+    "runtime.vision": {"none", "openai-responses"},
     "runtime.mode": {"run", "console", "diagnostics"},
 }
 
@@ -140,6 +143,7 @@ def resolve_launch_configuration(
         hardware=scalar("hardware", runtime.hardware, HISTORICAL_DEFAULTS.hardware),
         camera=scalar("camera", runtime.camera, HISTORICAL_DEFAULTS.camera),
         cognition=scalar("cognition", runtime.cognition, HISTORICAL_DEFAULTS.cognition),
+        vision=scalar("vision", runtime.vision, HISTORICAL_DEFAULTS.vision),
         mode=mode,
         initiative=opt_in("initiative", initiative.enabled, False),
         initiative_platform_attention=opt_in(

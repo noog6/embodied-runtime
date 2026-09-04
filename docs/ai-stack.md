@@ -1,5 +1,9 @@
 # AI stack
 
+Active, bounded image interpretation is documented in
+[`visual-perception.md`](visual-perception.md). It is a separate provider-neutral
+perception adapter rather than a camera or authoritative state concern.
+
 The implemented AI experiment uses the OpenAI Responses API for grounded text,
 bounded runtime-owned working memory, and one semantic capability request:
 

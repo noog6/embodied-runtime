@@ -6,12 +6,13 @@ from dataclasses import dataclass, replace
 import json
 import logging
 import math
+import unicodedata
 
 from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.attention import (
     ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST, INITIATIVE_REQUEST,
     AttentionStimulus, GoalAttentionController, InitiativeContinuationStimulus,
-    InitiativeOutcome, InspectionFollowupStimulus,
+    InitiativeOutcome, InspectionFollowupStimulus, VisualPerceptionFollowupStimulus,
 )
 from embodied_runtime.cognition import (
     ActiveGoal,
@@ -42,6 +43,9 @@ from embodied_runtime.inspection import (
     SelfInspectionResult, SelfInspector,
 )
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.perception import (
+    MAX_CAMERA_FRAME_BYTES, VisualPerceptionBackend, VisualPerceptionResult,
+)
 from embodied_runtime.reflexes import Reflex
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.platform import (
@@ -142,11 +146,33 @@ INSPECT_SELF_TOOL = CognitionToolDefinition(
     },
 )
 
+OBSERVE_SCENE_TOOL = CognitionToolDefinition(
+    name="observe_scene",
+    description=(
+        "Capture exactly one current camera frame and obtain one bounded, "
+        "model-generated visual interpretation. This is read-only and not an effect."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"focus": {
+            "type": "string", "minLength": 1, "maxLength": 300,
+        }},
+        "required": ["focus"],
+        "additionalProperties": False,
+    },
+)
+
 INSPECTION_FOLLOWUP_REQUEST = (
     "Review the one completed self-inspection against fresh Runtime context and the "
     "SAME active goal. If one available semantic effect is necessary, request at most "
     "one. Do not inspect again or change goals. Available capabilities are permissions, "
     "not obligations; no further inspection opportunity will occur."
+)
+VISUAL_FOLLOWUP_REQUEST = (
+    "Review the one completed visual perception against fresh Runtime context and the "
+    "SAME active goal. The interpretation may be incomplete or uncertain; Runtime "
+    "context remains authoritative for runtime facts. If one available semantic effect "
+    "is necessary, request at most one. Do not inspect, observe again, or change goals."
 )
 
 OUTCOME_EVALUATION_REQUEST = (
@@ -214,6 +240,7 @@ class RobotApplication:
         working_memory: WorkingMemory | None = None,
         operator_message_sink: OperatorMessageSink | None = None,
         self_inspector: SelfInspector | None = None,
+        visual_perception_backend: VisualPerceptionBackend | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -224,6 +251,7 @@ class RobotApplication:
         self._cognition_backend = cognition_backend
         self._operator_message_sink = operator_message_sink
         self._self_inspector = self_inspector or HostSelfInspector()
+        self._visual_perception_backend = visual_perception_backend
         self.working_memory = (
             working_memory if working_memory is not None else WorkingMemory()
         )
@@ -533,11 +561,10 @@ class RobotApplication:
             else ""
         )
         inspection_guidance = (
-            "\n\nA read-only inspect_self capability may be available for bounded "
-            "local facts not already present in Runtime context. Use it only when "
-            "missing information is materially relevant to the active goal; do not "
-            "inspect merely because the capability exists. You may request at most "
-            "one capability in this request."
+            "\n\nRead-only inspect_self and observe_scene capabilities may be available "
+            "for bounded missing information. Use at most one only when materially "
+            "relevant to the active goal; do not acquire information merely because "
+            "a capability exists. You may request at most one capability in this request."
             if capabilities_available else ""
         )
         return (
@@ -560,13 +587,14 @@ class RobotApplication:
         action: str | None = None
         action_status: str | None = None
         action_result: str | None = None
-        inspection_status: str | None = None
+        acquisition_status: str | None = None
         inspection_result: SelfInspectionResult | None = None
+        perception_result: VisualPerceptionResult | None = None
         capability_requested = False
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
-            nonlocal action, action_status, action_result, inspection_status
-            nonlocal capability_requested, inspection_result
+            nonlocal action, action_status, action_result, acquisition_status
+            nonlocal capability_requested, inspection_result, perception_result
             if capability_requested:
                 return self._rejected_tool(
                     call.name, "initiative capability request already consumed",
@@ -578,6 +606,10 @@ class RobotApplication:
                 result, inspection_result = self._execute_self_inspection(
                     call, expected_goal=expected_goal, autonomous=True
                 )
+            elif call.name == OBSERVE_SCENE_TOOL.name:
+                result, perception_result = await self._execute_visual_perception(
+                    call, expected_goal=expected_goal, autonomous=True
+                )
             else:
                 action = call.name
                 result = await self._execute_initiative_tool(call)
@@ -585,8 +617,8 @@ class RobotApplication:
                 result_status = json.loads(result.output).get("status", "rejected")
             except (json.JSONDecodeError, AttributeError):
                 result_status = "rejected"
-            if call.name == INSPECT_SELF_TOOL.name:
-                inspection_status = result_status
+            if call.name in (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name):
+                acquisition_status = result_status
             else:
                 action_status = result_status
                 action_result = result.output
@@ -626,12 +658,14 @@ class RobotApplication:
             ))
         continuation_completed = True
         if (
-            inspection_result is not None and inspection_status == "applied"
+            (inspection_result is not None or perception_result is not None)
+            and acquisition_status == "applied"
             and expected_goal is not None and self.state is LifecycleState.RUNNING
             and self._active_goal is expected_goal and self.effect_tools()
         ):
-            followup_completed, followup_effect = await self._request_inspection_followup(
-                stimulus, expected_goal, prior_memory, inspection_result
+            followup_completed, followup_effect = await self._request_acquisition_followup(
+                stimulus, expected_goal, prior_memory, inspection_result,
+                perception_result,
             )
             continuation_completed = followup_completed
             if followup_effect is not None:
@@ -648,7 +682,8 @@ class RobotApplication:
             and self.continuation_tools(effects[0].name)
         ):
             continuation_completed, continuation_effect = await self._request_continuation(
-                stimulus, expected_goal, prior_memory, effects[0], inspection_result
+                stimulus, expected_goal, prior_memory, effects[0], inspection_result,
+                perception_result,
             )
             if continuation_effect is not None:
                 effects.append(continuation_effect)
@@ -665,6 +700,7 @@ class RobotApplication:
                 attention_kind=stimulus.kind,
                 attention_source=stimulus.source,
                 inspection_result=inspection_result,
+                perception_result=perception_result,
             )
             await self._request_outcome_evaluation(
                 stimulus_outcome, stimulus, expected_goal, prior_memory
@@ -672,8 +708,8 @@ class RobotApplication:
         return InitiativeOutcome(response, action, action_status)
 
     def _inspection_followup_instructions(
-        self, followup: InspectionFollowupStimulus, stimulus: AttentionStimulus,
-        expected_goal: ActiveGoal, working_memory,
+        self, followup: InspectionFollowupStimulus | VisualPerceptionFollowupStimulus,
+        stimulus: AttentionStimulus, expected_goal: ActiveGoal, working_memory,
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
@@ -682,47 +718,63 @@ class RobotApplication:
             ), stimulus.render(actions_enabled=None), followup.render(),
         ))
 
-    async def _request_inspection_followup(
+    async def _request_acquisition_followup(
         self, stimulus: AttentionStimulus, expected_goal: ActiveGoal, prior_memory,
-        inspection_result: SelfInspectionResult,
+        inspection_result: SelfInspectionResult | None,
+        perception_result: VisualPerceptionResult | None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
         tools = self.effect_tools()
         if not tools:
             return True, None
-        followup = InspectionFollowupStimulus(inspection_result)
+        followup = (
+            InspectionFollowupStimulus(inspection_result)
+            if inspection_result is not None
+            else VisualPerceptionFollowupStimulus(perception_result)
+        )
+        followup_request = (
+            INSPECTION_FOLLOWUP_REQUEST
+            if inspection_result is not None else VISUAL_FOLLOWUP_REQUEST
+        )
+        log_prefix = "INSPECTION" if inspection_result is not None else "PERCEPTION"
+        acquisition_name = "inspection" if inspection_result is not None else "visual"
         action = status = result_text = None
         consumed = False
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
             nonlocal action, status, result_text, consumed
             if consumed:
-                return self._rejected_tool(call.name, "inspection follow-up already consumed",
-                                           log_prefix="INSPECTION")
+                return self._rejected_tool(
+                    call.name, f"{acquisition_name} follow-up already consumed",
+                    log_prefix=log_prefix,
+                )
             consumed = True
-            action = call.name
             available = self.effect_tools()
             if (self.state is not LifecycleState.RUNNING
                     or self._active_goal is not expected_goal
                     or not any(tool.name == call.name for tool in available)):
-                result = self._rejected_tool(call.name, "effect capability is not available",
-                                             log_prefix="INSPECTION")
+                result = self._rejected_tool(
+                    call.name, "effect capability is not available",
+                    log_prefix=log_prefix,
+                )
             else:
+                action = call.name
                 result = await self._execute_initiative_tool(
-                    call, available=available, log_prefix="INSPECTION"
+                    call, available=available, log_prefix=log_prefix
                 )
             result_text = result.output
             try:
                 status = json.loads(result.output).get("status", "rejected")
             except (json.JSONDecodeError, AttributeError):
                 status = "rejected"
-            self.attention.record_action(action, status)
+            if action is not None:
+                self.attention.record_action(action, status)
             return result
 
         try:
             await backend.respond(
-                INSPECTION_FOLLOWUP_REQUEST,
+                followup_request,
                 instructions=self._inspection_followup_instructions(
                     followup, stimulus, expected_goal, prior_memory
                 ), tools=tools, tool_executor=execute_tool,
@@ -757,6 +809,7 @@ class RobotApplication:
         self, stimulus: AttentionStimulus, expected_goal: ActiveGoal, prior_memory,
         first_effect: InitiativeEffectOutcome,
         inspection_result: SelfInspectionResult | None = None,
+        perception_result: VisualPerceptionResult | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
@@ -766,7 +819,7 @@ class RobotApplication:
         continuation = InitiativeContinuationStimulus(
             first_effect.name, first_effect.status, first_effect.runtime_result,
             stimulus.kind, stimulus.source,
-            inspection_result,
+            inspection_result, perception_result,
         )
         action = status = result_text = None
         consumed = False
@@ -945,7 +998,8 @@ class RobotApplication:
         if not (self.options.initiative_enabled and
                 self.state is LifecycleState.RUNNING and self._active_goal is not None):
             return ()
-        return (INSPECT_SELF_TOOL, *self.effect_tools())
+        acquisition = (OBSERVE_SCENE_TOOL,) if self.visual_perception_available() else ()
+        return (INSPECT_SELF_TOOL, *acquisition, *self.effect_tools())
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project only currently permitted autonomous semantic effects."""
@@ -981,7 +1035,17 @@ class RobotApplication:
             tools.append(ORIENT_BODY_TOOL)
         tools.append(SET_GOAL_TOOL if self._active_goal is None else RESOLVE_GOAL_TOOL)
         tools.append(INSPECT_SELF_TOOL)
+        if self.visual_perception_available():
+            tools.append(OBSERVE_SCENE_TOOL)
         return tuple(tools)
+
+    def visual_perception_available(self) -> bool:
+        camera = self.camera_backend
+        return (
+            self.state is LifecycleState.RUNNING
+            and camera is not None and camera.is_running
+            and self._visual_perception_backend is not None
+        )
 
     async def _execute_cognition_tool(
         self, call: CognitionToolCall
@@ -998,7 +1062,71 @@ class RobotApplication:
         if call.name == INSPECT_SELF_TOOL.name:
             result, _ = self._execute_self_inspection(call)
             return result
+        if call.name == OBSERVE_SCENE_TOOL.name:
+            result, _ = await self._execute_visual_perception(call)
+            return result
         return self._rejected_tool(call.name, "tool is not available")
+
+    async def _execute_visual_perception(
+        self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
+        autonomous: bool = False,
+    ) -> tuple[CognitionToolResult, VisualPerceptionResult | None]:
+        focus = ""
+        try:
+            arguments = self._tool_arguments(call, {"focus"})
+            value = arguments["focus"]
+            if type(value) is not str:
+                raise ValueError("focus must be a string")
+            if any(unicodedata.category(character) == "Cc" for character in value):
+                raise ValueError("focus must not contain control characters")
+            focus = value.strip()
+            if not focus:
+                raise ValueError("focus must be non-empty")
+            if len(focus) > 300:
+                raise ValueError("focus must be at most 300 characters")
+            if not self.visual_perception_available():
+                raise RuntimeError("visual perception is not available")
+            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+                raise RuntimeError("expected active goal is no longer current")
+            LOGGER.info("[PERCEPTION] modality=visual status=capture_requested")
+            frame = self.camera_backend.capture_frame()  # type: ignore[union-attr]
+            if len(frame.data) > MAX_CAMERA_FRAME_BYTES:
+                raise ValueError(
+                    f"camera frame exceeds {MAX_CAMERA_FRAME_BYTES} byte limit"
+                )
+            backend = self._visual_perception_backend
+            assert backend is not None
+            LOGGER.info(
+                "[PERCEPTION] modality=visual backend=%s status=requested",
+                backend.identifier,
+            )
+            result = await backend.interpret(frame, focus)
+            if not isinstance(result, VisualPerceptionResult):
+                raise TypeError("visual backend returned an invalid result")
+            description = result.description.strip()
+            if not description:
+                raise ValueError("visual description must be non-empty")
+            truncated = result.truncated or len(description) > 2000
+            result = VisualPerceptionResult(focus, description[:2000], truncated)
+        except Exception as error:
+            LOGGER.info("[PERCEPTION] modality=visual status=rejected")
+            if autonomous:
+                self.attention.record_visual(
+                    state="failed", focus=focus or None, status="rejected"
+                )
+            return CognitionToolResult(json.dumps({
+                "status": "rejected", "error": str(error),
+            }, sort_keys=True)), None
+        LOGGER.info(
+            "[PERCEPTION] modality=visual status=applied description_chars=%s",
+            len(result.description),
+        )
+        if autonomous:
+            self.attention.record_visual(state="completed", focus=focus, status="applied")
+        return CognitionToolResult(json.dumps({
+            "status": "applied", "focus": result.focus,
+            "description": result.description, "truncated": result.truncated,
+        }, sort_keys=True)), result
 
     def _execute_self_inspection(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
@@ -1046,6 +1174,8 @@ class RobotApplication:
                 SelfInspectionFact("physical", "false" if camera is None else str(camera.is_physical).lower()),
                 SelfInspectionFact("ready", "false" if camera is None else str(camera.is_running).lower()),
                 SelfInspectionFact("capture_capable", "false" if camera is None else str(camera.is_running).lower()),
+                SelfInspectionFact("visual_perception_enabled", str(self._visual_perception_backend is not None).lower()),
+                SelfInspectionFact("visual_perception_backend", "none" if self._visual_perception_backend is None else self._visual_perception_backend.identifier),
             ))
         body = self.body_backend
         return SelfInspectionResult(area, (
@@ -1064,6 +1194,7 @@ class RobotApplication:
             SelfInspectionFact("messages_enabled", str(self.options.initiative_messages_enabled).lower()),
             SelfInspectionFact("continuation_enabled", str(self.options.initiative_continuation_enabled).lower()),
             SelfInspectionFact("goal_closure_enabled", str(self.options.initiative_goal_closure_enabled).lower()),
+            SelfInspectionFact("vision_enabled", str(self._visual_perception_backend is not None).lower()),
         ))
 
     async def _execute_initiative_tool(

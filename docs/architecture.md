@@ -1,5 +1,10 @@
 # Architecture
 
+The camera layer owns one-shot encoded capture. The visual perception layer can
+interpret one transient frame on deliberate request; application orchestration
+owns validation, capability projection, and autonomous request bounds. See
+[`visual-perception.md`](visual-perception.md).
+
 The runtime should keep these concerns distinct:
 
 - **Platform and hardware:** host computer/operating-system observations are
