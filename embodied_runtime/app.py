@@ -141,6 +141,7 @@ OUTCOME_EVALUATION_REQUEST = (
 class ApplicationOptions:
     startup_prompt: str | None = None
     initiative_enabled: bool = False
+    initiative_platform_attention_enabled: bool = False
     initiative_actions_enabled: bool = False
     initiative_messages_enabled: bool = False
     initiative_continuation_enabled: bool = False
@@ -214,6 +215,7 @@ class RobotApplication:
         )
         self.attention = GoalAttentionController(
             enabled=self.options.initiative_enabled,
+            platform_attention_enabled=self.options.initiative_platform_attention_enabled,
             backend_available=self._cognition_backend is not None,
             is_running=lambda: self.state is LifecycleState.RUNNING,
             has_active_goal=lambda: self._active_goal is not None,

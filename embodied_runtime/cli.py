@@ -52,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--initiative", action="store_true",
                         help="enable goal-directed read-only cognition initiative")
     parser.add_argument(
+        "--initiative-platform-attention", action="store_true",
+        help="also attend to platform condition transitions",
+    )
+    parser.add_argument(
         "--initiative-actions", action="store_true",
         help="allow initiative one bounded nonphysical semantic body action",
     )
@@ -188,6 +192,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
                                               initiative_enabled=args.initiative,
+                                              initiative_platform_attention_enabled=args.initiative_platform_attention,
                                               initiative_actions_enabled=args.initiative_actions,
                                               initiative_messages_enabled=args.initiative_messages,
                                               initiative_continuation_enabled=args.initiative_continuation,
@@ -248,6 +253,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.initiative_platform_attention and not args.initiative:
+        parser.error("--initiative-platform-attention requires --initiative")
     if args.initiative_goal_closure and not args.initiative:
         parser.error("--initiative-goal-closure requires --initiative")
     if (args.initiative_goal_closure and

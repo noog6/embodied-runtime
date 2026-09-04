@@ -82,3 +82,12 @@ contains one or two immutable effect results. Neither stimulus, autonomous
 response, effect result, nor operator message is persisted or appended to
 WorkingMemory. Continuation diagnostics are latest-episode volatile metadata
 only.
+
+## Observations are not state
+
+`SemanticObservation` is an immutable, request-local projection of one semantic
+transition used only to explain an attention wake. The application installs
+platform state before the corresponding event is published, so cognition gets
+fresh authoritative temperature and memory facts from `RuntimeState`; attention
+never resamples the provider. Observations are not retained in state,
+WorkingMemory, event history, or a queue.

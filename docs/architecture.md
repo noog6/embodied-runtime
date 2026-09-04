@@ -147,3 +147,16 @@ applied. Attention still owns event selection, one in-flight task, cancellation,
 and volatile diagnostics; `RobotApplication` owns projection, validation,
 execution, identity checks, and ordering. There is no planner, loop, retry,
 persistent memory, or provider session.
+
+## General semantic observations
+
+Phase 11 projects selected authoritative events into immutable, request-local
+`SemanticObservation` values before goal-directed attention runs. Reflex-sourced
+body orientation changes remain enabled by `--initiative`; thermal-warning and
+memory-pressure raised/cleared transitions additionally require
+`--initiative-platform-attention`. The event says what transitioned, fresh
+`RuntimeState` remains authoritative, and the observation only says why this
+request occurred. No observation is stored, queued, polled, or added to working
+memory. `PresenceChanged` is intentionally excluded because its centering reflex
+already produces the richer body transition. Phase 10 continuation and outcome
+orchestration are independent of observation kind and gain no new effect tool.

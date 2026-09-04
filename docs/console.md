@@ -73,3 +73,14 @@ applied first effect, and that request may use at most one different capability.
 Thus one attention episode can request at most two distinct semantic effects.
 Rejected first effects are not retried or followed by a continuation. The
 `CONTINUATION` log category uses the existing high-attention colour palette.
+
+## Platform attention option
+
+`--initiative-platform-attention` requires `--initiative` and adds existing
+platform thermal-warning and memory-pressure raised/cleared transitions as
+attention sources. Without it, initiative retains its reflex-body-only default.
+The flag grants no effects: action, message, continuation, and goal-closure
+permissions remain independent. The `attention` command naturally reports the
+latest observation kind and source through its existing trigger/source fields;
+it is not an event viewer. Contending observations are deliberately suppressed,
+not queued.

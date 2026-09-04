@@ -49,3 +49,15 @@ into a request through an application semantic capability.
 Initiative-driven orientation uses the runtime-owned source `initiative`.
 Attention accepts only sources beginning with `reflex:`, so that resulting event
 is observable but cannot recursively trigger another initiative episode.
+
+## Event projections for attention
+
+Attention may project one selected event into an immutable
+`SemanticObservation`. This is neither a replacement for the event nor state:
+it identifies the transition while fresh `RuntimeState` describes current
+reality. The projection is request-local, retains no raw event, and creates no
+history. Supported projections are reflex-sourced `BodyOrientationChanged` and,
+when explicitly enabled, existing thermal and memory-pressure raised/cleared
+platform events. `PresenceChanged` is deliberately not subscribed: presence
+centering can publish the more informative reflex body transition, avoiding
+competing episodes without timers, priorities, or coalescing.

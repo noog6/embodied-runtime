@@ -109,3 +109,14 @@ are separate `respond()` calls. Any `previous_response_id` is confined to the
 adapter's internal tool-result continuation for one call and is never carried
 from A to B or B to C. This adds no planning, retries, pursuit loop, or provider
 conversation state.
+
+## Semantic attention grounding
+
+Autonomous requests render a generic `Attention stimulus` containing one
+provider-neutral `Semantic observation` with its kind, source, and ordered
+facts. It is runtime-generated rather than operator input. Current Runtime
+context and Active goal remain authoritative; WorkingMemory may be stale.
+`--initiative-platform-attention` opts thermal-warning and memory-pressure
+raised/cleared transitions into the same goal-gated, one-in-flight Phase 10
+path. It adds no OpenAI tool, provider conversation, polling, or persistent
+observation data.
