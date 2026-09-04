@@ -1,0 +1,14 @@
+[runtime]
+profile = "mira"
+hardware = "virtual"
+camera = "picamera2"
+cognition = "openai-responses"
+mode = "console"
+
+[initiative]
+enabled = true
+platform_attention = true
+actions = true
+messages = true
+continuation = true
+goal_closure = true

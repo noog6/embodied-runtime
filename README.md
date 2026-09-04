@@ -14,6 +14,17 @@ python main.py --diagnostics
 python main.py --console
 ```
 
+For normal full-agentic Mira operation, persistent startup policy replaces the
+long development flag sequence:
+
+```console
+python main.py --config config/mira-agentic.toml
+```
+
+The strict, dependency-free TOML schema, historical defaults, and explicit CLI
+override rules are documented in [Runtime startup configuration](docs/configuration.md).
+Granular flags remain available for focused experiments and diagnostics.
+
 Optional provider setup is documented in [OpenAI text cognition
 setup](docs/cognition-openai.md), including the linked [Secrets and API
 keys](docs/secrets.md) procedure for local credential storage and delivery.

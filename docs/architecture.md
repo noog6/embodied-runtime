@@ -30,6 +30,18 @@ only that future semantic observation would enter state or the event mechanism.
 The [local runtime console](console.md) is a projection of that state and a thin
 adapter for explicit development input, not an additional state owner or observer.
 
+Startup configuration is a separate launch-owned seam:
+
+```text
+strict TOML -> validated file values -> historical defaults + explicit CLI
+            -> existing backend selection and ApplicationOptions
+```
+
+The loader neither constructs backends nor enters `RobotApplication`; application
+policy remains represented by `ApplicationOptions`. Configuration is read once
+before startup, and final dependency validation follows the merge. See
+[Runtime startup configuration](configuration.md).
+
 The narrow grounded cognition path is implemented as:
 
 ```text
