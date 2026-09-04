@@ -113,9 +113,10 @@ class InitiativeContinuationStimulus:
     first_effect_result: str
     attention_kind: str
     attention_source: str
+    inspection_result: object | None = None
 
     def render(self) -> str:
-        return "\n".join((
+        lines = [
             "Initiative continuation stimulus",
             "The first effect already occurred; this runtime-produced result is authoritative.",
             f"  first_effect_name: {self.first_effect_name}",
@@ -123,7 +124,33 @@ class InitiativeContinuationStimulus:
             f"  first_effect_result: {self.first_effect_result}",
             f"  attention_kind: {self.attention_kind}",
             f"  attention_source: {self.attention_source}",
+        ]
+        if self.inspection_result is not None:
+            lines.append(f"  prior_self_inspection: {self.inspection_result!s}")
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class InspectionFollowupStimulus:
+    """Ground the one independent decision after an applied inspection."""
+
+    inspection_result: object
+
+    def render(self) -> str:
+        result = self.inspection_result
+        lines = [
+            "Self-inspection follow-up stimulus",
+            "One bounded read-only self-inspection already occurred.",
+            "Its runtime-produced result is authoritative for that inspected area.",
+            f"  area: {result.area}",
+        ]
+        lines.extend(f"  {fact.name}: {fact.value}" for fact in result.facts)
+        lines.extend((
+            "Review it with fresh Runtime context and the SAME active goal.",
+            "You may request at most one available semantic effect if necessary.",
+            "Do not inspect again or set, replace, resolve, or complete a goal.",
         ))
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +169,9 @@ class AttentionStatus:
     last_outcome_state: str
     last_goal_closure: str
     last_outcome_response: str | None
+    last_inspection_state: str
+    last_inspection_area: str | None
+    last_inspection_status: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +209,9 @@ class GoalAttentionController:
         self._last_outcome_state = "not_run"
         self._last_goal_closure = "none"
         self._last_outcome_response: str | None = None
+        self._last_inspection_state = "not_run"
+        self._last_inspection_area: str | None = None
+        self._last_inspection_status: str | None = None
 
     async def start(self, events: EventBus) -> None:
         if not self.enabled:
@@ -215,7 +248,18 @@ class GoalAttentionController:
                                self._last_continuation_action_status,
                                self._last_continuation_response,
                                self._last_outcome_state, self._last_goal_closure,
-                               self._last_outcome_response)
+                               self._last_outcome_response,
+                               self._last_inspection_state, self._last_inspection_area,
+                               self._last_inspection_status)
+
+    def record_inspection(self, *, state: str | None = None,
+                          area: str | None = None, status: str | None = None) -> None:
+        if state is not None:
+            self._last_inspection_state = state
+        if area is not None:
+            self._last_inspection_area = area
+        if status is not None:
+            self._last_inspection_status = status
 
     def record_action(self, action: str, status: str) -> None:
         """Record the latest runtime-produced result for the in-flight episode."""
@@ -280,6 +324,9 @@ class GoalAttentionController:
         self._last_outcome_state = "not_run"
         self._last_goal_closure = "none"
         self._last_outcome_response = None
+        self._last_inspection_state = "not_run"
+        self._last_inspection_area = None
+        self._last_inspection_status = None
         self._state = "in_flight"
         LOGGER.info("[ATTENTION] event=%s source=%s decision=wake",
                     stimulus.kind, stimulus.source)

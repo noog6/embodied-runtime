@@ -3,7 +3,7 @@ import json
 import unittest
 
 from embodied_runtime.app import (
-    ADDRESS_OPERATOR_TOOL, ORIENT_BODY_TOOL, ApplicationOptions, RobotApplication,
+    ADDRESS_OPERATOR_TOOL, INSPECT_SELF_TOOL, ORIENT_BODY_TOOL, ApplicationOptions, RobotApplication,
 )
 from embodied_runtime.attention import ACTION_INITIATIVE_REQUEST, AttentionStimulus
 from embodied_runtime.body.virtual import VirtualBodyBackend
@@ -91,7 +91,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                             body=PhysicalBody())
         await app.start()
         app.set_goal("goal")
-        self.assertEqual(app.initiative_tools(), (ADDRESS_OPERATOR_TOOL,))
+        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, ADDRESS_OPERATOR_TOOL,))
         self.assertEqual(ADDRESS_OPERATOR_TOOL.parameters, {
             "type": "object",
             "properties": {"message": {
@@ -117,7 +117,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(backend.requests[0][0], ACTION_INITIATIVE_REQUEST)
         self.assertEqual([tool.name for tool in backend.requests[0][2]],
-                         ["address_operator"])
+                         ["inspect_self", "address_operator"])
         self.assertEqual((sink.messages[0].text, sink.messages[0].source),
                          ("I noticed the reflex.", "initiative"))
         self.assertEqual(backend.results[0], {
@@ -198,7 +198,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         app.set_goal("goal")
         self.assertEqual(
             [tool.name for tool in app.initiative_tools()],
-            ["orient_body", "address_operator"],
+            ["inspect_self", "orient_body", "address_operator"],
         )
 
         await app._request_initiative(AttentionStimulus(
@@ -234,7 +234,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_app(ScriptedBackend(), None)
         await app.start()
         app.set_goal("goal")
-        self.assertEqual(app.initiative_tools(), ())
+        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL,))
         result = await app._execute_initiative_tool(CognitionToolCall(
             "address_operator", '{"message":"hello"}'
         ))

@@ -2,8 +2,8 @@ import re
 import unittest
 
 from embodied_runtime.console_style import (
-    BOLD_BRIGHT_MAGENTA, BRIGHT_RED, DIM, DIM_CYAN, GREEN, RESET, YELLOW,
-    ConsoleStyle, colour_enabled,
+    BOLD_BRIGHT_MAGENTA, BRIGHT_BLUE, BRIGHT_RED, DIM, DIM_CYAN, GREEN,
+    LOG_CATEGORIES, RESET, YELLOW, ConsoleStyle, colour_enabled,
 )
 
 
@@ -19,6 +19,10 @@ class FakeStream:
 
 
 class ConsoleStyleTests(unittest.TestCase):
+    def test_inspection_is_a_structured_log_category(self):
+        self.assertEqual(LOG_CATEGORIES["INSPECTION"], BRIGHT_BLUE)
+        self.assertNotIn("inspection", ConsoleStyle._VALUES)
+
     def test_tty_no_color_and_non_tty_detection(self):
         self.assertTrue(colour_enabled(FakeStream(True), environ={}))
         self.assertFalse(colour_enabled(FakeStream(False), environ={}))

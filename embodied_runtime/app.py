@@ -11,7 +11,7 @@ from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.attention import (
     ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST, INITIATIVE_REQUEST,
     AttentionStimulus, GoalAttentionController, InitiativeContinuationStimulus,
-    InitiativeOutcome,
+    InitiativeOutcome, InspectionFollowupStimulus,
 )
 from embodied_runtime.cognition import (
     ActiveGoal,
@@ -36,6 +36,10 @@ from embodied_runtime.events import (
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, OperatorMessage, OperatorMessageSink,
+)
+from embodied_runtime.inspection import (
+    HostSelfInspector, SELF_INSPECTION_AREAS, SelfInspectionFact,
+    SelfInspectionResult, SelfInspector,
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.reflexes import Reflex
@@ -124,6 +128,27 @@ COMPLETE_GOAL_TOOL = CognitionToolDefinition(
     },
 )
 
+INSPECT_SELF_TOOL = CognitionToolDefinition(
+    name="inspect_self",
+    description=(
+        "Read one bounded runtime-owned local condition. Use only when a missing "
+        "local fact is materially relevant. This is read-only and is not an effect."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"area": {"type": "string", "enum": list(SELF_INSPECTION_AREAS)}},
+        "required": ["area"],
+        "additionalProperties": False,
+    },
+)
+
+INSPECTION_FOLLOWUP_REQUEST = (
+    "Review the one completed self-inspection against fresh Runtime context and the "
+    "SAME active goal. If one available semantic effect is necessary, request at most "
+    "one. Do not inspect again or change goals. Available capabilities are permissions, "
+    "not obligations; no further inspection opportunity will occur."
+)
+
 OUTCOME_EVALUATION_REQUEST = (
     "Evaluate the bounded autonomous effect sequence against the current active goal. "
     "Current Runtime context is authoritative for what is true now. Active goal is "
@@ -188,6 +213,7 @@ class RobotApplication:
         cognition_backend: TextCognitionBackend | None = None,
         working_memory: WorkingMemory | None = None,
         operator_message_sink: OperatorMessageSink | None = None,
+        self_inspector: SelfInspector | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -197,6 +223,7 @@ class RobotApplication:
         self.camera_backend = camera_backend
         self._cognition_backend = cognition_backend
         self._operator_message_sink = operator_message_sink
+        self._self_inspector = self_inspector or HostSelfInspector()
         self.working_memory = (
             working_memory if working_memory is not None else WorkingMemory()
         )
@@ -505,9 +532,17 @@ class RobotApplication:
             if self.options.initiative_continuation_enabled and capabilities_available
             else ""
         )
+        inspection_guidance = (
+            "\n\nA read-only inspect_self capability may be available for bounded "
+            "local facts not already present in Runtime context. Use it only when "
+            "missing information is materially relevant to the active goal; do not "
+            "inspect merely because the capability exists. You may request at most "
+            "one capability in this request."
+            if capabilities_available else ""
+        )
         return (
             f"{context}\n\n{stimulus.render(actions_enabled=capabilities_available)}"
-            f"{sequencing}"
+            f"{inspection_guidance}{sequencing}"
         )
 
     async def _request_initiative(self, stimulus: AttentionStimulus) -> InitiativeOutcome:
@@ -525,25 +560,38 @@ class RobotApplication:
         action: str | None = None
         action_status: str | None = None
         action_result: str | None = None
+        inspection_status: str | None = None
+        inspection_result: SelfInspectionResult | None = None
         capability_requested = False
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
-            nonlocal action, action_status, action_result, capability_requested
+            nonlocal action, action_status, action_result, inspection_status
+            nonlocal capability_requested, inspection_result
             if capability_requested:
                 return self._rejected_tool(
                     call.name, "initiative capability request already consumed",
                     log_prefix="INITIATIVE",
                 )
             capability_requested = True
-            action = call.name
             LOGGER.info("[INITIATIVE] tool=%s status=requested", call.name)
-            result = await self._execute_initiative_tool(call)
+            if call.name == INSPECT_SELF_TOOL.name:
+                result, inspection_result = self._execute_self_inspection(
+                    call, expected_goal=expected_goal, autonomous=True
+                )
+            else:
+                action = call.name
+                result = await self._execute_initiative_tool(call)
             try:
-                action_status = json.loads(result.output).get("status", "rejected")
+                result_status = json.loads(result.output).get("status", "rejected")
             except (json.JSONDecodeError, AttributeError):
-                action_status = "rejected"
-            action_result = result.output
-            self.attention.record_action(action, action_status)
+                result_status = "rejected"
+            if call.name == INSPECT_SELF_TOOL.name:
+                inspection_status = result_status
+            else:
+                action_status = result_status
+                action_result = result.output
+            if action is not None:
+                self.attention.record_action(action, action_status)
             return result
 
         LOGGER.info(
@@ -578,15 +626,29 @@ class RobotApplication:
             ))
         continuation_completed = True
         if (
+            inspection_result is not None and inspection_status == "applied"
+            and expected_goal is not None and self.state is LifecycleState.RUNNING
+            and self._active_goal is expected_goal and self.effect_tools()
+        ):
+            followup_completed, followup_effect = await self._request_inspection_followup(
+                stimulus, expected_goal, prior_memory, inspection_result
+            )
+            continuation_completed = followup_completed
+            if followup_effect is not None:
+                effects.append(followup_effect)
+                action = followup_effect.name
+                action_status = followup_effect.status
+        if (
             self.options.initiative_continuation_enabled
-            and action is not None and action_status == "applied"
+            and continuation_completed
+            and effects and effects[0].status == "applied"
             and expected_goal is not None
             and self.state is LifecycleState.RUNNING
             and self._active_goal is expected_goal
-            and self.continuation_tools(action)
+            and self.continuation_tools(effects[0].name)
         ):
             continuation_completed, continuation_effect = await self._request_continuation(
-                stimulus, expected_goal, prior_memory, effects[0]
+                stimulus, expected_goal, prior_memory, effects[0], inspection_result
             )
             if continuation_effect is not None:
                 effects.append(continuation_effect)
@@ -602,11 +664,81 @@ class RobotApplication:
                 effects=tuple(effects),
                 attention_kind=stimulus.kind,
                 attention_source=stimulus.source,
+                inspection_result=inspection_result,
             )
             await self._request_outcome_evaluation(
                 stimulus_outcome, stimulus, expected_goal, prior_memory
             )
         return InitiativeOutcome(response, action, action_status)
+
+    def _inspection_followup_instructions(
+        self, followup: InspectionFollowupStimulus, stimulus: AttentionStimulus,
+        expected_goal: ActiveGoal, working_memory,
+    ) -> str:
+        return "\n\n".join((
+            compose_cognition_instructions(
+                self.cognition_context(), self.options.startup_prompt, working_memory,
+                expected_goal if self._active_goal is expected_goal else None,
+            ), stimulus.render(actions_enabled=None), followup.render(),
+        ))
+
+    async def _request_inspection_followup(
+        self, stimulus: AttentionStimulus, expected_goal: ActiveGoal, prior_memory,
+        inspection_result: SelfInspectionResult,
+    ) -> tuple[bool, InitiativeEffectOutcome | None]:
+        backend = self._cognition_backend
+        assert backend is not None
+        tools = self.effect_tools()
+        if not tools:
+            return True, None
+        followup = InspectionFollowupStimulus(inspection_result)
+        action = status = result_text = None
+        consumed = False
+
+        async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
+            nonlocal action, status, result_text, consumed
+            if consumed:
+                return self._rejected_tool(call.name, "inspection follow-up already consumed",
+                                           log_prefix="INSPECTION")
+            consumed = True
+            action = call.name
+            available = self.effect_tools()
+            if (self.state is not LifecycleState.RUNNING
+                    or self._active_goal is not expected_goal
+                    or not any(tool.name == call.name for tool in available)):
+                result = self._rejected_tool(call.name, "effect capability is not available",
+                                             log_prefix="INSPECTION")
+            else:
+                result = await self._execute_initiative_tool(
+                    call, available=available, log_prefix="INSPECTION"
+                )
+            result_text = result.output
+            try:
+                status = json.loads(result.output).get("status", "rejected")
+            except (json.JSONDecodeError, AttributeError):
+                status = "rejected"
+            self.attention.record_action(action, status)
+            return result
+
+        try:
+            await backend.respond(
+                INSPECTION_FOLLOWUP_REQUEST,
+                instructions=self._inspection_followup_instructions(
+                    followup, stimulus, expected_goal, prior_memory
+                ), tools=tools, tool_executor=execute_tool,
+                refreshed_instructions=lambda: self._inspection_followup_instructions(
+                    followup, stimulus, expected_goal, prior_memory
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False, (None if action is None else InitiativeEffectOutcome(
+                action, status or "rejected", result_text or '{"status": "rejected"}'
+            ))
+        return True, (None if action is None else InitiativeEffectOutcome(
+            action, status or "rejected", result_text or '{"status": "rejected"}'
+        ))
 
     def _continuation_instructions(
         self, continuation: InitiativeContinuationStimulus,
@@ -624,6 +756,7 @@ class RobotApplication:
     async def _request_continuation(
         self, stimulus: AttentionStimulus, expected_goal: ActiveGoal, prior_memory,
         first_effect: InitiativeEffectOutcome,
+        inspection_result: SelfInspectionResult | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
@@ -633,6 +766,7 @@ class RobotApplication:
         continuation = InitiativeContinuationStimulus(
             first_effect.name, first_effect.status, first_effect.runtime_result,
             stimulus.kind, stimulus.source,
+            inspection_result,
         )
         action = status = result_text = None
         consumed = False
@@ -808,10 +942,14 @@ class RobotApplication:
 
     def initiative_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project bounded autonomous capabilities at request time."""
-        body = self.body_backend
         if not (self.options.initiative_enabled and
                 self.state is LifecycleState.RUNNING and self._active_goal is not None):
             return ()
+        return (INSPECT_SELF_TOOL, *self.effect_tools())
+
+    def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
+        """Project only currently permitted autonomous semantic effects."""
+        body = self.body_backend
         tools = []
         if (self.options.initiative_actions_enabled and body is not None and
                 not body.is_physical and "orientation" in body.capabilities):
@@ -828,7 +966,7 @@ class RobotApplication:
         if not self.options.initiative_continuation_enabled:
             return ()
         return tuple(
-            tool for tool in self.initiative_tools() if tool.name != first_effect_name
+            tool for tool in self.effect_tools() if tool.name != first_effect_name
         )
 
     def cognition_tools(self) -> tuple[CognitionToolDefinition, ...]:
@@ -842,6 +980,7 @@ class RobotApplication:
         ):
             tools.append(ORIENT_BODY_TOOL)
         tools.append(SET_GOAL_TOOL if self._active_goal is None else RESOLVE_GOAL_TOOL)
+        tools.append(INSPECT_SELF_TOOL)
         return tuple(tools)
 
     async def _execute_cognition_tool(
@@ -856,7 +995,76 @@ class RobotApplication:
             return self._execute_set_goal(call)
         if call.name == RESOLVE_GOAL_TOOL.name:
             return self._execute_resolve_goal(call)
+        if call.name == INSPECT_SELF_TOOL.name:
+            result, _ = self._execute_self_inspection(call)
+            return result
         return self._rejected_tool(call.name, "tool is not available")
+
+    def _execute_self_inspection(
+        self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
+        autonomous: bool = False,
+    ) -> tuple[CognitionToolResult, SelfInspectionResult | None]:
+        area = "none"
+        try:
+            arguments = self._tool_arguments(call, {"area"})
+            value = arguments["area"]
+            if type(value) is not str or value not in SELF_INSPECTION_AREAS:
+                raise ValueError("area must be network, storage, camera, or runtime")
+            area = value
+            LOGGER.info("[INSPECTION] area=%s status=requested", area)
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("self-inspection requires a running application")
+            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+                raise RuntimeError("expected active goal is no longer current")
+            result = self._inspect_area(area)
+        except Exception as error:
+            LOGGER.info("[INSPECTION] area=%s status=rejected", area)
+            if autonomous:
+                self.attention.record_inspection(
+                    state="failed", area=area if area != "none" else None,
+                    status="rejected",
+                )
+            return CognitionToolResult(json.dumps({
+                "status": "rejected", "error": str(error),
+            }, sort_keys=True)), None
+        LOGGER.info("[INSPECTION] area=%s status=applied", area)
+        if autonomous:
+            self.attention.record_inspection(state="completed", area=area, status="applied")
+        return CognitionToolResult(json.dumps({
+            "status": "applied", "area": result.area,
+            "facts": [{"name": fact.name, "value": fact.value} for fact in result.facts],
+        }, sort_keys=True)), result
+
+    def _inspect_area(self, area: str) -> SelfInspectionResult:
+        if area in ("network", "storage"):
+            return self._self_inspector.inspect(area)
+        if area == "camera":
+            camera = self.camera_backend
+            return SelfInspectionResult(area, (
+                SelfInspectionFact("configured", str(camera is not None).lower()),
+                SelfInspectionFact("backend", "none" if camera is None else camera.identifier),
+                SelfInspectionFact("physical", "false" if camera is None else str(camera.is_physical).lower()),
+                SelfInspectionFact("ready", "false" if camera is None else str(camera.is_running).lower()),
+                SelfInspectionFact("capture_capable", "false" if camera is None else str(camera.is_running).lower()),
+            ))
+        body = self.body_backend
+        return SelfInspectionResult(area, (
+            SelfInspectionFact("lifecycle", self.state.value),
+            SelfInspectionFact("profile", self.profile.identifier),
+            SelfInspectionFact("hardware_backend", self.hardware.identifier),
+            SelfInspectionFact("hardware_physical", str(self.hardware.is_physical).lower()),
+            SelfInspectionFact("body_backend", "none" if body is None else body.identifier),
+            SelfInspectionFact("body_physical", "false" if body is None else str(body.is_physical).lower()),
+            SelfInspectionFact("active_goal_present", str(self._active_goal is not None).lower()),
+            SelfInspectionFact("working_memory_turns", str(len(self.working_memory.snapshot()))),
+            SelfInspectionFact("working_memory_capacity", str(self.working_memory.capacity)),
+            SelfInspectionFact("initiative_enabled", str(self.options.initiative_enabled).lower()),
+            SelfInspectionFact("platform_attention_enabled", str(self.options.initiative_platform_attention_enabled).lower()),
+            SelfInspectionFact("actions_enabled", str(self.options.initiative_actions_enabled).lower()),
+            SelfInspectionFact("messages_enabled", str(self.options.initiative_messages_enabled).lower()),
+            SelfInspectionFact("continuation_enabled", str(self.options.initiative_continuation_enabled).lower()),
+            SelfInspectionFact("goal_closure_enabled", str(self.options.initiative_goal_closure_enabled).lower()),
+        ))
 
     async def _execute_initiative_tool(
         self, call: CognitionToolCall, *,

@@ -61,7 +61,8 @@ given fresh Runtime context, ActiveGoal, and bounded operator WorkingMemory plus
 a provider-neutral attention stimulus. Initiative now has independent capability permissions:
 
 - without `--initiative`, cognition occurs only for explicit operator asks;
-- `--initiative` is read-only with exactly no tools or continuation;
+- `--initiative` is effect-free but may receive the read-only `inspect_self`
+  tool; it receives no semantic effect or continuation without separate policy;
 - `--initiative-actions` permits `orient_body` only on a nonphysical body;
 - `--initiative-messages` permits `address_operator` only with a configured sink;
 - enabling both offers both, but without continuation the runtime accepts at most one request total;
@@ -154,3 +155,10 @@ sources without queue or replay. Observations and autonomous results are
 request-local and never enter WorkingMemory. There is no cognition polling,
 observation history, new semantic capability, or direct `PresenceChanged`
 attention. Phase 10 works identically for every supported observation kind.
+
+## Bounded semantic self-inspection
+
+Phase 13 adds one provider-neutral, read-only `inspect_self` capability for four
+bounded local areas. Autonomous inspection is limited to one per episode and may
+precede—but never count as—at most two existing semantic effects. See
+[Bounded semantic self-inspection](self-inspection.md).
