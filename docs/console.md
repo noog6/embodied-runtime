@@ -7,14 +7,16 @@ by this command; aggregate `status` and logs exclude its content, and later
 cognition never receives it.
 
 Initiative uses independent permissions. No flags means operator-only
-cognition; `--initiative` is exactly effect-free but may use the read-only
-`inspect_self` tool; `--initiative-actions` permits
+cognition; `--initiative` permits bounded read-only `inspect_self` or
+`observe_scene` acquisition where available and the single bounded
+`schedule_followup` semantic effect; `--initiative-actions` permits
 `orient_body` on a nonphysical body; and `--initiative-messages` permits
 `address_operator`. The latter currently requires `--console`, because the local
 console is the only configured operator transport. No flag silently enables
 another. With both effect permissions, both tools are offered but the runtime accepts
-only one request total unless bounded continuation is explicitly enabled. Goal closure requires initiative plus at least
-one effect permission.
+only one request total unless bounded continuation is explicitly enabled. Goal
+closure requires initiative only and still runs only after an actual semantic
+effect, never after read-only acquisition alone.
 
 The console concurrently waits for selector-based input and a transient outbound
 message queue. It renders an accepted message immediately as `Mira: ...`, cancels
@@ -84,7 +86,8 @@ Rejected first effects are not retried or followed by a continuation. The
 `--initiative-platform-attention` requires `--initiative` and adds existing
 platform thermal-warning and memory-pressure raised/cleared transitions as
 attention sources. Without it, initiative retains its reflex-body-only default.
-The flag grants no effects: action, message, continuation, and goal-closure
+The flag grants no additional effects: temporal scheduling comes from the base
+initiative policy, while action, message, continuation, and goal-closure
 permissions remain independent. The `attention` command naturally reports the
 latest observation kind and source through its existing trigger/source fields;
 it is not an event viewer. Contending observations are deliberately suppressed,
@@ -95,3 +98,11 @@ not queued.
 `attention` includes volatile last-inspection state, area, and status. There is no
 inspection console command; use ordinary `ask` cognition. Inspection facts are
 not retained in diagnostics. See [Bounded semantic self-inspection](self-inspection.md).
+
+## Temporal follow-up control
+
+`followup` shows either `state: none` or the one pending follow-up's bounded
+relative delay, remaining seconds, and purpose. `followup clear` cancels it.
+There is intentionally no add/list/scheduler command. `[TEMPORAL]` logs use a
+restrained colour and omit purpose text. See
+[Bounded temporal follow-up](temporal-followup.md).

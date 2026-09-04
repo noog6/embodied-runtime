@@ -93,7 +93,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
             await __import__("asyncio").sleep(0)
         self.assertEqual([request[0] for request in backend.requests],
                          [ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST])
-        self.assertEqual([tool.name for tool in backend.requests[1][2]], ["orient_body"])
+        self.assertEqual([tool.name for tool in backend.requests[1][2]], ["schedule_followup", "orient_body"])
         self.assertIn("yaw_deg: 0.0", backend.requests[1][1])
         self.assertIn("first_effect_name: address_operator", backend.requests[1][1])
         self.assertIn("prior", backend.requests[1][1])
@@ -137,7 +137,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("operator context", backend.requests[0][1])
         self.assertIn("operator context", backend.requests[1][1])
-        self.assertEqual([tool.name for tool in backend.requests[1][2]], ["orient_body"])
+        self.assertEqual([tool.name for tool in backend.requests[1][2]], ["schedule_followup", "orient_body"])
         self.assertIs(app.active_goal, goal)
         self.assertEqual(app.working_memory.snapshot(), memory)
         self.assertEqual(len(sink.messages), 1)
@@ -163,7 +163,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
             "body_orientation_changed", "reflex:test", 1, 1, 0, 0
         ))
         self.assertEqual([tool.name for tool in backend.requests[1][2]],
-                         ["address_operator"])
+                         ["schedule_followup", "address_operator"])
         self.assertEqual([result["status"] for result in backend.results],
                          ["applied", "applied", "rejected"])
         self.assertEqual(len(sink.messages), 1)
@@ -199,7 +199,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         await app._request_initiative(AttentionStimulus(
             "body_orientation_changed", "reflex:test", 1, 0, 0, 0
         ))
-        self.assertEqual([tool.name for tool in backend.requests[1][2]], ["orient_body"])
+        self.assertEqual([tool.name for tool in backend.requests[1][2]], ["schedule_followup", "orient_body"])
         self.assertEqual(backend.results[-1]["status"], "rejected")
         self.assertEqual(len(sink.messages), 1)
         await app.stop()

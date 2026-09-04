@@ -1,7 +1,7 @@
 """Application lifecycle orchestration."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 import json
 import logging
@@ -56,6 +56,7 @@ from embodied_runtime.platform import (
     PlatformSnapshot,
 )
 from embodied_runtime.state import BodyState, LifecycleState, PresenceState, RuntimeState
+from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
 
 LOGGER = logging.getLogger(__name__)
 
@@ -162,6 +163,24 @@ OBSERVE_SCENE_TOOL = CognitionToolDefinition(
     },
 )
 
+SCHEDULE_FOLLOWUP_TOOL = CognitionToolDefinition(
+    name="schedule_followup",
+    description=(
+        "Create the runtime's one session-local, one-shot relative follow-up. "
+        "It is bound to the current active goal and creates fresh attention when due; "
+        "it does not reserve future authority. This is a semantic effect."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "delay_seconds": {"type": "integer", "minimum": 10, "maximum": 86400},
+            "purpose": {"type": "string", "minLength": 1, "maxLength": 300},
+        },
+        "required": ["delay_seconds", "purpose"],
+        "additionalProperties": False,
+    },
+)
+
 INSPECTION_FOLLOWUP_REQUEST = (
     "Review the one completed self-inspection against fresh Runtime context and the "
     "SAME active goal. If one available semantic effect is necessary, request at most "
@@ -241,6 +260,8 @@ class RobotApplication:
         operator_message_sink: OperatorMessageSink | None = None,
         self_inspector: SelfInspector | None = None,
         visual_perception_backend: VisualPerceptionBackend | None = None,
+        temporal_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -268,12 +289,21 @@ class RobotApplication:
             lambda: self.state is LifecycleState.RUNNING,
             policy=platform_monitor_policy,
         )
+        temporal_arguments = {}
+        if monotonic_clock is not None:
+            temporal_arguments["monotonic_clock"] = monotonic_clock
+        self.temporal = TemporalFollowupController(
+            self.events, is_running=lambda: self.state is LifecycleState.RUNNING,
+            current_goal=lambda: self._active_goal, sleep=temporal_sleep,
+            **temporal_arguments,
+        )
         self.attention = GoalAttentionController(
             enabled=self.options.initiative_enabled,
             platform_attention_enabled=self.options.initiative_platform_attention_enabled,
             backend_available=self._cognition_backend is not None,
             is_running=lambda: self.state is LifecycleState.RUNNING,
             has_active_goal=lambda: self._active_goal is not None,
+            current_goal=lambda: self._active_goal,
             run_initiative=self._request_initiative,
         )
 
@@ -310,6 +340,7 @@ class RobotApplication:
             raise RuntimeError("no active goal exists")
         previous = self._active_goal
         self._active_goal = None
+        self.temporal.cancel("goal_changed")
         LOGGER.info("[GOAL] status=%s", outcome)
         return previous
 
@@ -319,6 +350,7 @@ class RobotApplication:
         cleared = self._active_goal is not None
         self._active_goal = None
         if cleared:
+            self.temporal.cancel("goal_changed")
             LOGGER.info("[GOAL] status=cleared")
         return cleared
 
@@ -431,6 +463,10 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.STOPPING)
         LOGGER.info("[APP] stopping")
         failure: BaseException | None = None
+        try:
+            await self.temporal.stop()
+        except BaseException as error:
+            failure = error
         try:
             await self.attention.stop()
         except BaseException as error:
@@ -1005,6 +1041,13 @@ class RobotApplication:
         """Project only currently permitted autonomous semantic effects."""
         body = self.body_backend
         tools = []
+        if (
+            self.options.initiative_enabled
+            and self.state is LifecycleState.RUNNING
+            and self._active_goal is not None
+            and self.temporal.pending is None
+        ):
+            tools.append(SCHEDULE_FOLLOWUP_TOOL)
         if (self.options.initiative_actions_enabled and body is not None and
                 not body.is_physical and "orientation" in body.capabilities):
             tools.append(ORIENT_BODY_TOOL)
@@ -1195,6 +1238,7 @@ class RobotApplication:
             SelfInspectionFact("continuation_enabled", str(self.options.initiative_continuation_enabled).lower()),
             SelfInspectionFact("goal_closure_enabled", str(self.options.initiative_goal_closure_enabled).lower()),
             SelfInspectionFact("vision_enabled", str(self._visual_perception_backend is not None).lower()),
+            SelfInspectionFact("temporal_followup_pending", str(self.temporal.pending is not None).lower()),
         ))
 
     async def _execute_initiative_tool(
@@ -1212,9 +1256,59 @@ class RobotApplication:
             return await self._execute_address_operator(
                 call, available=projected, log_prefix=log_prefix
             )
+        if call.name == SCHEDULE_FOLLOWUP_TOOL.name:
+            return self._execute_schedule_followup(
+                call, available=projected, log_prefix=log_prefix
+            )
         return self._rejected_tool(
             call.name, "tool is not available", log_prefix=log_prefix
         )
+
+    def _execute_schedule_followup(
+        self, call: CognitionToolCall, *,
+        available: tuple[CognitionToolDefinition, ...] | None = None,
+        log_prefix: str = "INITIATIVE",
+    ) -> CognitionToolResult:
+        projected = self.initiative_tools() if available is None else available
+        try:
+            if not any(tool.name == SCHEDULE_FOLLOWUP_TOOL.name for tool in projected):
+                raise RuntimeError("tool is not available")
+            arguments = self._tool_arguments(call, {"delay_seconds", "purpose"})
+            delay = arguments["delay_seconds"]
+            purpose_value = arguments["purpose"]
+            if type(delay) is not int:
+                raise ValueError("delay_seconds must be an integer")
+            if not 10 <= delay <= 86400:
+                raise ValueError("delay_seconds must be between 10 and 86400")
+            if type(purpose_value) is not str:
+                raise ValueError("purpose must be a string")
+            purpose = purpose_value.strip()
+            if not purpose:
+                raise ValueError("purpose must be non-empty")
+            if len(purpose) > 300:
+                raise ValueError("purpose must be at most 300 characters")
+            if any(unicodedata.category(char) == "Cc" for char in purpose):
+                raise ValueError("purpose must not contain control characters")
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("scheduling requires a running application")
+            if not self.options.initiative_enabled:
+                raise RuntimeError("initiative is disabled")
+            goal = self._active_goal
+            if goal is None:
+                raise RuntimeError("no active goal exists")
+            self.temporal.schedule(delay, purpose, goal)
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
+            return self._rejected_tool(call.name, str(error), log_prefix=log_prefix)
+        LOGGER.info("[%s] tool=%s status=applied", log_prefix, call.name)
+        return CognitionToolResult(json.dumps({
+            "status": "applied", "delay_seconds": delay, "purpose": purpose,
+        }, sort_keys=True))
+
+    def temporal_followup_status(self) -> TemporalFollowupStatus:
+        return self.temporal.status()
+
+    def clear_temporal_followup(self) -> bool:
+        return self.temporal.cancel("operator_clear")
 
     async def _execute_address_operator(
         self, call: CognitionToolCall, *,

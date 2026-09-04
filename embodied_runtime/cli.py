@@ -92,7 +92,7 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     parser.add_argument(
         "--initiative-goal-closure", action="store_true",
         default=configurable_default(False),
-        help="allow one post-action evaluation to complete the same active goal",
+        help="allow one post-effect evaluation to complete the same active goal",
     )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--diagnostics", action="store_true",
@@ -320,12 +320,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--initiative-platform-attention requires --initiative")
     if args.initiative_goal_closure and not args.initiative:
         parser.error("--initiative-goal-closure requires --initiative")
-    if (args.initiative_goal_closure and
-            not (args.initiative_actions or args.initiative_messages)):
-        parser.error(
-            "--initiative-goal-closure requires --initiative-actions or "
-            "--initiative-messages"
-        )
     if args.initiative_actions and not args.initiative:
         parser.error("--initiative-actions requires --initiative")
     if args.initiative_messages and not args.initiative:

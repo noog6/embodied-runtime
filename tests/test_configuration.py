@@ -107,6 +107,20 @@ class ConfigurationTests(unittest.TestCase):
         with patch("sys.stderr"), self.assertRaises(SystemExit):
             main(["--config", str(invalid)])
 
+    def test_goal_closure_config_requires_only_initiative(self):
+        valid = self.write(
+            "[runtime]\ncognition='openai-responses'\nmode='console'\n"
+            "[initiative]\nenabled=true\ngoal_closure=true\n"
+        )
+        with patch(
+            "embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)
+        ) as run:
+            self.assertEqual(main(["--config", str(valid)]), 0)
+        args = run.await_args.args[0]
+        self.assertTrue(args.initiative_goal_closure)
+        self.assertFalse(args.initiative_actions)
+        self.assertFalse(args.initiative_messages)
+
     def test_unknown_sections_and_keys_are_rejected(self):
         for contents, key in (
             ("[banana]\nenabled=true\n", "banana"),

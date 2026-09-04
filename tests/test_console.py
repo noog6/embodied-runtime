@@ -122,6 +122,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  goal                           Show current active goal\n"
             "  goal clear                     Clear current active goal\n"
             "  attention                      Show initiative attention state\n"
+            "  followup                       Show pending temporal follow-up\n"
+            "  followup clear                 Cancel pending temporal follow-up\n"
             "  help                           Show this help\n"
             "  quit                           Stop the console and runtime\n"
             "  exit                           Stop the console and runtime"

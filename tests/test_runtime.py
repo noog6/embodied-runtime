@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import FrozenInstanceError
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.app import ApplicationOptions, LifecycleState, RobotApplication
 from embodied_runtime.cli import build_cognition_backend, build_hardware_backend, build_parser, format_platform, format_summary, main
@@ -209,14 +209,21 @@ class CliTests(unittest.TestCase):
             with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
                 main(argv)
 
-    def test_initiative_goal_closure_requires_actions(self) -> None:
-        for argv in (
-            ["--initiative-goal-closure", "--console"],
-            ["--cognition", "openai-responses", "--initiative",
-             "--initiative-goal-closure", "--console"],
-        ):
-            with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
-                main(argv)
+    def test_initiative_goal_closure_requires_only_initiative(self) -> None:
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            main(["--cognition", "openai-responses",
+                  "--initiative-goal-closure", "--console"])
+
+        argv = ["--cognition", "openai-responses", "--initiative",
+                "--initiative-goal-closure", "--console"]
+        with patch(
+            "embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)
+        ) as run:
+            self.assertEqual(main(argv), 0)
+        args = run.await_args.args[0]
+        self.assertTrue(args.initiative_goal_closure)
+        self.assertFalse(args.initiative_actions)
+        self.assertFalse(args.initiative_messages)
 
     def test_initiative_continuation_requires_all_effect_permissions(self) -> None:
         for argv in (
