@@ -31,3 +31,7 @@ There is no shell, subprocess capability, arbitrary filesystem access, outbound
 probe, image capture, polling, history, new event, CLI flag, or TOML key. Power and
 throttle inspection is deferred until a clean runtime/platform abstraction exists;
 no Raspberry Pi command runner is introduced.
+
+Phase 15 adds the single runtime-area fact
+`temporal_followup_pending=true|false`. It reveals no purpose, due point, task,
+or scheduler internals. Scheduling itself is a semantic effect, not inspection.

@@ -123,7 +123,8 @@ With opt-in initiative, one narrow path is transition-driven:
 `BodyOrientationChanged` from a local reflex -> attention gate, plus an existing
 `ActiveGoal` -> optional one-shot cognition. Attention only selects semantic
 events, owns the one-in-flight lifecycle, cancellation, and volatile diagnostics.
-`--initiative` remains exactly read-only. Independent effect permissions project
+`--initiative` permits bounded read-only acquisition where available and the
+single `schedule_followup` semantic effect. Independent effect permissions project
 `orient_body` for a nonphysical body and/or `address_operator` when an operator
 message sink is configured. Without the Phase 10 continuation opt-in, the application accepts at most one
 capability request total, even if both are offered.
@@ -184,3 +185,11 @@ Bounded situational facts use the single runtime-owned `inspect_self(area)`
 capability described in [Bounded semantic self-inspection](self-inspection.md).
 It increases request-local information, not authority, state, events, or effect
 budgets.
+
+## Bounded temporal follow-up
+
+Phase 15 adds one app-owned `TemporalFollowupController` beside—not inside—runtime
+state, goals, or memory. It owns at most one goal-identity-bound monotonic timer
+and publishes a transient due event that enters normal attention. Fresh cognition
+is created only when due; no old authority or provider request crosses the delay.
+See [Bounded temporal follow-up](temporal-followup.md).

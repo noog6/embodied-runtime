@@ -62,3 +62,10 @@ timezone offset. A healthy run remains quiet between low-frequency heartbeats:
 Monitor cadence uses monotonic time, independently of wall-clock timestamps.
 The explicit `[DIAG]` and detailed `[PLATFORM]` report lines remain stable,
 untimestamped structured snapshot output; surrounding runtime logs are timestamped.
+
+## Bounded delayed initiative
+
+When initiative is enabled, cognition may spend one semantic-effect slot to
+schedule one session-local relative follow-up. When due, it creates fresh
+same-goal attention rather than preserving an old decision or provider session.
+See [bounded temporal follow-up](docs/temporal-followup.md).

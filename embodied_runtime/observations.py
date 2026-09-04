@@ -8,6 +8,7 @@ from embodied_runtime.events import (
     MemoryPressureRaised,
     ThermalWarningCleared,
     ThermalWarningRaised,
+    TemporalFollowupDue,
 )
 
 
@@ -24,6 +25,16 @@ class SemanticObservation:
     kind: str
     source: str
     facts: tuple[SemanticObservationFact, ...]
+
+
+def observation_from_temporal_followup(event: TemporalFollowupDue) -> SemanticObservation:
+    return SemanticObservation(
+        "temporal_followup_due", event.source,
+        (
+            SemanticObservationFact("purpose", event.purpose),
+            SemanticObservationFact("delay_seconds", str(event.delay_seconds)),
+        ),
+    )
 
 
 def observation_from_body_orientation(

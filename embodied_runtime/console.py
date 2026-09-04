@@ -79,6 +79,11 @@ class RuntimeConsole:
             return self._goal(), False
         if vocabulary == ["attention"]:
             return self._attention(), False
+        if vocabulary == ["followup"]:
+            return self._followup(), False
+        if vocabulary == ["followup", "clear"]:
+            cleared = self._application.clear_temporal_followup()
+            return "Temporal follow-up\n  cleared:       " + str(cleared).lower(), False
         if vocabulary == ["goal", "clear"]:
             cleared = self._application.clear_goal()
             return "Active goal\n  cleared:       " + str(cleared).lower(), False
@@ -184,6 +189,8 @@ class RuntimeConsole:
                 "  goal                           Show current active goal",
                 "  goal clear                     Clear current active goal",
                 "  attention                      Show initiative attention state",
+                "  followup                       Show pending temporal follow-up",
+                "  followup clear                 Cancel pending temporal follow-up",
                 "  help                           Show this help",
                 "  quit                           Stop the console and runtime",
                 "  exit                           Stop the console and runtime",
@@ -234,6 +241,17 @@ class RuntimeConsole:
             f"  last_goal_closure: {status.last_goal_closure}",
             f"  last_outcome_response: {status.last_outcome_response or 'unavailable'}",
         ))
+
+    def _followup(self) -> str:
+        status = self._application.temporal_followup_status()
+        lines = ["Temporal follow-up", f"  state:         {status.state}"]
+        if status.state == "pending":
+            lines.extend((
+                f"  delay_seconds: {status.delay_seconds}",
+                f"  remaining_s:   {status.remaining_seconds}",
+                f"  purpose:       {status.purpose}",
+            ))
+        return "\n".join(lines)
 
     def _status(self) -> str:
         summary = self._application.summary()

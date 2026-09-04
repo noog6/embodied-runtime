@@ -61,3 +61,11 @@ when explicitly enabled, existing thermal and memory-pressure raised/cleared
 platform events. `PresenceChanged` is deliberately not subscribed: presence
 centering can publish the more informative reflex body transition, avoiding
 competing episodes without timers, priorities, or coalescing.
+
+## Temporal follow-up due
+
+A valid one-shot timer publishes one `TemporalFollowupDue` with bounded purpose
+and relative delay. Attention projects it as `temporal_followup_due` regardless
+of platform-attention configuration. Stale/cancelled timers publish nothing;
+in-flight attention suppresses the event without queue or retry. See
+[Bounded temporal follow-up](temporal-followup.md).

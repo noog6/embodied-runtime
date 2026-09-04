@@ -2,7 +2,7 @@ import asyncio
 import unittest
 
 from embodied_runtime.app import (
-    ORIENT_BODY_TOOL, INSPECT_SELF_TOOL, ApplicationOptions, RobotApplication,
+    ORIENT_BODY_TOOL, INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL, ApplicationOptions, RobotApplication,
 )
 from embodied_runtime.attention import ACTION_INITIATIVE_REQUEST, INITIATIVE_REQUEST
 from embodied_runtime.body.virtual import VirtualBodyBackend
@@ -118,7 +118,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("previous_yaw_deg: 35.0", instructions)
         self.assertIn("previous_pitch_deg: -10.0", instructions)
         self.assertIn("source: reflex:presence_centering", instructions)
-        self.assertEqual(tools, (INSPECT_SELF_TOOL,))
+        self.assertEqual(tools, (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,))
         self.assertIsNotNone(executor)
         self.assertIsNotNone(refresh)
         self.assertEqual(app.runtime_state.body, BodyState(0.0, 0.0))
@@ -138,14 +138,14 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         self.assertEqual(app.initiative_tools(), ())
         app.set_goal("opaque")
-        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, ORIENT_BODY_TOOL,))
-        self.assertEqual([tool.name for tool in app.initiative_tools()], ["inspect_self", "orient_body"])
+        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL, ORIENT_BODY_TOOL,))
+        self.assertEqual([tool.name for tool in app.initiative_tools()], ["inspect_self", "schedule_followup", "orient_body"])
         await app.stop()
 
         physical = self.make_app(FakeCognition(), actions=True, body=PhysicalBody())
         await physical.start()
         physical.set_goal("opaque")
-        self.assertEqual(physical.initiative_tools(), (INSPECT_SELF_TOOL,))
+        self.assertEqual(physical.initiative_tools(), (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,))
         await physical.stop()
 
     async def test_reflex_can_trigger_one_autonomous_orientation_without_mutating_goal_or_memory(self):
@@ -171,7 +171,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(backend.requests), 1)
         message, initial, tools, executor, refresh = backend.requests[0]
         self.assertEqual(message, ACTION_INITIATIVE_REQUEST)
-        self.assertEqual(tools, (INSPECT_SELF_TOOL, ORIENT_BODY_TOOL,))
+        self.assertEqual(tools, (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL, ORIENT_BODY_TOOL,))
         self.assertIsNotNone(executor)
         self.assertIsNotNone(refresh)
         self.assertIn("yaw_deg: 0.0", initial)

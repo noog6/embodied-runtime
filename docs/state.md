@@ -97,3 +97,10 @@ WorkingMemory, event history, or a queue.
 Self-inspection results are immutable request-local grounding, not `RuntimeState`,
 working memory, event history, or persistent state. See
 [Bounded semantic self-inspection](self-inspection.md).
+
+## Pending temporal follow-up is not runtime state
+
+The zero/one `PendingFollowup` is a volatile application-owned future attention
+commitment, not physical reality, goal state, or memory. It binds the exact goal
+object and is cleared on due, goal change, explicit cancellation, or shutdown.
+It is never persisted. See [Bounded temporal follow-up](temporal-followup.md).

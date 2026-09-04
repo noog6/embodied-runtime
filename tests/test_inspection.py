@@ -370,5 +370,5 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
             )
             rendered = repr(result)
             self.assertNotIn("API", rendered)
-            self.assertLessEqual(len(result.facts), 16)
+            self.assertLessEqual(len(result.facts), 17)
         await app.stop()

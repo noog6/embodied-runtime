@@ -9,10 +9,12 @@ from embodied_runtime.events import (
     BodyOrientationChanged, Event, EventBus, MemoryPressureCleared,
     MemoryPressureRaised, Subscription, ThermalWarningCleared,
     ThermalWarningRaised,
+    TemporalFollowupDue,
 )
 from embodied_runtime.observations import (
     SemanticObservation, SemanticObservationFact,
     observation_from_body_orientation, observation_from_platform_transition,
+    observation_from_temporal_followup,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -101,6 +103,14 @@ class AttentionStimulus:
             f"  source: {self.source}",
         ))
         lines.extend(f"  {fact.name}: {fact.value}" for fact in self.observation.facts)
+        if self.kind == "temporal_followup_due":
+            lines.extend((
+                "",
+                "A previously requested one-shot temporal follow-up is now due.",
+                "The scheduling request did not reserve future authority.",
+                "Re-evaluate its purpose against fresh Runtime context and the SAME active goal.",
+                "Use only currently available bounded capabilities if needed.",
+            ))
         return "\n".join(lines)
 
 
@@ -220,12 +230,14 @@ class GoalAttentionController:
     def __init__(self, *, enabled: bool, platform_attention_enabled: bool = False,
                  backend_available: bool,
                  is_running: Callable[[], bool], has_active_goal: Callable[[], bool],
+                 current_goal: Callable[[], object | None],
                  run_initiative: Callable[[AttentionStimulus], Awaitable[InitiativeOutcome]]) -> None:
         self.enabled = enabled
         self.platform_attention_enabled = platform_attention_enabled
         self._backend_available = backend_available
         self._is_running = is_running
         self._has_active_goal = has_active_goal
+        self._current_goal = current_goal
         self._run_initiative = run_initiative
         self._subscriptions: list[Subscription[Event]] = []
         self._task: asyncio.Task[None] | None = None
@@ -255,6 +267,9 @@ class GoalAttentionController:
         if self._subscriptions:
             raise RuntimeError("Attention controller is already started")
         self._subscriptions.append(events.subscribe(BodyOrientationChanged, self._on_body_event))
+        self._subscriptions.append(events.subscribe(
+            TemporalFollowupDue, self._on_temporal_event
+        ))
         if self.platform_attention_enabled:
             for event_type in (
                 ThermalWarningRaised, ThermalWarningCleared,
@@ -351,7 +366,22 @@ class GoalAttentionController:
             return
         await self._consider(observation_from_platform_transition(event))
 
-    async def _consider(self, observation: SemanticObservation) -> None:
+    async def _on_temporal_event(self, event: TemporalFollowupDue) -> None:
+        if event.source != "temporal_followup":
+            return
+        if self._current_goal() is not event.bound_goal:
+            LOGGER.info(
+                "[ATTENTION] event=temporal_followup_due decision=suppressed "
+                "reason=goal_changed"
+            )
+            return
+        await self._consider(
+            observation_from_temporal_followup(event), required_goal=event.bound_goal
+        )
+
+    async def _consider(
+        self, observation: SemanticObservation, *, required_goal: object | None = None,
+    ) -> None:
         if not self._is_running() or not self._backend_available or not self._has_active_goal():
             return
         if self._task is not None and not self._task.done():
@@ -380,9 +410,23 @@ class GoalAttentionController:
         self._state = "in_flight"
         LOGGER.info("[ATTENTION] event=%s source=%s decision=wake",
                     stimulus.kind, stimulus.source)
-        self._task = asyncio.create_task(self._reflect(stimulus), name="initiative:goal_attention")
+        self._task = asyncio.create_task(
+            self._reflect(stimulus, required_goal=required_goal),
+            name="initiative:goal_attention",
+        )
 
-    async def _reflect(self, stimulus: AttentionStimulus) -> None:
+    async def _reflect(
+        self, stimulus: AttentionStimulus, *, required_goal: object | None = None,
+    ) -> None:
+        # Temporal acceptance and task execution are separate event-loop turns.
+        # Recheck immediately before application cognition captures its episode goal.
+        if required_goal is not None and self._current_goal() is not required_goal:
+            LOGGER.info(
+                "[ATTENTION] event=%s decision=suppressed reason=goal_changed",
+                stimulus.kind,
+            )
+            self._state = "idle"
+            return
         try:
             outcome = await self._run_initiative(stimulus)
         except asyncio.CancelledError:

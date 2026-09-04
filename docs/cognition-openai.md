@@ -17,11 +17,10 @@ development storage and delivery procedure. The default experimental model is
 python main.py --cognition openai-responses --console
 ```
 
-Add `--initiative` for read-only noticing and thinking. Historically this used
-exactly `tools=()`. Phase 13 may now provide the read-only `inspect_self` tool,
-its executor, and request-local refreshed instructions. It still provides no
-semantic effect capability unless one is separately enabled: effect-free is no
-longer tool-free.
+Add `--initiative` for bounded goal-directed initiative. It may provide one
+read-only `inspect_self` or `observe_scene` acquisition where available, plus
+the single bounded `schedule_followup` semantic effect. Historically initiative
+used exactly `tools=()`; that description is no longer current.
 `--initiative-actions` independently offers `orient_body` on a nonphysical body.
 `--initiative-messages --console` offers the transport-neutral
 `address_operator(message)` capability, with the console as today's concrete
@@ -29,8 +28,9 @@ operator channel. A statement or question is delivered once and never waits for
 a reply. With both permissions the adapter may receive both definitions, while
 `RobotApplication` independently enforces one capability request total.
 
-`--initiative-goal-closure` requires initiative and at least one effect
-permission. One requested effect receives one independent outcome evaluation
+`--initiative-goal-closure` requires only initiative; scheduling supplies the
+base policy's semantic effect without action or message permission. One actually
+requested effect receives one independent outcome evaluation
 using fresh Runtime context, the same captured ActiveGoal and WorkingMemory
 snapshot, the original stimulus, and the runtime-produced result. An applied
 effect may expose only argument-free `complete_goal`; rejection is read-only.
@@ -130,3 +130,11 @@ The provider may receive the one exact `inspect_self(area)` tool. Tool-result
 continuation remains scoped to that request; an autonomous post-inspection
 decision is a fresh independent request without a previous response identifier.
 See [Bounded semantic self-inspection](self-inspection.md).
+
+## Temporal effect transport
+
+The exact `schedule_followup(delay_seconds, purpose)` tool is an autonomous
+semantic effect. Provider tool-result finalization is confined to the scheduling
+request. No `previous_response_id` or request survives the wait; due-time
+attention is independent and uses fresh runtime/capability/memory projections.
+See [Bounded temporal follow-up](temporal-followup.md).

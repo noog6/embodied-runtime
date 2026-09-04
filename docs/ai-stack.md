@@ -65,12 +65,14 @@ given fresh Runtime context, ActiveGoal, and bounded operator WorkingMemory plus
 a provider-neutral attention stimulus. Initiative now has independent capability permissions:
 
 - without `--initiative`, cognition occurs only for explicit operator asks;
-- `--initiative` is effect-free but may receive the read-only `inspect_self`
-  tool; it receives no semantic effect or continuation without separate policy;
+- `--initiative` enables bounded goal-directed initiative, may receive one
+  read-only `inspect_self` or `observe_scene` acquisition where available, and
+  permits the single bounded `schedule_followup` semantic effect;
 - `--initiative-actions` permits `orient_body` only on a nonphysical body;
 - `--initiative-messages` permits `address_operator` only with a configured sink;
-- enabling both offers both, but without continuation the runtime accepts at most one request total;
-- `--initiative-goal-closure` requires at least one effect permission and permits
+- enabling action and message permissions offers those effects alongside
+  scheduling, but without continuation the runtime accepts at most one request total;
+- `--initiative-goal-closure` requires only `--initiative` and permits
   one independent post-effect evaluation and same-goal completion after an
   applied effect.
 
@@ -166,3 +168,11 @@ Phase 13 adds one provider-neutral, read-only `inspect_self` capability for four
 bounded local areas. Autonomous inspection is limited to one per episode and may
 precede—but never count as—at most two existing semantic effects. See
 [Bounded semantic self-inspection](self-inspection.md).
+
+## Phase 15: bounded temporal follow-up
+
+`schedule_followup` is one semantic effect under the existing two-effect ceiling.
+One volatile monotonic timer can produce a fresh, same-goal attention episode;
+there is no recurrence, persistence, provider session, or attention queue. The
+due request takes fresh runtime context and a fresh WorkingMemory snapshot. See
+[Bounded temporal follow-up](temporal-followup.md).
