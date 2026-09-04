@@ -22,7 +22,11 @@ sleep loop. EOF, quit, cancellation, and shutdown clean pending waits. Questions
 are delivered once and create no pending reply. Messages are not a console
 history, RuntimeState, WorkingMemory, or EventBus history.
 
-Run `python main.py --console` for the asynchronous local console. Platform
+Run `python main.py --console` for the asynchronous local console. Normal
+full-agentic Mira startup uses
+`python main.py --config config/mira-agentic.toml`; the file selects console mode
+and the established initiative permissions. See [Runtime startup
+configuration](configuration.md) for its strict schema and CLI override rules. Platform
 sampling continues while it waits, but routine platform heartbeat logs are
 suppressed in this interactive mode. Authoritative platform state still updates,
 and thermal and memory-pressure warnings and clear transitions remain active.

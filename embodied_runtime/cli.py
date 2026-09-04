@@ -13,6 +13,10 @@ from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import TextCognitionBackend
 from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
+from embodied_runtime.config import (
+    ConfigurationError, LaunchConfiguration, load_runtime_config,
+    resolve_launch_configuration,
+)
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.hardware.fusion_hat import (
     FusionHatHardwareBackend,
@@ -36,44 +40,58 @@ from embodied_runtime.sensing.camera.picamera2 import (
 LOGGER = logging.getLogger(__name__)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(*, explicit_configurable_values: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run an embodied agent profile")
     parser.add_argument("startup_prompt", nargs="?", help="prompt for a future interaction system")
-    parser.add_argument("--profile", default="mira", help="robot profile identifier")
+    def configurable_default(historical: object) -> object:
+        return None if explicit_configurable_values else historical
+
+    parser.add_argument("--config", type=Path, help="startup TOML configuration path")
+    parser.add_argument("--profile", default=configurable_default("mira"),
+                        help="robot profile identifier")
     parser.add_argument(
-        "--hardware", choices=("virtual", "fusion-hat"), default="virtual"
+        "--hardware", choices=("virtual", "fusion-hat"),
+        default=configurable_default("virtual")
     )
-    parser.add_argument("--camera", choices=("none", "picamera2"), default="none")
+    parser.add_argument("--camera", choices=("none", "picamera2"),
+                        default=configurable_default("none"))
     parser.add_argument("--no-color", action="store_true",
                         help="disable ANSI colour in console and runtime logs")
     parser.add_argument(
-        "--cognition", choices=("none", "openai-responses"), default="none"
+        "--cognition", choices=("none", "openai-responses"),
+        default=configurable_default("none")
     )
     parser.add_argument("--initiative", action="store_true",
+                        default=configurable_default(False),
                         help="enable goal-directed read-only cognition initiative")
     parser.add_argument(
         "--initiative-platform-attention", action="store_true",
+        default=configurable_default(False),
         help="also attend to platform condition transitions",
     )
     parser.add_argument(
-        "--initiative-actions", action="store_true",
+        "--initiative-actions", action="store_true", default=configurable_default(False),
         help="allow initiative one bounded nonphysical semantic body action",
     )
     parser.add_argument(
-        "--initiative-messages", action="store_true",
+        "--initiative-messages", action="store_true", default=configurable_default(False),
         help="allow initiative one bounded message to the operator",
     )
     parser.add_argument(
         "--initiative-continuation", action="store_true",
+        default=configurable_default(False),
         help="allow one independent, distinct second initiative effect",
     )
     parser.add_argument(
         "--initiative-goal-closure", action="store_true",
+        default=configurable_default(False),
         help="allow one post-action evaluation to complete the same active goal",
     )
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--diagnostics", action="store_true")
-    modes.add_argument("--console", action="store_true")
+    modes.add_argument("--diagnostics", action="store_true",
+                       default=configurable_default(False))
+    modes.add_argument("--console", action="store_true",
+                       default=configurable_default(False))
     parser.add_argument(
         "--fusion-servo-test",
         metavar="P0..P11",
@@ -87,6 +105,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="capture exactly one JPEG to this path during diagnostics",
     )
     return parser
+
+
+def parse_launch_arguments(
+    argv: Sequence[str] | None = None,
+) -> tuple[argparse.ArgumentParser, argparse.Namespace, LaunchConfiguration]:
+    """Parse CLI presence, load config, and produce one effective launch."""
+    parser = build_parser(explicit_configurable_values=True)
+    args = parser.parse_args(argv)
+    file_config = None
+    if args.config is not None:
+        try:
+            file_config = load_runtime_config(args.config)
+        except ConfigurationError as error:
+            parser.error(str(error))
+    effective = resolve_launch_configuration(args, file_config)
+    args.profile = effective.profile
+    args.hardware = effective.hardware
+    args.camera = effective.camera
+    args.cognition = effective.cognition
+    args.console = effective.mode == "console"
+    args.diagnostics = effective.mode == "diagnostics"
+    args.initiative = effective.initiative
+    args.initiative_platform_attention = effective.initiative_platform_attention
+    args.initiative_actions = effective.initiative_actions
+    args.initiative_messages = effective.initiative_messages
+    args.initiative_continuation = effective.initiative_continuation
+    args.initiative_goal_closure = effective.initiative_goal_closure
+    return parser, args, effective
 
 
 def _pwm_channel(value: str) -> str:
@@ -251,8 +297,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    parser, args, _ = parse_launch_arguments(argv)
     if args.initiative_platform_attention and not args.initiative:
         parser.error("--initiative-platform-attention requires --initiative")
     if args.initiative_goal_closure and not args.initiative:
@@ -286,6 +331,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.camera_test is not None and args.camera == "none":
         parser.error("--camera-test requires a selected camera")
     configure_logging(no_color=args.no_color)
+    if args.config is not None:
+        LOGGER.info("[CONFIG] source=%s status=loaded", args.config)
     try:
         profile = load_profile(args.profile)
     except ProfileLoadError as error:
