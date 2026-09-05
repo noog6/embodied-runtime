@@ -1,6 +1,7 @@
 """Minimal, sysfs-backed SunFounder Fusion HAT+ hardware foundation."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from embodied_runtime.hardware.base import HardwareBackend
@@ -10,6 +11,18 @@ FUSION_HAT_SYSFS_ROOT = Path("/sys/class/fusion_hat/fusion_hat")
 PWM_CHANNEL_COUNT = 12
 SERVO_PERIOD_US = 20_000
 SERVO_CENTER_PULSE_US = 1_500
+ADC_MAX_RAW = 4095
+ADC_REFERENCE_VOLTAGE = 3.3
+BATTERY_DIVIDER_MULTIPLIER = 3.0
+
+
+@dataclass(frozen=True)
+class FusionHatBatteryReading:
+    """One Fusion HAT+ A4 battery-divider measurement."""
+
+    adc_raw: int
+    a4_voltage: float
+    battery_voltage: float
 
 
 class FusionHatUnavailableError(RuntimeError):
@@ -44,13 +57,19 @@ class FusionHatSysfs:
         root: str | Path = FUSION_HAT_SYSFS_ROOT,
         *,
         writer: Callable[[Path, str], None] | None = None,
+        reader: Callable[[Path], str] | None = None,
     ) -> None:
         self.root = Path(root)
         self._writer = writer or self._write_text
+        self._reader = reader or self._read_text
 
     @staticmethod
     def _write_text(path: Path, value: str) -> None:
         path.write_text(value, encoding="ascii")
+
+    @staticmethod
+    def _read_text(path: Path) -> str:
+        return path.read_text(encoding="ascii")
 
     @property
     def is_ready(self) -> bool:
@@ -59,6 +78,21 @@ class FusionHatSysfs:
     @property
     def pwm_root(self) -> Path:
         return self.root / "pwm"
+
+    @property
+    def battery_adc_path(self) -> Path:
+        return self.root / "adc" / "adc4"
+
+    @property
+    def has_battery_adc(self) -> bool:
+        return self.battery_adc_path.is_file()
+
+    def read_battery_adc_raw(self) -> int:
+        """Read the battery-connected ADC channel A4 exactly once."""
+        raw = int(self._reader(self.battery_adc_path).strip())
+        if not 0 <= raw <= ADC_MAX_RAW:
+            raise ValueError(f"Fusion HAT A4 ADC reading out of range: {raw}")
+        return raw
 
     def pwm_channels(self) -> tuple[str, ...]:
         if not self.pwm_root.is_dir():
@@ -169,8 +203,27 @@ class FusionHatHardwareBackend(HardwareBackend):
             )
         channels = self.sysfs.pwm_channels()
         expected_channels = tuple(f"P{number}" for number in range(PWM_CHANNEL_COUNT))
-        self._capabilities = ("pwm",) if channels == expected_channels else ()
+        capabilities = []
+        if channels == expected_channels:
+            capabilities.append("pwm")
+        if self.sysfs.has_battery_adc:
+            capabilities.append("battery_voltage")
+        self._capabilities = tuple(capabilities)
         self._running = True
+
+    def read_battery_voltage(self) -> FusionHatBatteryReading:
+        """Return one raw and converted reading from the A4 battery divider."""
+        if not self._running:
+            raise RuntimeError(
+                "Fusion HAT backend must be running before reading battery voltage"
+            )
+        if "battery_voltage" not in self._capabilities:
+            raise RuntimeError("Fusion HAT battery-voltage capability is unavailable")
+        raw = self.sysfs.read_battery_adc_raw()
+        a4_voltage = raw / float(ADC_MAX_RAW) * ADC_REFERENCE_VOLTAGE
+        return FusionHatBatteryReading(
+            raw, a4_voltage, a4_voltage * BATTERY_DIVIDER_MULTIPLIER
+        )
 
     def open_pwm_channel(self, channel: str | int) -> FusionHatPwmChannel:
         if not self._running:

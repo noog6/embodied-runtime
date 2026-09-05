@@ -106,6 +106,11 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         help="CAUTION: explicitly actuate one Fusion HAT bench-servo PWM channel",
     )
     parser.add_argument(
+        "--fusion-battery-test",
+        action="store_true",
+        help="read Fusion HAT battery ADC channel A4 once during diagnostics",
+    )
+    parser.add_argument(
         "--camera-test",
         metavar="OUTPUT_PATH",
         type=Path,
@@ -207,6 +212,15 @@ def run_fusion_servo_test(
     )
 
 
+def run_fusion_battery_test(hardware: FusionHatHardwareBackend) -> str:
+    """Read and format one Fusion HAT+ battery-divider measurement."""
+    reading = hardware.read_battery_voltage()
+    return (
+        f"[BATTERY] adc_raw={reading.adc_raw} adc_v={reading.a4_voltage:.3f} "
+        f"battery_v={reading.battery_voltage:.3f}"
+    )
+
+
 def format_summary(summary: RuntimeSummary) -> str:
     capabilities = ",".join(summary.capabilities) or "none"
     return (
@@ -282,6 +296,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
                 )
                 if args.fusion_servo_test is not None:
                     print(run_fusion_servo_test(hardware, args.fusion_servo_test))
+                if args.fusion_battery_test:
+                    print(run_fusion_battery_test(hardware))
             if args.camera_test is not None:
                 frame = application.capture_camera_frame()
                 args.camera_test.write_bytes(frame.data)
@@ -344,6 +360,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--fusion-servo-test requires --diagnostics")
     if args.fusion_servo_test is not None and args.hardware != "fusion-hat":
         parser.error("--fusion-servo-test requires --hardware fusion-hat")
+    if args.fusion_battery_test and not args.diagnostics:
+        parser.error("--fusion-battery-test requires --diagnostics")
+    if args.fusion_battery_test and args.hardware != "fusion-hat":
+        parser.error("--fusion-battery-test requires --hardware fusion-hat")
     if args.camera_test is not None and not args.diagnostics:
         parser.error("--camera-test requires --diagnostics")
     if args.camera_test is not None and args.camera == "none":

@@ -33,9 +33,10 @@ period, set the first non-zero 1,500 microsecond pulse, hold briefly, and
 disable in cleanup. This intentionally differs from the initially proposed
 disable/configure/enable order, which is incompatible with the driver ABI.
 
-The runtime consequently implements only board readiness and PWM. It does not
-advertise servo, motor, ADC, battery, audio, GPIO, I2C, or safe-shutdown
-capabilities. No mandatory vendor Python dependency is needed: the official
+The runtime consequently implements board readiness, PWM, and one narrow
+battery-voltage read from ADC channel A4. It does not expose general ADC,
+battery policy, servo, motor, audio, GPIO, I2C, or safe-shutdown capabilities.
+No mandatory vendor Python dependency is needed: the official
 kernel driver/device-tree installation is an external Raspberry Pi OS
 provisioning responsibility, and the runtime uses its sysfs ABI directly.
 
@@ -65,11 +66,16 @@ Human bench checklist:
 2. Run the non-actuating readiness check:
    `python main.py --hardware fusion-hat --diagnostics`.
 3. Confirm hardware reports physical while body reports virtual.
-4. Connect one loose, unloaded bench servo only after independently checking
+4. Compare one read-only battery measurement with a multimeter:
+   `python main.py --hardware fusion-hat --diagnostics --fusion-battery-test`.
+   The `[BATTERY]` line reports `adc_raw`, A4 `adc_v`, and calculated
+   `battery_v`. The calculation is `raw / 4095.0 * 3.3 * 3.0`, reflecting the
+   Fusion HAT+'s 200K/100K divider. The command reads A4 once and then stops.
+5. Connect one loose, unloaded bench servo only after independently checking
    its power and voltage requirements.
-5. With hands and wiring clear, explicitly choose a channel and run:
+6. With hands and wiring clear, explicitly choose a channel and run:
    `python main.py --hardware fusion-hat --diagnostics --fusion-servo-test P0`.
-6. Confirm the output is disabled after the half-second center-pulse test, and
+7. Confirm the output is disabled after the half-second center-pulse test, and
    confirm repeating the ordinary diagnostic causes no movement.
 
 > **Physical-output warning:** `--fusion-servo-test` causes real actuator
