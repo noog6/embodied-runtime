@@ -8,20 +8,19 @@ from embodied_runtime.hardware.base import HardwareBackend
 
 
 FUSION_HAT_SYSFS_ROOT = Path("/sys/class/fusion_hat/fusion_hat")
+FUSION_HAT_BATTERY_VOLTAGE_PATH = Path(
+    "/sys/class/power_supply/fusion-hat/voltage_now"
+)
 PWM_CHANNEL_COUNT = 12
 SERVO_PERIOD_US = 20_000
 SERVO_CENTER_PULSE_US = 1_500
-ADC_MAX_RAW = 4095
-ADC_REFERENCE_VOLTAGE = 3.3
-BATTERY_DIVIDER_MULTIPLIER = 3.0
 
 
 @dataclass(frozen=True)
 class FusionHatBatteryReading:
-    """One Fusion HAT+ A4 battery-divider measurement."""
+    """One battery-voltage measurement exposed by the Fusion HAT+ driver."""
 
-    adc_raw: int
-    a4_voltage: float
+    voltage_uv: int
     battery_voltage: float
 
 
@@ -56,10 +55,12 @@ class FusionHatSysfs:
         self,
         root: str | Path = FUSION_HAT_SYSFS_ROOT,
         *,
+        battery_voltage_path: str | Path = FUSION_HAT_BATTERY_VOLTAGE_PATH,
         writer: Callable[[Path, str], None] | None = None,
         reader: Callable[[Path], str] | None = None,
     ) -> None:
         self.root = Path(root)
+        self.battery_voltage_path = Path(battery_voltage_path)
         self._writer = writer or self._write_text
         self._reader = reader or self._read_text
 
@@ -80,19 +81,15 @@ class FusionHatSysfs:
         return self.root / "pwm"
 
     @property
-    def battery_adc_path(self) -> Path:
-        return self.root / "adc" / "adc4"
+    def has_battery_voltage(self) -> bool:
+        return self.battery_voltage_path.is_file()
 
-    @property
-    def has_battery_adc(self) -> bool:
-        return self.battery_adc_path.is_file()
-
-    def read_battery_adc_raw(self) -> int:
-        """Read the battery-connected ADC channel A4 exactly once."""
-        raw = int(self._reader(self.battery_adc_path).strip())
-        if not 0 <= raw <= ADC_MAX_RAW:
-            raise ValueError(f"Fusion HAT A4 ADC reading out of range: {raw}")
-        return raw
+    def read_battery_voltage_uv(self) -> int:
+        """Read the driver's power-supply voltage value exactly once."""
+        voltage_uv = int(self._reader(self.battery_voltage_path).strip())
+        if voltage_uv < 0:
+            raise ValueError(f"Fusion HAT battery voltage is negative: {voltage_uv}")
+        return voltage_uv
 
     def pwm_channels(self) -> tuple[str, ...]:
         if not self.pwm_root.is_dir():
@@ -206,24 +203,21 @@ class FusionHatHardwareBackend(HardwareBackend):
         capabilities = []
         if channels == expected_channels:
             capabilities.append("pwm")
-        if self.sysfs.has_battery_adc:
+        if self.sysfs.has_battery_voltage:
             capabilities.append("battery_voltage")
         self._capabilities = tuple(capabilities)
         self._running = True
 
     def read_battery_voltage(self) -> FusionHatBatteryReading:
-        """Return one raw and converted reading from the A4 battery divider."""
+        """Return one microvolt and converted volt reading from power_supply."""
         if not self._running:
             raise RuntimeError(
                 "Fusion HAT backend must be running before reading battery voltage"
             )
         if "battery_voltage" not in self._capabilities:
             raise RuntimeError("Fusion HAT battery-voltage capability is unavailable")
-        raw = self.sysfs.read_battery_adc_raw()
-        a4_voltage = raw / float(ADC_MAX_RAW) * ADC_REFERENCE_VOLTAGE
-        return FusionHatBatteryReading(
-            raw, a4_voltage, a4_voltage * BATTERY_DIVIDER_MULTIPLIER
-        )
+        voltage_uv = self.sysfs.read_battery_voltage_uv()
+        return FusionHatBatteryReading(voltage_uv, voltage_uv / 1_000_000.0)
 
     def open_pwm_channel(self, channel: str | int) -> FusionHatPwmChannel:
         if not self._running:

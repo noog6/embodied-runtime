@@ -8,6 +8,7 @@ from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cli import run_fusion_battery_test, run_fusion_servo_test
 from embodied_runtime.events import EventBus
 from embodied_runtime.hardware.fusion_hat import (
+    FUSION_HAT_BATTERY_VOLTAGE_PATH,
     FUSION_HAT_SYSFS_ROOT,
     FusionHatHardwareBackend,
     FusionHatSysfs,
@@ -25,13 +26,11 @@ def fake_sysfs(root: Path, channels=range(12)) -> FusionHatSysfs:
         path.mkdir(parents=True, exist_ok=True)
         for attribute in ("enable", "period", "duty_cycle"):
             (path / attribute).write_text("unchanged", encoding="ascii")
-    return FusionHatSysfs(root)
+    return FusionHatSysfs(root, battery_voltage_path=root / "voltage_now")
 
 
-def add_battery_adc(root: Path, raw: int) -> None:
-    path = root / "adc" / "adc4"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(raw), encoding="ascii")
+def add_battery_voltage(root: Path, voltage_uv: int) -> None:
+    (root / "voltage_now").write_text(str(voltage_uv), encoding="ascii")
 
 
 class PlatformProvider:
@@ -43,6 +42,14 @@ class FusionHatSysfsTests(unittest.TestCase):
     def test_official_default_root(self):
         self.assertEqual(FusionHatSysfs().root, FUSION_HAT_SYSFS_ROOT)
         self.assertEqual(str(FUSION_HAT_SYSFS_ROOT), "/sys/class/fusion_hat/fusion_hat")
+        self.assertEqual(
+            FusionHatSysfs().battery_voltage_path,
+            FUSION_HAT_BATTERY_VOLTAGE_PATH,
+        )
+        self.assertEqual(
+            str(FUSION_HAT_BATTERY_VOLTAGE_PATH),
+            "/sys/class/power_supply/fusion-hat/voltage_now",
+        )
 
     def test_missing_and_ready_device_roots(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -100,36 +107,37 @@ class FusionHatSysfsTests(unittest.TestCase):
 
 
 class FusionHatBackendTests(unittest.TestCase):
-    def test_battery_conversion_uses_fusion_hat_a4_divider(self):
+    def test_battery_conversion_uses_power_supply_microvolts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            add_battery_adc(root, 3127)
+            add_battery_voltage(root, 7_809_000)
             backend = FusionHatHardwareBackend(fake_sysfs(root))
             backend.start()
             reading = backend.read_battery_voltage()
-            self.assertEqual(reading.adc_raw, 3127)
-            self.assertAlmostEqual(reading.a4_voltage, 3127 / 4095.0 * 3.3)
-            self.assertAlmostEqual(
-                reading.battery_voltage, 3127 / 4095.0 * 3.3 * 3.0
-            )
+            self.assertEqual(reading.voltage_uv, 7_809_000)
+            self.assertEqual(reading.battery_voltage, 7.809)
             self.assertEqual(backend.capabilities, ("pwm", "battery_voltage"))
 
-    def test_battery_request_reads_a4_once(self):
+    def test_battery_request_reads_power_supply_once(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            add_battery_adc(root, 2048)
+            add_battery_voltage(root, 7_809_000)
             reads = []
 
             def reader(path):
                 reads.append(path)
                 return path.read_text(encoding="ascii")
 
-            backend = FusionHatHardwareBackend(FusionHatSysfs(root, reader=reader))
+            backend = FusionHatHardwareBackend(
+                FusionHatSysfs(
+                    root, battery_voltage_path=root / "voltage_now", reader=reader
+                )
+            )
             backend.start()
             backend.read_battery_voltage()
-            self.assertEqual(reads, [root / "adc" / "adc4"])
+            self.assertEqual(reads, [root / "voltage_now"])
 
-    def test_battery_read_requires_running_available_a4(self):
+    def test_battery_read_requires_running_available_voltage_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             backend = FusionHatHardwareBackend(fake_sysfs(Path(temporary)))
             with self.assertRaisesRegex(RuntimeError, "must be running"):
@@ -333,15 +341,15 @@ class ServoDiagnosticTests(unittest.TestCase):
 
 
 class BatteryDiagnosticTests(unittest.TestCase):
-    def test_reports_raw_adc_and_both_voltages(self):
+    def test_reports_microvolts_and_volts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            add_battery_adc(root, 3127)
+            add_battery_voltage(root, 7_809_000)
             backend = FusionHatHardwareBackend(fake_sysfs(root))
             backend.start()
             self.assertEqual(
                 run_fusion_battery_test(backend),
-                "[BATTERY] adc_raw=3127 adc_v=2.520 battery_v=7.560",
+                "[BATTERY] voltage_uv=7809000 battery_v=7.809",
             )
 
 
