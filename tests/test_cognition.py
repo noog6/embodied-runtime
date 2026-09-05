@@ -81,6 +81,19 @@ class FakeCognition(TextCognitionBackend):
         return self.response
 
 
+class MutableBatteryHardware(VirtualHardwareBackend):
+    capabilities = ("battery_voltage",)
+
+    def __init__(self, voltage):
+        super().__init__()
+        self.voltage = voltage
+
+    def read_battery_voltage_v(self):
+        if not self.is_running:
+            raise RuntimeError("hardware is not running")
+        return self.voltage
+
+
 class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
     def make_application(
         self,
@@ -90,10 +103,11 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         platform=None,
         body=None,
         camera=None,
+        hardware=None,
     ):
         return RobotApplication(
             RobotProfile("test", "Test Robot", "A test robot."),
-            VirtualHardwareBackend(),
+            hardware or VirtualHardwareBackend(),
             ApplicationOptions(startup_prompt=prompt),
             events=events,
             platform_provider=platform or StaticPlatform(),
@@ -138,6 +152,37 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         await app.request_cognition("hello")
         self.assertEqual(backend.requests[0][0], "hello")
         self.assertTrue(backend.requests[0][1].startswith("Runtime context\n"))
+        await app.stop()
+
+    async def test_power_context_is_backend_neutral_and_refreshed(self):
+        backend = FakeCognition()
+        hardware = MutableBatteryHardware(7.83)
+        app = self.make_application(backend, hardware=hardware)
+        await app.start()
+        self.assertEqual(app.runtime_state.power.battery_voltage_v, 7.83)
+        await app.request_cognition("battery?")
+        first = backend.requests[0][1]
+        self.assertIn("battery_available: true", first)
+        self.assertIn("battery_voltage_v: 7.830", first)
+        self.assertNotIn("fusion_hat", first)
+        self.assertNotIn("voltage_now", first)
+        self.assertNotIn("microvolt", first)
+
+        hardware.voltage = 7.71
+        await app.request_cognition("battery now?")
+        self.assertIn("battery_voltage_v: 7.710", backend.requests[1][1])
+        self.assertEqual(app.runtime_state.power.battery_voltage_v, 7.71)
+        await app.stop()
+
+    async def test_virtual_power_context_is_explicitly_unavailable(self):
+        backend = FakeCognition()
+        app = self.make_application(backend)
+        await app.start()
+        await app.request_cognition("battery?")
+        instructions = backend.requests[0][1]
+        self.assertIn("battery_available: false", instructions)
+        self.assertIn("battery_voltage_v: unavailable", instructions)
+        self.assertIsNone(app.runtime_state.power.battery_voltage_v)
         await app.stop()
 
     async def test_context_is_fresh_for_body_presence_and_platform(self):
@@ -470,7 +515,7 @@ class CognitionContextTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             context.profile_name = "changed"  # type: ignore[misc]
         names = {field.name for field in fields(CognitionContext)}
-        self.assertEqual(len(names), 28)
+        self.assertEqual(len(names), 29)
         self.assertFalse(names & {"environment", "api_key", "captured_monotonic"})
         with patch.dict(os.environ, {"OPENAI_API_KEY": "secret"}):
             self.assertNotIn("secret", self.make_context().render())

@@ -85,6 +85,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_captures_platform_state(self) -> None:
         await self.application.start()
         self.assertIs(self.application.runtime_state.platform, self.first_platform)
+        self.assertIsNone(self.application.runtime_state.power.battery_voltage_v)
         await self.application.stop()
 
     async def test_refresh_replaces_platform_snapshot(self) -> None:

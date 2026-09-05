@@ -116,6 +116,7 @@ class FusionHatBackendTests(unittest.TestCase):
             reading = backend.read_battery_voltage()
             self.assertEqual(reading.voltage_uv, 7_809_000)
             self.assertEqual(reading.battery_voltage, 7.809)
+            self.assertEqual(backend.read_battery_voltage_v(), 7.809)
             self.assertEqual(backend.capabilities, ("pwm", "battery_voltage"))
 
     def test_battery_request_reads_power_supply_once(self):
@@ -354,6 +355,19 @@ class BatteryDiagnosticTests(unittest.TestCase):
 
 
 class PhysicalCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_populates_authoritative_power_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            add_battery_voltage(root, 7_830_000)
+            hardware = FusionHatHardwareBackend(fake_sysfs(root))
+            app = RobotApplication(
+                RobotProfile("test", "Test"), hardware,
+                platform_provider=PlatformProvider(),
+            )
+            await app.start()
+            self.assertEqual(app.runtime_state.power.battery_voltage_v, 7.83)
+            await app.stop()
+
     async def test_physical_hardware_coexists_with_virtual_body(self):
         with tempfile.TemporaryDirectory() as temporary:
             hardware = FusionHatHardwareBackend(fake_sysfs(Path(temporary)))

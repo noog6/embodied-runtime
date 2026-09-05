@@ -27,8 +27,14 @@ class PresenceState:
 
 
 @dataclass(frozen=True, slots=True)
+class PowerState:
+    battery_voltage_v: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeState:
     lifecycle: LifecycleState
     platform: PlatformSnapshot | None = None
     body: BodyState | None = None
     presence: PresenceState | None = None
+    power: PowerState = PowerState(battery_voltage_v=None)

@@ -18,6 +18,7 @@ class CognitionContext:
     profile_name: str
     profile_description: str
     lifecycle: str
+    battery_voltage_v: float | None
     platform_hostname: str | None
     platform_model: str | None
     platform_system: str | None
@@ -60,6 +61,10 @@ class CognitionContext:
             "",
             "Runtime",
             f"  lifecycle: {self.lifecycle}",
+            "",
+            "Power",
+            f"  battery_available: {_boolean(self.battery_voltage_v is not None)}",
+            f"  battery_voltage_v: {_voltage(self.battery_voltage_v)}",
             "",
             "Platform",
         ]
@@ -166,3 +171,7 @@ def _loads(values: tuple[float, float, float] | None) -> str:
 
 def _mib(value: int | None) -> str:
     return "unavailable" if value is None else f"{value / (1024 * 1024):.1f}"
+
+
+def _voltage(value: float | None) -> str:
+    return "unavailable" if value is None else f"{value:.3f}"
