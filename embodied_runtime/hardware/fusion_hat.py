@@ -219,6 +219,10 @@ class FusionHatHardwareBackend(HardwareBackend):
         voltage_uv = self.sysfs.read_battery_voltage_uv()
         return FusionHatBatteryReading(voltage_uv, voltage_uv / 1_000_000.0)
 
+    def read_battery_voltage_v(self) -> float:
+        """Return the current battery voltage through the generic backend contract."""
+        return self.read_battery_voltage().battery_voltage
+
     def open_pwm_channel(self, channel: str | int) -> FusionHatPwmChannel:
         if not self._running:
             raise RuntimeError("Fusion HAT backend must be running before opening PWM")

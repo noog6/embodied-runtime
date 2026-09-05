@@ -26,3 +26,7 @@ class HardwareBackend(ABC):
 
     @abstractmethod
     def stop(self) -> None: ...
+
+    def read_battery_voltage_v(self) -> float:
+        """Read current battery voltage when the advertised capability exists."""
+        raise RuntimeError("Battery-voltage capability is unavailable")

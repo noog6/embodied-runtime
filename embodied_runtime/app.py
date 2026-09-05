@@ -55,7 +55,9 @@ from embodied_runtime.platform import (
     PlatformProvider,
     PlatformSnapshot,
 )
-from embodied_runtime.state import BodyState, LifecycleState, PresenceState, RuntimeState
+from embodied_runtime.state import (
+    BodyState, LifecycleState, PowerState, PresenceState, RuntimeState,
+)
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
 
 LOGGER = logging.getLogger(__name__)
@@ -366,6 +368,21 @@ class RobotApplication:
     def _replace_platform_state(self, snapshot: PlatformSnapshot) -> None:
         self._runtime_state = replace(self._runtime_state, platform=snapshot)
 
+    def refresh_power_state(self) -> PowerState:
+        """Refresh backend-neutral authoritative power state on demand."""
+        power = PowerState(battery_voltage_v=None)
+        if "battery_voltage" in self.hardware.capabilities:
+            try:
+                power = PowerState(
+                    battery_voltage_v=self.hardware.read_battery_voltage_v()
+                )
+            except Exception:
+                self._runtime_state = replace(self._runtime_state, power=power)
+                raise
+        if power != self._runtime_state.power:
+            self._runtime_state = replace(self._runtime_state, power=power)
+        return power
+
     async def start(self) -> None:
         if self.state is not LifecycleState.CREATED:
             raise RuntimeError(f"Cannot start application in {self.state} state")
@@ -390,6 +407,7 @@ class RobotApplication:
         try:
             self.hardware.start()
             hardware_started = True
+            self.refresh_power_state()
             LOGGER.info(
                 "[HW] backend=%s physical=%s status=ready",
                 self.hardware.identifier,
@@ -1444,6 +1462,7 @@ class RobotApplication:
 
     def cognition_context(self) -> CognitionContext:
         """Copy an allow-listed projection of authoritative state for one request."""
+        self.refresh_power_state()
         state = self._runtime_state
         platform = state.platform
         body = self.body_summary()
@@ -1453,6 +1472,7 @@ class RobotApplication:
             profile_name=self.profile.name,
             profile_description=self.profile.description,
             lifecycle=state.lifecycle.value,
+            battery_voltage_v=state.power.battery_voltage_v,
             platform_hostname=None if platform is None else platform.hostname,
             platform_model=None if platform is None else platform.model,
             platform_system=None if platform is None else platform.system,
