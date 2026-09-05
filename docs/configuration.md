@@ -77,7 +77,8 @@ requires both an effective camera and cognition backend. The checked-in
 Configuration is loaded once at startup. There is no discovery, inheritance,
 layering, named preset, environment interpolation, or hot reload. Relative
 paths are relative to the current working directory. `startup_prompt`,
-`--camera-test`, `--fusion-servo-test`, and `--no-color` remain CLI-only.
+`--camera-test`, `--fusion-servo-test`, `--fusion-battery-test`, and `--no-color`
+remain CLI-only.
 
 OpenAI credentials remain environment-provided and are not stored in runtime
 TOML configuration. In particular, `OPENAI_API_KEY` is not part of this schema;

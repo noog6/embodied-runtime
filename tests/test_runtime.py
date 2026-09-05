@@ -262,6 +262,12 @@ class CliTests(unittest.TestCase):
             with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
                 main(argv)
 
+    def test_battery_test_requires_diagnostics_and_physical_hardware(self) -> None:
+        for argv in (["--fusion-battery-test"],
+                     ["--diagnostics", "--fusion-battery-test"]):
+            with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
+                main(argv)
+
     def test_invalid_servo_channel_is_rejected(self) -> None:
         with patch("sys.stderr"), self.assertRaises(SystemExit):
             main(["--hardware", "fusion-hat", "--diagnostics", "--fusion-servo-test", "P12"])
