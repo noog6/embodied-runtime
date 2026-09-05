@@ -33,9 +33,14 @@ period, set the first non-zero 1,500 microsecond pulse, hold briefly, and
 disable in cleanup. This intentionally differs from the initially proposed
 disable/configure/enable order, which is incompatible with the driver ABI.
 
-The runtime consequently implements board readiness, PWM, and one narrow
-battery-voltage read from ADC channel A4. It does not expose general ADC,
-battery policy, servo, motor, audio, GPIO, I2C, or safe-shutdown capabilities.
+The runtime consequently implements board readiness, PWM, and one narrow,
+read-only battery-voltage capability. The live-verified kernel driver interface
+is `/sys/class/power_supply/fusion-hat/voltage_now`, whose value is in
+microvolts. The kernel driver already performs the board-level battery
+measurement and scaling, so the runtime consumes this Linux `power_supply`
+result directly and converts it to volts by dividing by 1,000,000. It does not
+expose general ADC, battery policy, servo, motor, audio, GPIO, I2C, or
+safe-shutdown capabilities.
 No mandatory vendor Python dependency is needed: the official
 kernel driver/device-tree installation is an external Raspberry Pi OS
 provisioning responsibility, and the runtime uses its sysfs ABI directly.
@@ -68,9 +73,9 @@ Human bench checklist:
 3. Confirm hardware reports physical while body reports virtual.
 4. Compare one read-only battery measurement with a multimeter:
    `python main.py --hardware fusion-hat --diagnostics --fusion-battery-test`.
-   The `[BATTERY]` line reports `adc_raw`, A4 `adc_v`, and calculated
-   `battery_v`. The calculation is `raw / 4095.0 * 3.3 * 3.0`, reflecting the
-   Fusion HAT+'s 200K/100K divider. The command reads A4 once and then stops.
+   The `[BATTERY]` line reports the driver's `voltage_uv` value and converted
+   `battery_v` (for example, `voltage_uv=7809000 battery_v=7.809`). The command
+   reads `voltage_now` once and then stops.
 5. Connect one loose, unloaded bench servo only after independently checking
    its power and voltage requirements.
 6. With hands and wiring clear, explicitly choose a channel and run:

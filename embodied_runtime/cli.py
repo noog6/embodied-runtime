@@ -108,7 +108,7 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     parser.add_argument(
         "--fusion-battery-test",
         action="store_true",
-        help="read Fusion HAT battery ADC channel A4 once during diagnostics",
+        help="read Fusion HAT battery voltage once during diagnostics",
     )
     parser.add_argument(
         "--camera-test",
@@ -213,10 +213,10 @@ def run_fusion_servo_test(
 
 
 def run_fusion_battery_test(hardware: FusionHatHardwareBackend) -> str:
-    """Read and format one Fusion HAT+ battery-divider measurement."""
+    """Read and format one Fusion HAT+ battery-voltage measurement."""
     reading = hardware.read_battery_voltage()
     return (
-        f"[BATTERY] adc_raw={reading.adc_raw} adc_v={reading.a4_voltage:.3f} "
+        f"[BATTERY] voltage_uv={reading.voltage_uv} "
         f"battery_v={reading.battery_voltage:.3f}"
     )
 
