@@ -30,9 +30,17 @@ class InitiativeFileConfig:
 
 
 @dataclass(frozen=True)
+class VoiceFileConfig:
+    enabled: bool | None = None
+    initial_timeout_seconds: float | None = None
+    followup_timeout_seconds: float | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeFileConfiguration:
     runtime: RuntimeFileConfig = RuntimeFileConfig()
     initiative: InitiativeFileConfig = InitiativeFileConfig()
+    voice: VoiceFileConfig = VoiceFileConfig()
 
 
 @dataclass(frozen=True)
@@ -51,6 +59,9 @@ class LaunchConfiguration:
     initiative_messages: bool
     initiative_continuation: bool
     initiative_goal_closure: bool
+    voice_enabled: bool
+    voice_initial_timeout_seconds: float
+    voice_followup_timeout_seconds: float
 
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
@@ -58,6 +69,8 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     initiative=False, initiative_platform_attention=False,
     initiative_actions=False, initiative_messages=False,
     initiative_continuation=False, initiative_goal_closure=False,
+    voice_enabled=False, voice_initial_timeout_seconds=18.0,
+    voice_followup_timeout_seconds=10.0,
 )
 
 _RUNTIME_KEYS = {"profile", "hardware", "camera", "cognition", "vision", "mode"}
@@ -65,6 +78,7 @@ _INITIATIVE_KEYS = {
     "enabled", "platform_attention", "actions", "messages", "continuation",
     "goal_closure",
 }
+_VOICE_KEYS = {"enabled", "initial_timeout_seconds", "followup_timeout_seconds"}
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
     "runtime.camera": {"none", "picamera2"},
@@ -88,11 +102,13 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "initiative"})
+    _reject_unknown(data, {"runtime", "initiative", "voice"})
     runtime = _table(data, "runtime")
     initiative = _table(data, "initiative")
+    voice = _table(data, "voice")
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
+    _reject_unknown(voice, _VOICE_KEYS, "voice")
 
     for key, value in runtime.items():
         name = f"runtime.{key}"
@@ -107,9 +123,14 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     for key, value in initiative.items():
         if not isinstance(value, bool):
             raise ConfigurationError(f"initiative.{key} must be boolean")
+    if "enabled" in voice and not isinstance(voice["enabled"], bool):
+        raise ConfigurationError("voice.enabled must be boolean")
+    for key in ("initial_timeout_seconds", "followup_timeout_seconds"):
+        if key in voice and (isinstance(voice[key], bool) or not isinstance(voice[key], (int, float)) or voice[key] <= 0):
+            raise ConfigurationError(f"voice.{key} must be a positive number")
 
     return RuntimeFileConfiguration(
-        RuntimeFileConfig(**runtime), InitiativeFileConfig(**initiative)
+        RuntimeFileConfig(**runtime), InitiativeFileConfig(**initiative), VoiceFileConfig(**voice)
     )
 
 
@@ -120,6 +141,7 @@ def resolve_launch_configuration(
     file_config = file_config or RuntimeFileConfiguration()
     runtime = file_config.runtime
     initiative = file_config.initiative
+    voice = file_config.voice
 
     def scalar(name: str, configured: object, historical: object) -> object:
         explicit = getattr(cli_values, name, None)
@@ -157,6 +179,9 @@ def resolve_launch_configuration(
         initiative_goal_closure=opt_in(
             "initiative_goal_closure", initiative.goal_closure, False
         ),
+        voice_enabled=opt_in("voice", voice.enabled, False),
+        voice_initial_timeout_seconds=(voice.initial_timeout_seconds if voice.initial_timeout_seconds is not None else 18.0),
+        voice_followup_timeout_seconds=(voice.followup_timeout_seconds if voice.followup_timeout_seconds is not None else 10.0),
     )
 
 

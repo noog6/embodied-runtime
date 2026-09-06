@@ -13,7 +13,7 @@ behavior; it only supplies launch values before existing application setup.
 
 ## Schema
 
-Only these two tables and keys are accepted:
+Only these three tables and keys are accepted:
 
 ```toml
 [runtime]
@@ -31,12 +31,18 @@ actions = true
 messages = true
 continuation = true
 goal_closure = true
+
+[voice]
+enabled = true
+initial_timeout_seconds = 18
+followup_timeout_seconds = 10
 ```
 
 `hardware`, `camera`, and `cognition` accept the same values as their existing
 CLI options. `runtime.mode` is exactly one of `run`, `console`, or `diagnostics`;
 it maps to neither mode flag, `--console`, or `--diagnostics`, respectively.
-The initiative values must be TOML booleans. All runtime values must be strings.
+The initiative values and `voice.enabled` must be TOML booleans. Both voice
+timeouts must be positive TOML numbers. All runtime values must be strings.
 Unknown tables, unknown keys, wrong types, unsupported values, and malformed
 TOML fail before a profile or backend is constructed.
 
@@ -51,6 +57,9 @@ The file may be partial. Omitted values retain the historical defaults:
 | `runtime.vision` | `"none"` |
 | `runtime.mode` | `"run"` |
 | every `[initiative]` value | `false` |
+| `voice.enabled` | `false` |
+| `voice.initial_timeout_seconds` | `18.0` |
+| `voice.followup_timeout_seconds` | `10.0` |
 
 There is no implicit configuration file. Without `--config`, all historical
 CLI defaults and specialized operations remain unchanged.
@@ -64,6 +73,13 @@ positive initiative flags can turn a configured `false` into `true`; omitting a
 flag preserves the configured value. There is intentionally no matching
 `--no-initiative-*` family. To turn a configured permission off, edit or select
 another configuration file.
+
+The positive `--voice` flag similarly overrides a missing or false
+`voice.enabled`; omitting it preserves the configured value. Physical speech is
+still only available with the Fusion HAT hardware backend. The timeout values
+have no CLI overrides and remain file-configured. See
+[Bounded voice conversation](voice-conversation.md) for the two-turn lifecycle
+and intentionally excluded audio features.
 
 Dependencies are checked once against the final merged values. For example,
 initiative messages configured with `mode = "run"` become valid when the
@@ -103,5 +119,6 @@ python main.py \
   --initiative-messages \
   --initiative-continuation \
   --initiative-goal-closure \
+  --voice \
   --console
 ```

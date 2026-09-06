@@ -105,12 +105,16 @@ class RuntimeConsole:
     async def execute_async(self, command: str) -> tuple[str, bool]:
         """Execute commands, including semantic operations that must be awaited."""
         raw_parts = command.lstrip().split(maxsplit=1)
+        if raw_parts and raw_parts[0].lower() == "voice":
+            if len(raw_parts) != 1:
+                return "Usage: voice.", False
+            return await self._application.voice.start(source="console"), False
         if raw_parts and raw_parts[0].lower() == "ask":
             message = raw_parts[1] if len(raw_parts) == 2 else ""
             if not message.strip():
                 return "Usage: ask <message>.", False
             try:
-                response = await self._application.request_cognition(message)
+                response = await self._application.handle_operator_utterance(message)
             except (CognitionError, RuntimeError, ValueError) as error:
                 return f"Cognition request failed: {error}.", False
             return f"{self._application.profile.name}: {response}", False
@@ -184,6 +188,7 @@ class RuntimeConsole:
                 "  presence                       Show current presence state",
                 "  simulate presence <on|off>     Inject virtual presence",
                 "  ask <message>                  Send one text cognition request",
+                "  voice                          Start one bounded voice session",
                 "  memory                         Show working-memory metadata",
                 "  memory clear                   Clear session working memory",
                 "  goal                           Show current active goal",

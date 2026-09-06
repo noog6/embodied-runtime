@@ -1,5 +1,8 @@
 # Architecture
 
+The optional speech path is a runtime-owned, two-turn interaction rather than
+an execution backbone; see [Bounded voice conversation](voice-conversation.md).
+
 The camera layer owns one-shot encoded capture. The visual perception layer can
 interpret one transient frame on deliberate request; application orchestration
 owns validation, capability projection, and autonomous request bounds. See

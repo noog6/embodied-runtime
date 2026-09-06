@@ -39,6 +39,7 @@ from embodied_runtime.sensing.camera.picamera2 import (
     Picamera2CameraBackend,
     Picamera2UnavailableError,
 )
+from embodied_runtime.voice import FusionHatVoiceProvider, VoiceSessionPolicy
 
 LOGGER = logging.getLogger(__name__)
 
@@ -67,6 +68,10 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     parser.add_argument(
         "--vision", choices=("none", "openai-responses"),
         default=configurable_default("none"),
+    )
+    parser.add_argument(
+        "--voice", action="store_true", default=configurable_default(False),
+        help="enable bounded Fusion HAT voice interaction",
     )
     parser.add_argument("--initiative", action="store_true",
                         default=configurable_default(False),
@@ -145,6 +150,9 @@ def parse_launch_arguments(
     args.initiative_messages = effective.initiative_messages
     args.initiative_continuation = effective.initiative_continuation
     args.initiative_goal_closure = effective.initiative_goal_closure
+    args.voice_enabled = effective.voice_enabled
+    args.voice_initial_timeout_seconds = effective.voice_initial_timeout_seconds
+    args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
     return parser, args, effective
 
 
@@ -281,6 +289,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         visual_perception_backend=vision,
         operator_message_sink=message_channel,
         platform_monitor_policy=build_platform_monitor_policy(args),
+        voice_provider=(FusionHatVoiceProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
+        voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
     )
     if args.diagnostics:
         try:

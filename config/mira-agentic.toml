@@ -13,3 +13,8 @@ actions = true
 messages = true
 continuation = true
 goal_closure = true
+
+[voice]
+enabled = true
+initial_timeout_seconds = 18
+followup_timeout_seconds = 10

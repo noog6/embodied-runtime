@@ -59,6 +59,7 @@ from embodied_runtime.state import (
     BodyState, LifecycleState, PowerState, PresenceState, RuntimeState,
 )
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
+from embodied_runtime.voice import VoiceInteraction, VoiceProvider, VoiceSessionPolicy
 
 LOGGER = logging.getLogger(__name__)
 
@@ -264,6 +265,8 @@ class RobotApplication:
         visual_perception_backend: VisualPerceptionBackend | None = None,
         temporal_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic_clock: Callable[[], float] | None = None,
+        voice_provider: VoiceProvider | None = None,
+        voice_policy: VoiceSessionPolicy = VoiceSessionPolicy(),
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -277,6 +280,11 @@ class RobotApplication:
         self._visual_perception_backend = visual_perception_backend
         self.working_memory = (
             working_memory if working_memory is not None else WorkingMemory()
+        )
+        self.voice = VoiceInteraction(
+            voice_provider,
+            lambda text: self.handle_operator_utterance(text),
+            voice_policy,
         )
         self._active_goal: ActiveGoal | None = None
         self._reflexes = tuple(reflexes)
@@ -483,6 +491,10 @@ class RobotApplication:
         LOGGER.info("[APP] stopping")
         failure: BaseException | None = None
         try:
+            await self.voice.stop()
+        except BaseException as error:
+            failure = error
+        try:
             await self.temporal.stop()
         except BaseException as error:
             failure = error
@@ -590,6 +602,10 @@ class RobotApplication:
         )
         self.working_memory.append(message, response, tool_outcomes)
         return response
+
+    async def handle_operator_utterance(self, message: str) -> str:
+        """Route one typed or spoken operator utterance through cognition."""
+        return await self.request_cognition(message)
 
     def _cognition_instructions(self, working_memory=None) -> str:
         if working_memory is None:

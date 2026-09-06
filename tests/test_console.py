@@ -117,6 +117,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  presence                       Show current presence state\n"
             "  simulate presence <on|off>     Inject virtual presence\n"
             "  ask <message>                  Send one text cognition request\n"
+            "  voice                          Start one bounded voice session\n"
             "  memory                         Show working-memory metadata\n"
             "  memory clear                   Clear session working memory\n"
             "  goal                           Show current active goal\n"
