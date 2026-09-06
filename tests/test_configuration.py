@@ -15,6 +15,7 @@ EXPLICIT_AGENTIC = [
     "--initiative-platform-attention", "--initiative-actions",
     "--initiative-messages", "--initiative-continuation",
     "--initiative-goal-closure", "--console",
+    "--voice",
 ]
 
 
@@ -127,6 +128,7 @@ class ConfigurationTests(unittest.TestCase):
             ("[runtime]\ncamrea='none'\n", "runtime.camrea"),
             ("[initiative]\nfree_will=10\n", "initiative.free_will"),
             ("[cognition]\napi_key='secret'\n", "cognition"),
+            ("[voice]\ngain_db=30\n", "voice.gain_db"),
         ):
             with self.subTest(key=key), self.assertRaisesRegex(
                 ConfigurationError, f"unknown configuration key: {key}"
@@ -139,11 +141,22 @@ class ConfigurationTests(unittest.TestCase):
             ("[initiative]\nactions=1\n", "initiative.actions must be boolean"),
             ("[runtime]\ncamera=true\n", "runtime.camera must be a string"),
             ("[runtime]\nmode=7\n", "runtime.mode must be a string"),
+            ("[voice]\nenabled='yes'\n", "voice.enabled must be boolean"),
+            ("[voice]\ninitial_timeout_seconds=0\n", "voice.initial_timeout_seconds must be a positive number"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                 ConfigurationError, message
             ):
                 load_runtime_config(self.write(contents))
+
+    def test_voice_is_opt_in_with_small_bounded_timeout_config(self):
+        effective = self.effective(
+            "[voice]\nenabled=true\ninitial_timeout_seconds=15\n"
+            "followup_timeout_seconds=8.5\n"
+        )
+        self.assertTrue(effective.voice_enabled)
+        self.assertEqual(effective.voice_initial_timeout_seconds, 15)
+        self.assertEqual(effective.voice_followup_timeout_seconds, 8.5)
 
     def test_unsupported_enums_are_rejected(self):
         for key in ("hardware", "camera", "cognition", "vision", "mode"):
