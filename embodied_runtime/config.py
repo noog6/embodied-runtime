@@ -34,6 +34,8 @@ class VoiceFileConfig:
     enabled: bool | None = None
     wake_word_enabled: bool | None = None
     wake_words: list[str] | None = None
+    tts: str | None = None
+    piper_model: str | None = None
     initial_timeout_seconds: float | None = None
     followup_timeout_seconds: float | None = None
 
@@ -64,6 +66,8 @@ class LaunchConfiguration:
     voice_enabled: bool
     voice_wake_word_enabled: bool
     voice_wake_words: list[str]
+    voice_tts: str
+    voice_piper_model: str | None
     voice_initial_timeout_seconds: float
     voice_followup_timeout_seconds: float
 
@@ -74,6 +78,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     initiative_actions=False, initiative_messages=False,
     initiative_continuation=False, initiative_goal_closure=False,
     voice_enabled=False, voice_wake_word_enabled=False, voice_wake_words=["mira"],
+    voice_tts="espeak", voice_piper_model=None,
     voice_initial_timeout_seconds=18.0,
     voice_followup_timeout_seconds=10.0,
 )
@@ -85,7 +90,7 @@ _INITIATIVE_KEYS = {
 }
 _VOICE_KEYS = {
     "enabled", "wake_word_enabled", "wake_words", "initial_timeout_seconds",
-    "followup_timeout_seconds",
+    "followup_timeout_seconds", "tts", "piper_model",
 }
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
@@ -148,6 +153,16 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
             raise ConfigurationError(
                 "voice.wake_words entries must be non-empty strings"
             )
+    if "tts" in voice:
+        if not isinstance(voice["tts"], str):
+            raise ConfigurationError("voice.tts must be a string")
+        if voice["tts"] not in {"espeak", "piper"}:
+            raise ConfigurationError(
+                f"unsupported value for voice.tts: {voice['tts']!r} "
+                "(choose from espeak, piper)"
+            )
+    if "piper_model" in voice and not isinstance(voice["piper_model"], str):
+        raise ConfigurationError("voice.piper_model must be a string")
     for key in ("initial_timeout_seconds", "followup_timeout_seconds"):
         if key in voice and (isinstance(voice[key], bool) or not isinstance(voice[key], (int, float)) or voice[key] <= 0):
             raise ConfigurationError(f"voice.{key} must be a positive number")
@@ -205,6 +220,8 @@ def resolve_launch_configuration(
         voice_enabled=opt_in("voice", voice.enabled, False),
         voice_wake_word_enabled=voice.wake_word_enabled or False,
         voice_wake_words=voice.wake_words or ["mira"],
+        voice_tts=scalar("tts", voice.tts, "espeak"),
+        voice_piper_model=scalar("piper_model", voice.piper_model, None),
         voice_initial_timeout_seconds=(voice.initial_timeout_seconds if voice.initial_timeout_seconds is not None else 18.0),
         voice_followup_timeout_seconds=(voice.followup_timeout_seconds if voice.followup_timeout_seconds is not None else 10.0),
     )

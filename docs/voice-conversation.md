@@ -18,8 +18,8 @@ memory, RuntimeState, or the EventBus. Manual `voice` sessions do not play it.
 3. `VoiceInteraction` sends recognized text through the same application
    cognition path as console `ask`.
 4. The final text response is passed unchanged to a separate
-   `TextToSpeechProvider`; the current `FusionHatEspeakTTSProvider`
-   implementation speaks it locally with SunFounder eSpeak.
+   `TextToSpeechProvider`; either `FusionHatEspeakTTSProvider` or
+   `FusionHatPiperTTSProvider` speaks it locally.
 5. Vosk offers one short follow-up opportunity (10 seconds by default).
 6. The session closes after the second utterance or a timeout, stops capture, and
    disables the Fusion HAT speaker.
@@ -32,23 +32,57 @@ minimal configuration is:
 enabled = true
 wake_word_enabled = true
 wake_words = ["mira", "mirror"]
+tts = "espeak"
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
 ```
 
 The application constructs `FusionHatVoiceProvider` for local STT and wake
-interaction and `FusionHatEspeakTTSProvider` for physical speech output as
-distinct dependencies. `VoiceInteraction` coordinates both providers and
+interaction and the selected physical speech provider as distinct dependencies.
+eSpeak is the historical default. To use offline neural speech, install the
+optional maintained OHF Piper package and an operator-managed voice:
+
+```console
+python -m pip install -e '.[openai,piper]'
+mkdir -p ~/.local/share/embodied-runtime/piper
+python -m piper.download_voices \
+  --data-dir ~/.local/share/embodied-runtime/piper \
+  en_US-lessac-medium
+```
+
+`python -m pip install -e '.[piper]'` is sufficient when OpenAI support is not
+needed. Confirm that both `en_US-lessac-medium.onnx` and
+`en_US-lessac-medium.onnx.json` were downloaded, then select it:
+
+```toml
+[voice]
+enabled = true
+wake_word_enabled = true
+wake_words = ["mira", "mirror"]
+tts = "piper"
+piper_model = "/home/pi/.local/share/embodied-runtime/piper/en_US-lessac-medium.onnx"
+initial_timeout_seconds = 18
+followup_timeout_seconds = 10
+```
+
+`~` is expanded in model paths. Piper loads the local model on first speech,
+keeps that one voice resident across turns and sessions, synthesizes a complete
+WAV in memory, and plays it through the Fusion HAT speaker. Once the package and
+model files are present, synthesis requires no network. Startup does not
+download models, and there is no automatic fallback to eSpeak. Voice models can
+carry their own dataset/model licensing terms; review the voice's model card
+before selecting or distributing it. `en_US-lessac-medium` is only the first
+benchmark voice, not a hard-coded runtime choice.
+
+`VoiceInteraction` coordinates both providers and
 keeps microphone capture and TTS playback half-duplex. It owns session-level
 coordination while input cleanup remains with the voice provider and speaker
 cleanup remains with the TTS provider; failure to close either one does not
 skip the other cleanup attempt.
 
-eSpeak remains the only configured TTS implementation, but the narrow
-`TextToSpeechProvider` seam makes speech output replaceable without changing
-the bounded conversation architecture. Piper or a network-backed provider can
-be added later; no additional TTS provider, selection configuration, fallback,
-or runtime switching is introduced by this refactor.
+The narrow `TextToSpeechProvider` seam keeps selection from changing the bounded
+conversation architecture. There is no provider probing, fallback, runtime
+switching, streaming synthesis, or TTS text rewriting.
 
 Wake listening is local trigger detection, not an always-running cloud
 conversation. Matching is case-insensitive and exact after trimming against

@@ -9,6 +9,9 @@ dependencies = []
 openai = [
     "openai>=3.6,<4",
 ]
+piper = [
+    "piper-tts>=1.8,<2",
+]
 
 [tool.setuptools.packages.find]
 include = ["embodied_runtime*"]
