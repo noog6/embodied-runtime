@@ -108,6 +108,53 @@ class LoggingFormatterTests(unittest.TestCase):
         self.assertIn("first-party info", output)
         self.assertIn("unrelated info", output)
 
+    def test_httpx_info_is_filtered_before_a_library_owned_handler(self):
+        """Exercise the handler path that bypasses a filter on the root handler."""
+        runtime_stream = io.StringIO()
+        library_stream = io.StringIO()
+        configure_logging(stream=runtime_stream, no_color=True)
+        logger = logging.getLogger("httpx")
+        handler = logging.StreamHandler(library_stream)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            logger.info(
+                'HTTP Request: POST https://api.openai.com/v1/responses '
+                '"HTTP/1.1 200 OK"'
+            )
+            logger.warning("HTTP transport warning")
+        finally:
+            logger.removeHandler(handler)
+
+        self.assertNotIn("HTTP Request", library_stream.getvalue())
+        self.assertNotIn("HTTP Request", runtime_stream.getvalue())
+        self.assertIn("HTTP transport warning", library_stream.getvalue())
+        self.assertIn("HTTP transport warning", runtime_stream.getvalue())
+
+    def test_real_httpx_request_summary_uses_protected_logger(self):
+        try:
+            import httpx
+        except ImportError:
+            self.skipTest("httpx is available only with the OpenAI extra")
+
+        runtime_stream = io.StringIO()
+        library_stream = io.StringIO()
+        configure_logging(stream=runtime_stream, no_color=True)
+        logger = logging.getLogger("httpx")
+        handler = logging.StreamHandler(library_stream)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            with httpx.Client(transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, text="ok")
+            )) as client:
+                client.post("https://api.openai.com/v1/responses")
+        finally:
+            logger.removeHandler(handler)
+
+        self.assertNotIn("HTTP Request", library_stream.getvalue())
+        self.assertNotIn("HTTP Request", runtime_stream.getvalue())
+
     def test_plain_formatter_preserves_timestamp_and_category_exactly(self):
         plain = "2026-09-03T18:28:27.968-04:00 [ATTENTION] decision=wake"
         record = logging.LogRecord(
