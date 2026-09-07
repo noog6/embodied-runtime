@@ -117,9 +117,15 @@ class VoiceInteraction:
                     if not self._wake_enabled.is_set() or self._stopping:
                         continue
                     heard = await self._provider.listen()
-                if heard is not None and heard.strip().casefold() == self._wake_word:
+                normalized = heard.strip().casefold() if heard is not None else ""
+                if normalized == self._wake_word:
                     LOGGER.info("[VOICE] wake_detected word=%r", self._wake_word)
                     await self.start(source="wake_word")
+                elif normalized:
+                    LOGGER.info(
+                        "[VOICE] wake_rejected text=%r expected=%r",
+                        heard.strip(), self._wake_word,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as error:

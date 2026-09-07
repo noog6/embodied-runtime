@@ -11,6 +11,19 @@ from embodied_runtime.console_style import (
 )
 
 
+class TransportNoiseFilter(logging.Filter):
+    """Suppress successful HTTP client chatter while retaining problems."""
+
+    _NAMESPACES = ("httpx", "httpcore", "openai")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        is_transport = any(
+            record.name == namespace or record.name.startswith(namespace + ".")
+            for namespace in self._NAMESPACES
+        )
+        return not is_transport or record.levelno >= logging.WARNING
+
+
 class LocalISO8601Formatter(logging.Formatter):
     """Prefix records with local wall-clock time including milliseconds and offset."""
 
@@ -64,6 +77,7 @@ def configure_logging(
 ) -> None:
     """Configure runtime records for the command-line entry point."""
     handler = logging.StreamHandler(stream)
+    handler.addFilter(TransportNoiseFilter())
     handler.setFormatter(SemanticColourFormatter(
         "%(asctime)s %(message)s",
         colour=colour_enabled(stream, disabled=no_color),
