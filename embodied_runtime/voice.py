@@ -18,11 +18,17 @@ LOGGER = logging.getLogger(__name__)
 
 
 class VoiceProvider(Protocol):
-    """Transient speech I/O used by a runtime-owned voice session."""
+    """Transient speech input and wake acknowledgement for a voice session."""
 
     async def listen(self) -> str | None: ...
     async def stop_listening(self) -> None: ...
     async def play_engagement_cue(self) -> None: ...
+    async def close(self) -> None: ...
+
+
+class TextToSpeechProvider(Protocol):
+    """Speech output used by a runtime-owned voice session."""
+
     async def speak(self, text: str) -> None: ...
     async def close(self) -> None: ...
 
@@ -43,12 +49,14 @@ class VoiceInteraction:
     def __init__(
         self,
         provider: VoiceProvider | None,
+        text_to_speech_provider: TextToSpeechProvider | None,
         handle_utterance: Callable[[str], Awaitable[str]],
         policy: VoiceSessionPolicy = VoiceSessionPolicy(),
         *,
         wake_words: list[str] | None = None,
     ) -> None:
         self._provider = provider
+        self._text_to_speech_provider = text_to_speech_provider
         self._handle_utterance = handle_utterance
         self._policy = policy
         self._session_task: asyncio.Task[str] | None = None
@@ -64,7 +72,10 @@ class VoiceInteraction:
 
     @property
     def available(self) -> bool:
-        return self._provider is not None
+        return (
+            self._provider is not None
+            and self._text_to_speech_provider is not None
+        )
 
     @property
     def active(self) -> bool:
@@ -75,7 +86,7 @@ class VoiceInteraction:
         return self._wake_task is not None and not self._wake_task.done()
 
     async def start(self, *, source: str = "runtime") -> str:
-        if self._provider is None:
+        if not self.available:
             return "Voice interaction unavailable."
         if self.active or self._session_pending:
             return "Voice interaction already active."
@@ -101,7 +112,7 @@ class VoiceInteraction:
     def start_wake_listener(self) -> None:
         """Start application-owned local wake recognition when configured."""
         if (
-            self._provider is None
+            not self.available
             or not self._wake_words
             or self._wake_task is not None
         ):
@@ -166,6 +177,7 @@ class VoiceInteraction:
 
     async def _run(self, source: str) -> str:
         assert self._provider is not None
+        assert self._text_to_speech_provider is not None
         reason = "initial_timeout"
         if source == "wake_word":
             try:
@@ -197,7 +209,7 @@ class VoiceInteraction:
                 response = await self._handle_utterance(text)
                 LOGGER.info("[VOICE] response turn=%s text=%r", turn, response)
                 LOGGER.info("[VOICE] speaking turn=%s", turn)
-                await self._provider.speak(response)
+                await self._text_to_speech_provider.speak(response)
                 reason = "max_turns" if turn == 2 else reason
             return "Voice session closed."
         except asyncio.CancelledError:
@@ -212,11 +224,14 @@ class VoiceInteraction:
                 await self._provider.stop_listening()
             except Exception:
                 LOGGER.exception("[VOICE] capture_cleanup_failed")
-            finally:
-                try:
-                    await self._provider.close()
-                except Exception:
-                    LOGGER.exception("[VOICE] speaker_cleanup_failed")
+            try:
+                await self._provider.close()
+            except Exception:
+                LOGGER.exception("[VOICE] input_cleanup_failed")
+            try:
+                await self._text_to_speech_provider.close()
+            except Exception:
+                LOGGER.exception("[VOICE] speaker_cleanup_failed")
             LOGGER.info("[VOICE] session_closed reason=%s", reason)
 
     async def _listen(self, timeout: float) -> str | None:
@@ -253,12 +268,11 @@ class VoiceInteraction:
 
 
 class FusionHatVoiceProvider:
-    """Lazy adapter over SunFounder's supported Vosk and Espeak components."""
+    """Lazy adapter over SunFounder's Vosk and local wake acknowledgement."""
 
     def __init__(self, *, language: str = "en-us") -> None:
         self._language = language
         self._stt = None
-        self._tts = None
 
     def _ensure_stt(self):
         if self._stt is None:
@@ -268,15 +282,6 @@ class FusionHatVoiceProvider:
                 raise RuntimeError("Fusion HAT speech recognition is unavailable") from error
             self._stt = Vosk(language=self._language)
         return self._stt
-
-    def _ensure_tts(self):
-        if self._tts is None:
-            try:
-                from fusion_hat.tts import Espeak
-            except ImportError as error:
-                raise RuntimeError("Fusion HAT speech synthesis is unavailable") from error
-            self._tts = Espeak()
-        return self._tts
 
     async def listen(self) -> str | None:
         return await asyncio.to_thread(self._listen_sync)
@@ -306,6 +311,25 @@ class FusionHatVoiceProvider:
             )
         finally:
             disable_speaker()
+
+    async def close(self) -> None:
+        """Release voice-input resources (Vosk has no separate close operation)."""
+
+
+class FusionHatEspeakTTSProvider:
+    """Lazy SunFounder eSpeak output using the Fusion HAT speaker."""
+
+    def __init__(self) -> None:
+        self._tts = None
+
+    def _ensure_tts(self):
+        if self._tts is None:
+            try:
+                from fusion_hat.tts import Espeak
+            except ImportError as error:
+                raise RuntimeError("Fusion HAT speech synthesis is unavailable") from error
+            self._tts = Espeak()
+        return self._tts
 
     async def speak(self, text: str) -> None:
         await asyncio.to_thread(self._speak_sync, text)

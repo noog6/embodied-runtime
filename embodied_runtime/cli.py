@@ -39,7 +39,11 @@ from embodied_runtime.sensing.camera.picamera2 import (
     Picamera2CameraBackend,
     Picamera2UnavailableError,
 )
-from embodied_runtime.voice import FusionHatVoiceProvider, VoiceSessionPolicy
+from embodied_runtime.voice import (
+    FusionHatEspeakTTSProvider,
+    FusionHatVoiceProvider,
+    VoiceSessionPolicy,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -292,6 +296,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         operator_message_sink=message_channel,
         platform_monitor_policy=build_platform_monitor_policy(args),
         voice_provider=(FusionHatVoiceProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
+        text_to_speech_provider=(FusionHatEspeakTTSProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
         voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
         voice_wake_words=(args.voice_wake_words if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
     )
