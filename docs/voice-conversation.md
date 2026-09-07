@@ -102,6 +102,31 @@ file. eSpeak and Piper remain explicit alternatives, and failures never trigger
 an automatic fallback. Applications using OpenAI-generated voices must clearly
 disclose to end users that the voice they hear is AI-generated.
 
+ElevenLabs-hosted speech is a fourth explicit option:
+
+```toml
+[voice]
+enabled = true
+tts = "elevenlabs"
+elevenlabs_tts_model = "eleven_flash_v2_5"
+elevenlabs_tts_voice_id = "YOUR_VOICE_ID"
+```
+
+Install the official SDK with `python -m pip install -e '.[elevenlabs]'`, select
+and copy a voice ID from ElevenLabs, and provide the credential only through the
+environment:
+
+```console
+export ELEVENLABS_API_KEY='your-key-from-a-secure-source'
+```
+
+ElevenLabs requires network access and a voice ID; the initial low-latency model
+default is `eleven_flash_v2_5`. The provider requests `wav_24000` and collects
+all asynchronously delivered SDK chunks into one complete in-memory WAV before
+enabling the speaker and invoking `aplay`. This is not streaming playback and
+does not create temporary files. eSpeak, Piper, and OpenAI remain explicit
+alternatives, and there is no automatic fallback.
+
 Wake listening is local trigger detection, not an always-running cloud
 conversation. Matching is case-insensitive and exact after trimming against
 the configured phrases. `"mirror"` is intentionally accepted because live Vosk

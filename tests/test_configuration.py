@@ -201,6 +201,38 @@ class ConfigurationTests(unittest.TestCase):
             ):
                 load_runtime_config(self.write(f"[voice]\n{key}=7\n"))
 
+    def test_elevenlabs_tts_defaults_and_cli_precedence(self):
+        configured = self.effective(
+            "[voice]\ntts='elevenlabs'\nelevenlabs_tts_model='file-model'\n"
+            "elevenlabs_tts_voice_id='file-voice'\n",
+            ("--elevenlabs-tts-model", "cli-model",
+             "--elevenlabs-tts-voice-id", "cli-voice"),
+        )
+        self.assertEqual(configured.voice_tts, "elevenlabs")
+        self.assertEqual(configured.voice_elevenlabs_tts_model, "cli-model")
+        self.assertEqual(configured.voice_elevenlabs_tts_voice_id, "cli-voice")
+        self.assertEqual(
+            HISTORICAL_DEFAULTS.voice_elevenlabs_tts_model, "eleven_flash_v2_5"
+        )
+        self.assertIsNone(HISTORICAL_DEFAULTS.voice_elevenlabs_tts_voice_id)
+
+    def test_elevenlabs_tts_values_must_be_strings(self):
+        for key in ("elevenlabs_tts_model", "elevenlabs_tts_voice_id"):
+            with self.subTest(key=key), self.assertRaisesRegex(
+                ConfigurationError, f"voice.{key} must be a string"
+            ):
+                load_runtime_config(self.write(f"[voice]\n{key}=7\n"))
+
+    def test_elevenlabs_requires_voice_id_after_merge(self):
+        path = self.write("[voice]\ntts='elevenlabs'\n")
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            main(["--config", str(path)])
+        effective = self.effective(
+            "[voice]\ntts='elevenlabs'\nelevenlabs_tts_voice_id='file-voice'\n",
+            ("--elevenlabs-tts-voice-id", "cli-voice"),
+        )
+        self.assertEqual(effective.voice_elevenlabs_tts_voice_id, "cli-voice")
+
     def test_piper_requires_model_path_after_cli_and_file_merge(self):
         path = self.write("[voice]\ntts='piper'\n")
         with patch("sys.stderr"), self.assertRaises(SystemExit):

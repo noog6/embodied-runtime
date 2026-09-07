@@ -11,7 +11,8 @@ import wave
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.cli import build_text_to_speech_provider
 from embodied_runtime.voice import (
-    FusionHatEspeakTTSProvider, FusionHatOpenAITTSProvider,
+    FusionHatElevenLabsTTSProvider, FusionHatEspeakTTSProvider,
+    FusionHatOpenAITTSProvider,
     FusionHatPiperTTSProvider,
     FusionHatVoiceProvider, VoiceInteraction, VoiceSessionPolicy,
 )
@@ -121,25 +122,33 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_tts_selection_is_physical_and_preserves_all_providers(self):
         base = dict(voice_enabled=True, hardware="fusion-hat", piper_model="model",
-                    openai_tts_model="model", openai_tts_voice="voice")
+                    openai_tts_model="model", openai_tts_voice="voice",
+                    elevenlabs_tts_model="el-model",
+                    elevenlabs_tts_voice_id="el-voice")
         with patch("embodied_runtime.cli.FusionHatEspeakTTSProvider") as espeak, \
              patch("embodied_runtime.cli.FusionHatPiperTTSProvider") as piper, \
-             patch("embodied_runtime.cli.FusionHatOpenAITTSProvider") as openai:
+             patch("embodied_runtime.cli.FusionHatOpenAITTSProvider") as openai, \
+             patch("embodied_runtime.cli.FusionHatElevenLabsTTSProvider") as elevenlabs:
             build_text_to_speech_provider(argparse.Namespace(**base, tts="espeak"))
             espeak.assert_called_once_with()
             build_text_to_speech_provider(argparse.Namespace(**base, tts="piper"))
             piper.assert_called_once_with(model_path="model")
             build_text_to_speech_provider(argparse.Namespace(**base, tts="openai"))
             openai.assert_called_once_with(model="model", voice="voice")
+            build_text_to_speech_provider(argparse.Namespace(**base, tts="elevenlabs"))
+            elevenlabs.assert_called_once_with(model="el-model", voice_id="el-voice")
 
             for disabled in (
                 {**base, "voice_enabled": False, "tts": "openai"},
                 {**base, "hardware": "virtual", "tts": "openai"},
+                {**base, "voice_enabled": False, "tts": "elevenlabs"},
+                {**base, "hardware": "virtual", "tts": "elevenlabs"},
             ):
                 self.assertIsNone(build_text_to_speech_provider(
                     argparse.Namespace(**disabled)
                 ))
             self.assertEqual(openai.call_count, 1)
+            self.assertEqual(elevenlabs.call_count, 1)
 
     async def test_two_turns_use_same_handler_speak_and_close(self):
         provider = FakeVoiceProvider(["first", "follow up"])
@@ -670,6 +679,20 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         return {"openai": openai, "fusion_hat": fusion_hat,
                 "fusion_hat.device": device}
 
+    def elevenlabs_modules(self, calls, convert):
+        client = SimpleNamespace(
+            text_to_speech=SimpleNamespace(convert=convert)
+        )
+        elevenlabs = ModuleType("elevenlabs")
+        client_module = ModuleType("elevenlabs.client")
+        client_module.AsyncElevenLabs = lambda **kwargs: client
+        fusion_hat = ModuleType("fusion_hat")
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append("enable")
+        device.disable_speaker = lambda: calls.append("disable")
+        return {"elevenlabs": elevenlabs, "elevenlabs.client": client_module,
+                "fusion_hat": fusion_hat, "fusion_hat.device": device}
+
     @staticmethod
     def wav_bytes(*, frames=16_000, sample_rate=16_000):
         output = io.BytesIO()
@@ -774,6 +797,115 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             RuntimeError, r"unavailable; install it with: .*\[openai\]"
         ):
             FusionHatOpenAITTSProvider()
+
+    async def test_elevenlabs_collects_complete_wav_and_controls_speaker(self):
+        calls = []
+        audio = self.wav_bytes(frames=6_000, sample_rate=24_000)
+
+        async def chunks():
+            for chunk in (audio[:20], audio[20:]):
+                self.assertNotIn("enable", calls)
+                yield chunk
+
+        def convert(**kwargs):
+            calls.append(("request", kwargs))
+            return chunks()
+
+        with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
+             patch.dict(sys.modules, self.elevenlabs_modules(calls, convert)), \
+             patch("embodied_runtime.voice.time.perf_counter",
+                   side_effect=[1.0, 2.25, 10.0, 10.4]), \
+             patch("embodied_runtime.voice.subprocess.run") as run, \
+             self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
+            provider = FusionHatElevenLabsTTSProvider(
+                model="configured-model", voice_id="configured-voice"
+            )
+            await provider.speak("Exact **text**\nunchanged")
+            await provider.close()
+
+        self.assertEqual(calls[1], ("request", {
+            "voice_id": "configured-voice", "text": "Exact **text**\nunchanged",
+            "model_id": "configured-model", "output_format": "wav_24000",
+        }))
+        self.assertEqual(run.call_args.args[0], ["aplay", "--quiet"])
+        self.assertEqual(run.call_args.kwargs["input"], audio)
+        self.assertEqual(logs.output, [
+            "INFO:embodied_runtime.voice:[TTS] synthesis_completed "
+            "duration_ms=1250 audio_ms=250",
+            "INFO:embodied_runtime.voice:[TTS] playback_completed duration_ms=400",
+        ])
+        self.assertEqual(calls[-3:], ["enable", "disable", "disable"])
+
+    async def test_elevenlabs_generation_and_playback_failures_clean_up(self):
+        async def failed_chunks():
+            raise RuntimeError("generation failed")
+            yield b""  # pragma: no cover
+
+        calls = []
+        modules = self.elevenlabs_modules(calls, lambda **kwargs: failed_chunks())
+        with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
+             patch.dict(sys.modules, modules), \
+             patch("embodied_runtime.voice.subprocess.run") as run:
+            provider = FusionHatElevenLabsTTSProvider(voice_id="voice")
+            with self.assertRaisesRegex(RuntimeError, "generation failed"):
+                await provider.speak("hello")
+        self.assertEqual(calls, ["disable"])
+        run.assert_not_called()
+
+        calls = []
+        async def chunks():
+            yield b"wav"
+        modules = self.elevenlabs_modules(calls, lambda **kwargs: chunks())
+        with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
+             patch.dict(sys.modules, modules), \
+             patch("embodied_runtime.voice.subprocess.run",
+                   side_effect=RuntimeError("playback failed")), \
+             patch("embodied_runtime.voice.LOGGER.info") as log:
+            provider = FusionHatElevenLabsTTSProvider(voice_id="voice")
+            with self.assertRaisesRegex(RuntimeError, "playback failed"):
+                await provider.speak("hello")
+        self.assertEqual(calls, ["disable", "enable", "disable"])
+        self.assertEqual(log.call_count, 1)
+
+    async def test_elevenlabs_close_preserves_client_across_sessions(self):
+        calls = []
+        clients = []
+
+        async def chunks():
+            yield b"wav"
+
+        modules = self.elevenlabs_modules(calls, lambda **kwargs: chunks())
+        client_module = modules["elevenlabs.client"]
+        original_factory = client_module.AsyncElevenLabs
+
+        def client_factory(**kwargs):
+            client = original_factory(**kwargs)
+            clients.append(client)
+            return client
+
+        client_module.AsyncElevenLabs = client_factory
+        with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
+             patch.dict(sys.modules, modules), \
+             patch("embodied_runtime.voice.subprocess.run"):
+            provider = FusionHatElevenLabsTTSProvider(voice_id="voice")
+            await provider.speak("first")
+            await provider.close()
+            await provider.speak("second")
+
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(calls.count("enable"), 2)
+        self.assertEqual(calls.count("disable"), 5)
+
+    def test_elevenlabs_dependency_and_credential_guidance(self):
+        with patch.dict("os.environ", {}, clear=True), self.assertRaisesRegex(
+            RuntimeError, "set ELEVENLABS_API_KEY"
+        ):
+            FusionHatElevenLabsTTSProvider(voice_id="voice")
+        unrelated = ModuleType("elevenlabs.client")
+        with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
+             patch.dict(sys.modules, {"elevenlabs.client": unrelated}), \
+             self.assertRaisesRegex(RuntimeError, r"install it with: .*\[elevenlabs\]"):
+            FusionHatElevenLabsTTSProvider(voice_id="voice")
 
     def test_piper_unavailable_fails_at_construction_with_install_guidance(self):
         unrelated_piper = ModuleType("piper")

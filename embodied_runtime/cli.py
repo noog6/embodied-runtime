@@ -41,10 +41,12 @@ from embodied_runtime.sensing.camera.picamera2 import (
 )
 from embodied_runtime.voice import (
     FusionHatEspeakTTSProvider,
+    FusionHatElevenLabsTTSProvider,
     FusionHatOpenAITTSProvider,
     FusionHatPiperTTSProvider,
     FusionHatVoiceProvider,
     OpenAITTSUnavailableError,
+    ElevenLabsTTSUnavailableError,
     PiperTTSUnavailableError,
     VoiceSessionPolicy,
 )
@@ -81,7 +83,7 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         "--voice", action="store_true", default=configurable_default(False),
         help="enable bounded Fusion HAT voice interaction",
     )
-    parser.add_argument("--tts", choices=("espeak", "piper", "openai"),
+    parser.add_argument("--tts", choices=("espeak", "piper", "openai", "elevenlabs"),
                         default=configurable_default("espeak"))
     parser.add_argument("--piper-model", default=configurable_default(None),
                         help="path to a local Piper .onnx voice model")
@@ -91,6 +93,10 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     parser.add_argument(
         "--openai-tts-voice", default=configurable_default("cedar")
     )
+    parser.add_argument(
+        "--elevenlabs-tts-model", default=configurable_default("eleven_flash_v2_5")
+    )
+    parser.add_argument("--elevenlabs-tts-voice-id", default=None)
     parser.add_argument("--initiative", action="store_true",
                         default=configurable_default(False),
                         help="enable bounded goal-directed cognition initiative")
@@ -175,6 +181,8 @@ def parse_launch_arguments(
     args.piper_model = effective.voice_piper_model
     args.openai_tts_model = effective.voice_openai_tts_model
     args.openai_tts_voice = effective.voice_openai_tts_voice
+    args.elevenlabs_tts_model = effective.voice_elevenlabs_tts_model
+    args.elevenlabs_tts_voice_id = effective.voice_elevenlabs_tts_voice_id
     args.voice_initial_timeout_seconds = effective.voice_initial_timeout_seconds
     args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
     return parser, args, effective
@@ -231,6 +239,11 @@ def build_text_to_speech_provider(args: argparse.Namespace):
     if args.tts == "openai":
         return FusionHatOpenAITTSProvider(
             model=args.openai_tts_model, voice=args.openai_tts_voice
+        )
+    if args.tts == "elevenlabs":
+        return FusionHatElevenLabsTTSProvider(
+            model=args.elevenlabs_tts_model,
+            voice_id=args.elevenlabs_tts_voice_id,
         )
     return FusionHatEspeakTTSProvider()
 
@@ -407,6 +420,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--vision requires a cognition backend")
     if args.tts == "piper" and not args.piper_model:
         parser.error("Piper TTS requires voice.piper_model or --piper-model")
+    if args.tts == "elevenlabs" and not (
+        args.elevenlabs_tts_voice_id and args.elevenlabs_tts_voice_id.strip()
+    ):
+        parser.error(
+            "ElevenLabs TTS requires voice.elevenlabs_tts_voice_id or "
+            "--elevenlabs-tts-voice-id"
+        )
     if args.fusion_servo_test is not None and not args.diagnostics:
         parser.error("--fusion-servo-test requires --diagnostics")
     if args.fusion_servo_test is not None and args.hardware != "fusion-hat":
@@ -433,6 +453,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         FusionHatUnavailableError, Picamera2UnavailableError,
         PiperTTSUnavailableError,
         OpenAITTSUnavailableError,
+        ElevenLabsTTSUnavailableError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
