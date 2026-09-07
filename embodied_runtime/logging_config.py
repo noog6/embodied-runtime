@@ -69,3 +69,5 @@ def configure_logging(
         colour=colour_enabled(stream, disabled=no_color),
     ))
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    for logger_name in ("httpx", "httpcore", "openai"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)

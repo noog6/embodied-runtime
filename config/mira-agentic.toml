@@ -16,5 +16,7 @@ goal_closure = true
 
 [voice]
 enabled = true
+wake_word_enabled = true
+wake_word = "mira"
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10

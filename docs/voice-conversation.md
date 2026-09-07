@@ -4,7 +4,9 @@ Voice is a bounded interaction capability, not Mira's execution backbone. The
 robot continues to exist, observe, pursue goals, and exercise bounded initiative
 without an active microphone or model stream.
 
-The first implementation is deliberately half-duplex and operator-triggered:
+The implementation is deliberately half-duplex and enters the same bounded
+conversation either from the console `voice` command or an optional local,
+exact wake-word recognition of "Mira":
 
 1. Enter `voice` in the runtime console.
 2. Local SunFounder Vosk STT listens for one utterance (18 seconds by default).
@@ -20,11 +22,21 @@ minimal configuration is:
 ```toml
 [voice]
 enabled = true
+wake_word_enabled = true
+wake_word = "mira"
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
 ```
 
-The Vosk model may be downloaded by the vendor library on the first `voice`
+Wake listening is local trigger detection, not an always-running cloud
+conversation. Ambient recognition is discarded unless its stripped,
+case-insensitive value is exactly `mira`; it never enters cognition or working
+memory. There is one microphone owner: a manual or wake-triggered bounded
+session cooperatively stops the wake capture, owns recognition through all STT,
+TTS, speaker disable, and cleanup, and only then allows wake listening to
+resume. The manual console command remains available while wake mode is on.
+
+The Vosk model may be downloaded by the vendor library on the first listen
 command. Initialization and download errors are reported for that session and do
 not stop the runtime. Raw audio and partial recognition results remain transient;
 they are never placed in RuntimeState, the EventBus, or persistent memory.
@@ -36,8 +48,11 @@ and input-level tuning require live validation before adding preprocessing.
 
 ## Intentionally out of scope
 
-This version does **not** implement a wake word, continuous listening or
-transcription, a realtime LLM audio stream, full duplex or interruption,
-barge-in, background recording, persistent audio storage, autonomous voice
-session initiation, OpenAI realtime audio, or SunFounder's `VoiceAssistant`
-orchestration.
+This version does **not** implement wake-word-plus-command parsing, fuzzy wake
+aliases, continuous cloud transcription, a realtime LLM audio stream, full
+duplex or interruption, barge-in, background recording, persistent audio
+storage, OpenAI realtime audio, or SunFounder's `VoiceAssistant` orchestration.
+
+Successful third-party HTTP request INFO lines are intentionally hidden in
+normal logging; first-party lifecycle INFO records and third-party warnings and
+errors remain visible.

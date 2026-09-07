@@ -36,7 +36,14 @@ class ConfigurationTests(unittest.TestCase):
             ["--config", "config/mira-agentic.toml"]
         )[2]
         explicit = parse_launch_arguments(EXPLICIT_AGENTIC)[2]
-        self.assertEqual(configured, explicit)
+        self.assertEqual(
+            configured,
+            explicit.__class__(**{
+                **explicit.__dict__,
+                "voice_wake_word_enabled": True,
+                "voice_wake_word": "mira",
+            }),
+        )
 
     def test_no_arguments_preserves_historical_defaults(self):
         self.assertEqual(parse_launch_arguments([])[2], HISTORICAL_DEFAULTS)
@@ -157,6 +164,15 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(effective.voice_enabled)
         self.assertEqual(effective.voice_initial_timeout_seconds, 15)
         self.assertEqual(effective.voice_followup_timeout_seconds, 8.5)
+
+    def test_wake_word_configuration_is_strict_and_opt_in(self):
+        effective = self.effective(
+            "[voice]\nenabled=true\nwake_word_enabled=true\nwake_word='Mira'\n"
+        )
+        self.assertTrue(effective.voice_wake_word_enabled)
+        self.assertEqual(effective.voice_wake_word, "Mira")
+        with self.assertRaisesRegex(ConfigurationError, "wake_word must be"):
+            load_runtime_config(self.write("[voice]\nwake_word=''\n"))
 
     def test_unsupported_enums_are_rejected(self):
         for key in ("hardware", "camera", "cognition", "vision", "mode"):

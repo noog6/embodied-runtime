@@ -39,12 +39,20 @@ class VoiceInteraction:
         provider: VoiceProvider | None,
         handle_utterance: Callable[[str], Awaitable[str]],
         policy: VoiceSessionPolicy = VoiceSessionPolicy(),
+        *,
+        wake_word: str | None = None,
     ) -> None:
         self._provider = provider
         self._handle_utterance = handle_utterance
         self._policy = policy
         self._session_task: asyncio.Task[str] | None = None
         self._listen_task: asyncio.Task[str | None] | None = None
+        self._wake_word = wake_word.casefold().strip() if wake_word else None
+        self._wake_task: asyncio.Task[None] | None = None
+        self._wake_enabled = asyncio.Event()
+        self._microphone_lock = asyncio.Lock()
+        self._stopping = False
+        self._session_pending = False
 
     @property
     def available(self) -> bool:
@@ -54,23 +62,74 @@ class VoiceInteraction:
     def active(self) -> bool:
         return self._session_task is not None and not self._session_task.done()
 
+    @property
+    def wake_active(self) -> bool:
+        return self._wake_task is not None and not self._wake_task.done()
+
     async def start(self, *, source: str = "runtime") -> str:
         if self._provider is None:
             return "Voice interaction unavailable."
-        if self.active:
+        if self.active or self._session_pending:
             return "Voice interaction already active."
-        self._session_task = asyncio.create_task(
-            self._run(source), name="bounded-voice-session"
-        )
+        self._session_pending = True
         try:
-            return await self._session_task
+            self._wake_enabled.clear()
+            # Cooperatively release a wake capture before waiting for ownership.
+            if self._wake_task is not None and self._provider is not None:
+                await self._provider.stop_listening()
+            async with self._microphone_lock:
+                self._session_task = asyncio.create_task(
+                    self._run(source), name="bounded-voice-session"
+                )
+                try:
+                    return await self._session_task
+                finally:
+                    self._session_task = None
         finally:
-            self._session_task = None
+            self._session_pending = False
+            if not self._stopping and self._wake_task is not None:
+                self._wake_enabled.set()
+
+    def start_wake_listener(self) -> None:
+        """Start application-owned local wake recognition when configured."""
+        if (
+            self._provider is None
+            or self._wake_word is None
+            or self._wake_task is not None
+        ):
+            return
+        self._stopping = False
+        self._wake_enabled.set()
+        self._wake_task = asyncio.create_task(
+            self._run_wake_listener(), name="voice-wake-listener"
+        )
+
+    async def _run_wake_listener(self) -> None:
+        try:
+            while not self._stopping:
+                await self._wake_enabled.wait()
+                if self._stopping:
+                    break
+                LOGGER.info(
+                    "[VOICE] wake_listener word=%r status=ready", self._wake_word
+                )
+                async with self._microphone_lock:
+                    if not self._wake_enabled.is_set() or self._stopping:
+                        continue
+                    heard = await self._provider.listen()
+                if heard is not None and heard.strip().casefold() == self._wake_word:
+                    LOGGER.info("[VOICE] wake_detected word=%r", self._wake_word)
+                    await self.start(source="wake_word")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            LOGGER.warning(
+                "[VOICE] wake_listener_failed error=%s", type(error).__name__
+            )
 
     async def stop(self) -> None:
-        task = self._session_task
-        if task is None or task.done():
-            return
+        self._stopping = True
+        self._wake_enabled.set()
         stop_error: Exception | None = None
         try:
             if self._provider is not None:
@@ -78,7 +137,13 @@ class VoiceInteraction:
         except Exception as error:
             stop_error = error
             LOGGER.exception("[VOICE] capture_stop_failed")
-        finally:
+        wake_task = self._wake_task
+        if wake_task is not None:
+            wake_task.cancel()
+            await asyncio.gather(wake_task, return_exceptions=True)
+            self._wake_task = None
+        task = self._session_task
+        if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         if stop_error is not None:
@@ -105,6 +170,7 @@ class VoiceInteraction:
                 LOGGER.info("[VOICE] heard turn=%s text=%r", turn, text)
                 LOGGER.info("[VOICE] thinking turn=%s", turn)
                 response = await self._handle_utterance(text)
+                LOGGER.info("[VOICE] response turn=%s text=%r", turn, response)
                 LOGGER.info("[VOICE] speaking turn=%s", turn)
                 await self._provider.speak(response)
                 reason = "max_turns" if turn == 2 else reason
@@ -134,16 +200,31 @@ class VoiceInteraction:
         try:
             return await asyncio.wait_for(asyncio.shield(self._listen_task), timeout)
         except TimeoutError:
-            await self._provider.stop_listening()
-            # The vendor stop API is the cooperative boundary that releases capture.
-            await self._listen_task
+            stop_error = await self._stop_and_join_listen()
+            if stop_error is not None:
+                raise stop_error
             return None
         except asyncio.CancelledError:
-            await self._provider.stop_listening()
-            await asyncio.gather(self._listen_task, return_exceptions=True)
+            await self._stop_and_join_listen()
             raise
         finally:
             self._listen_task = None
+
+    async def _stop_and_join_listen(self) -> Exception | None:
+        """Attempt capture release without abandoning the active listen task."""
+        assert self._provider is not None
+        assert self._listen_task is not None
+        stop_error: Exception | None = None
+        try:
+            await self._provider.stop_listening()
+        except Exception as error:
+            stop_error = error
+            LOGGER.exception("[VOICE] capture_stop_failed")
+            self._listen_task.cancel()
+        # A successful vendor stop cooperatively completes capture. If it failed,
+        # cancellation still ensures the asyncio task is explicitly joined.
+        await asyncio.gather(self._listen_task, return_exceptions=True)
+        return stop_error
 
 
 class FusionHatVoiceProvider:

@@ -6,10 +6,10 @@ Normal full-agentic operation uses one readable, startup-only TOML file:
 python main.py --config config/mira-agentic.toml
 ```
 
-The checked-in file is equivalent to spelling out the existing camera,
-cognition, initiative, platform-attention, action, message, continuation,
-goal-closure, and console flags. It does not change any application or agentic
-behavior; it only supplies launch values before existing application setup.
+The checked-in file selects the full agentic camera, cognition, initiative,
+console, and voice configuration, including the file-only local wake settings.
+It supplies launch values before existing application setup rather than adding
+implicit configuration discovery.
 
 ## Schema
 
@@ -34,6 +34,8 @@ goal_closure = true
 
 [voice]
 enabled = true
+wake_word_enabled = true
+wake_word = "mira"
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
 ```
@@ -41,7 +43,8 @@ followup_timeout_seconds = 10
 `hardware`, `camera`, and `cognition` accept the same values as their existing
 CLI options. `runtime.mode` is exactly one of `run`, `console`, or `diagnostics`;
 it maps to neither mode flag, `--console`, or `--diagnostics`, respectively.
-The initiative values and `voice.enabled` must be TOML booleans. Both voice
+The initiative values, `voice.enabled`, and `voice.wake_word_enabled` must be
+TOML booleans. `voice.wake_word` must be a non-empty string. Both voice
 timeouts must be positive TOML numbers. All runtime values must be strings.
 Unknown tables, unknown keys, wrong types, unsupported values, and malformed
 TOML fail before a profile or backend is constructed.
@@ -58,6 +61,8 @@ The file may be partial. Omitted values retain the historical defaults:
 | `runtime.mode` | `"run"` |
 | every `[initiative]` value | `false` |
 | `voice.enabled` | `false` |
+| `voice.wake_word_enabled` | `false` |
+| `voice.wake_word` | `"mira"` |
 | `voice.initial_timeout_seconds` | `18.0` |
 | `voice.followup_timeout_seconds` | `10.0` |
 
@@ -77,7 +82,8 @@ another configuration file.
 The positive `--voice` flag similarly overrides a missing or false
 `voice.enabled`; omitting it preserves the configured value. Physical speech is
 still only available with the Fusion HAT hardware backend. The timeout values
-have no CLI overrides and remain file-configured. See
+and wake settings have no CLI overrides and remain file-configured. Wake mode
+is inert unless voice and the physical Fusion HAT provider are available. See
 [Bounded voice conversation](voice-conversation.md) for the two-turn lifecycle
 and intentionally excluded audio features.
 
