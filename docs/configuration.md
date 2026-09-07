@@ -36,6 +36,7 @@ goal_closure = true
 enabled = true
 wake_word_enabled = true
 wake_words = ["mira", "mirror"]
+tts = "espeak"
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
 ```
@@ -47,6 +48,9 @@ The initiative values, `voice.enabled`, and `voice.wake_word_enabled` must be
 TOML booleans. `voice.wake_words` must be a non-empty TOML array whose entries
 are non-empty strings after trimming. Both voice timeouts must be positive TOML
 numbers. All runtime values must be strings.
+`voice.tts` is `"espeak"` or `"piper"`; Piper additionally requires the
+`voice.piper_model` path to a local `.onnx` model. `--tts` and `--piper-model`
+provide narrow launch overrides for these two values.
 Unknown tables, unknown keys, wrong types, unsupported values, and malformed
 TOML fail before a profile or backend is constructed.
 
@@ -64,6 +68,8 @@ The file may be partial. Omitted values retain the historical defaults:
 | `voice.enabled` | `false` |
 | `voice.wake_word_enabled` | `false` |
 | `voice.wake_words` | `["mira"]` |
+| `voice.tts` | `"espeak"` |
+| `voice.piper_model` | unset |
 | `voice.initial_timeout_seconds` | `18.0` |
 | `voice.followup_timeout_seconds` | `10.0` |
 

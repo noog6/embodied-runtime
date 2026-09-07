@@ -1,6 +1,7 @@
 import asyncio
 import io
 import sys
+import tempfile
 from types import ModuleType
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -8,8 +9,8 @@ import wave
 
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.voice import (
-    FusionHatEspeakTTSProvider, FusionHatVoiceProvider, VoiceInteraction,
-    VoiceSessionPolicy,
+    FusionHatEspeakTTSProvider, FusionHatPiperTTSProvider,
+    FusionHatVoiceProvider, VoiceInteraction, VoiceSessionPolicy,
 )
 
 
@@ -535,6 +536,110 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             ("enable",), ("say", "answer"), ("disable",),
         ])
         self.assertEqual(calls.count(("espeak",)), 1)
+
+    async def test_piper_is_lazy_reused_and_plays_in_memory_wav(self):
+        calls = []
+
+        class Voice:
+            def synthesize_wav(self, text, wav_writer):
+                calls.append(("synthesize", text))
+                wav_writer.setnchannels(1)
+                wav_writer.setsampwidth(2)
+                wav_writer.setframerate(16_000)
+                wav_writer.writeframes(b"\0\0")
+
+        class PiperVoice:
+            @staticmethod
+            def load(path):
+                calls.append(("load", path))
+                return Voice()
+
+        piper = ModuleType("piper")
+        piper.PiperVoice = PiperVoice
+        fusion_hat = ModuleType("fusion_hat")
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append(("enable",))
+        device.disable_speaker = lambda: calls.append(("disable",))
+        with tempfile.NamedTemporaryFile(suffix=".onnx") as model:
+            with patch.dict(sys.modules, {
+                "piper": piper, "fusion_hat": fusion_hat,
+                "fusion_hat.device": device,
+            }), patch("embodied_runtime.voice.subprocess.run") as run:
+                provider = FusionHatPiperTTSProvider(model_path=model.name)
+                self.assertEqual(calls, [])
+                await provider.speak("Exact **text**")
+                await provider.close()
+                await provider.speak("again")
+
+        self.assertEqual(calls.count(("load", model.name)), 1)
+        self.assertIn(("synthesize", "Exact **text**"), calls)
+        self.assertEqual(calls[:3], [
+            ("load", model.name), ("synthesize", "Exact **text**"), ("enable",)
+        ])
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertEqual(call.args[0], ["aplay", "--quiet"])
+            self.assertTrue(call.kwargs["input"].startswith(b"RIFF"))
+            self.assertTrue(call.kwargs["check"])
+
+    async def test_piper_synthesis_failure_never_enables_speaker(self):
+        calls = []
+
+        class PiperVoice:
+            @staticmethod
+            def load(path):
+                return PiperVoice()
+
+            def synthesize_wav(self, text, wav_writer):
+                raise RuntimeError("synthesis failed")
+
+        piper = ModuleType("piper")
+        piper.PiperVoice = PiperVoice
+        fusion_hat = ModuleType("fusion_hat")
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append("enable")
+        device.disable_speaker = lambda: calls.append("disable")
+        with tempfile.NamedTemporaryFile(suffix=".onnx") as model, patch.dict(
+            sys.modules, {"piper": piper, "fusion_hat": fusion_hat,
+                          "fusion_hat.device": device}
+        ):
+            provider = FusionHatPiperTTSProvider(model_path=model.name)
+            with self.assertRaisesRegex(RuntimeError, "synthesis failed"):
+                await provider.speak("hello")
+        self.assertEqual(calls, [])
+
+    async def test_piper_playback_failure_disables_speaker(self):
+        calls = []
+
+        class Voice:
+            def synthesize_wav(self, text, wav_writer):
+                wav_writer.setnchannels(1); wav_writer.setsampwidth(2)
+                wav_writer.setframerate(16_000); wav_writer.writeframes(b"\0\0")
+
+        piper = ModuleType("piper")
+        piper.PiperVoice = type("PiperVoice", (), {"load": staticmethod(lambda _: Voice())})
+        fusion_hat = ModuleType("fusion_hat")
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append("enable")
+        device.disable_speaker = lambda: calls.append("disable")
+        with tempfile.NamedTemporaryFile(suffix=".onnx") as model, patch.dict(
+            sys.modules, {"piper": piper, "fusion_hat": fusion_hat,
+                          "fusion_hat.device": device}
+        ), patch("embodied_runtime.voice.subprocess.run",
+                 side_effect=RuntimeError("playback failed")):
+            provider = FusionHatPiperTTSProvider(model_path=model.name)
+            with self.assertRaisesRegex(RuntimeError, "playback failed"):
+                await provider.speak("hello")
+        self.assertEqual(calls, ["enable", "disable"])
+
+    def test_piper_unavailable_fails_at_construction_with_install_guidance(self):
+        unrelated_piper = ModuleType("piper")
+        with tempfile.NamedTemporaryFile(suffix=".onnx") as model, patch.dict(
+            sys.modules, {"piper": unrelated_piper}
+        ), self.assertRaisesRegex(
+            RuntimeError, r"unavailable; install it with: .*\[piper\]"
+        ):
+            FusionHatPiperTTSProvider(model_path=model.name)
 
     async def test_fusion_engagement_cue_is_fixed_short_wav_and_disables_speaker(self):
         calls = []

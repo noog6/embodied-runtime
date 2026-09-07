@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import importlib
 import io
 import logging
 import math
+from pathlib import Path
 import struct
 import subprocess
 from typing import Protocol
@@ -15,6 +17,10 @@ import wave
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class PiperTTSUnavailableError(RuntimeError):
+    """Raised when selected local Piper speech cannot be initialized."""
 
 
 class VoiceProvider(Protocol):
@@ -343,6 +349,69 @@ class FusionHatEspeakTTSProvider:
         self._ensure_tts().say(text)
 
     async def close(self) -> None:
+        try:
+            from fusion_hat.device import disable_speaker
+        except ImportError:
+            return
+        await asyncio.to_thread(disable_speaker)
+
+
+class FusionHatPiperTTSProvider:
+    """Lazy, reusable Piper voice with Fusion HAT speaker playback."""
+
+    def __init__(self, *, model_path: str | Path) -> None:
+        try:
+            PiperVoice = getattr(importlib.import_module("piper"), "PiperVoice")
+        except (ImportError, AttributeError) as error:
+            raise PiperTTSUnavailableError(
+                "Piper speech synthesis is unavailable; install it with: "
+                "python -m pip install -e '.[piper]'"
+            ) from error
+        self._model_path = Path(model_path).expanduser()
+        if not self._model_path.is_file():
+            raise PiperTTSUnavailableError(
+                f"Piper model file not found: {self._model_path}"
+            )
+        self._piper_voice_class = PiperVoice
+        self._voice = None
+
+    def _ensure_voice(self):
+        if self._voice is None:
+            self._voice = self._piper_voice_class.load(str(self._model_path))
+        return self._voice
+
+    async def speak(self, text: str) -> None:
+        await asyncio.to_thread(self._speak_sync, text)
+
+    def _speak_sync(self, text: str) -> None:
+        output = io.BytesIO()
+        wav_writer = wave.open(output, "wb")
+        try:
+            self._ensure_voice().synthesize_wav(text, wav_writer)
+        except Exception:
+            # An early synthesis error can leave wave without enough format
+            # information to close cleanly; do not mask the useful Piper error.
+            try:
+                wav_writer.close()
+            except wave.Error:
+                pass
+            raise
+        else:
+            wav_writer.close()
+        wav_bytes = output.getvalue()
+
+        try:
+            from fusion_hat.device import disable_speaker, enable_speaker
+        except ImportError as error:
+            raise RuntimeError("Fusion HAT speaker control is unavailable") from error
+        enable_speaker()
+        try:
+            subprocess.run(["aplay", "--quiet"], input=wav_bytes, check=True)
+        finally:
+            disable_speaker()
+
+    async def close(self) -> None:
+        """Disable physical output without unloading the cached neural voice."""
         try:
             from fusion_hat.device import disable_speaker
         except ImportError:

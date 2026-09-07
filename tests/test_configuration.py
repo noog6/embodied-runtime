@@ -166,6 +166,29 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(effective.voice_initial_timeout_seconds, 15)
         self.assertEqual(effective.voice_followup_timeout_seconds, 8.5)
 
+    def test_tts_defaults_to_espeak_and_accepts_piper_model(self):
+        self.assertEqual(HISTORICAL_DEFAULTS.voice_tts, "espeak")
+        self.assertIsNone(HISTORICAL_DEFAULTS.voice_piper_model)
+        effective = self.effective(
+            "[voice]\ntts='piper'\npiper_model='~/voice.onnx'\n"
+        )
+        self.assertEqual(effective.voice_tts, "piper")
+        self.assertEqual(effective.voice_piper_model, "~/voice.onnx")
+
+    def test_piper_requires_model_path_after_cli_and_file_merge(self):
+        path = self.write("[voice]\ntts='piper'\n")
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            main(["--config", str(path)])
+        overridden = self.effective(
+            "[voice]\ntts='piper'\npiper_model='/configured/model.onnx'\n",
+            ("--tts", "espeak"),
+        )
+        self.assertEqual(overridden.voice_tts, "espeak")
+
+    def test_unsupported_tts_is_rejected(self):
+        with self.assertRaisesRegex(ConfigurationError, "unsupported value for voice.tts"):
+            load_runtime_config(self.write("[voice]\ntts='cloud'\n"))
+
     def test_wake_words_configuration_is_strict_and_opt_in(self):
         effective = self.effective(
             "[voice]\nenabled=true\nwake_word_enabled=true\n"

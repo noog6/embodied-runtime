@@ -41,7 +41,9 @@ from embodied_runtime.sensing.camera.picamera2 import (
 )
 from embodied_runtime.voice import (
     FusionHatEspeakTTSProvider,
+    FusionHatPiperTTSProvider,
     FusionHatVoiceProvider,
+    PiperTTSUnavailableError,
     VoiceSessionPolicy,
 )
 
@@ -77,6 +79,10 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         "--voice", action="store_true", default=configurable_default(False),
         help="enable bounded Fusion HAT voice interaction",
     )
+    parser.add_argument("--tts", choices=("espeak", "piper"),
+                        default=configurable_default("espeak"))
+    parser.add_argument("--piper-model", default=configurable_default(None),
+                        help="path to a local Piper .onnx voice model")
     parser.add_argument("--initiative", action="store_true",
                         default=configurable_default(False),
                         help="enable bounded goal-directed cognition initiative")
@@ -157,6 +163,8 @@ def parse_launch_arguments(
     args.voice_enabled = effective.voice_enabled
     args.voice_wake_word_enabled = effective.voice_wake_word_enabled
     args.voice_wake_words = effective.voice_wake_words
+    args.tts = effective.voice_tts
+    args.piper_model = effective.voice_piper_model
     args.voice_initial_timeout_seconds = effective.voice_initial_timeout_seconds
     args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
     return parser, args, effective
@@ -202,6 +210,15 @@ def build_platform_monitor_policy(
     if args.console:
         return PlatformMonitorPolicy(heartbeat_interval_seconds=None)
     return None
+
+
+def build_text_to_speech_provider(args: argparse.Namespace):
+    """Build the selected physical speech adapter only when voice is available."""
+    if not (args.voice_enabled and args.hardware == "fusion-hat"):
+        return None
+    if args.tts == "piper":
+        return FusionHatPiperTTSProvider(model_path=args.piper_model)
+    return FusionHatEspeakTTSProvider()
 
 
 def run_fusion_servo_test(
@@ -296,7 +313,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         operator_message_sink=message_channel,
         platform_monitor_policy=build_platform_monitor_policy(args),
         voice_provider=(FusionHatVoiceProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
-        text_to_speech_provider=(FusionHatEspeakTTSProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
+        text_to_speech_provider=build_text_to_speech_provider(args),
         voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
         voice_wake_words=(args.voice_wake_words if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
     )
@@ -374,6 +391,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--vision requires a camera backend")
     if args.vision != "none" and args.cognition == "none":
         parser.error("--vision requires a cognition backend")
+    if args.tts == "piper" and not args.piper_model:
+        parser.error("Piper TTS requires voice.piper_model or --piper-model")
     if args.fusion_servo_test is not None and not args.diagnostics:
         parser.error("--fusion-servo-test requires --diagnostics")
     if args.fusion_servo_test is not None and args.hardware != "fusion-hat":
@@ -396,7 +415,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         return asyncio.run(_run_application(args, profile))
-    except (FusionHatUnavailableError, Picamera2UnavailableError) as error:
+    except (
+        FusionHatUnavailableError, Picamera2UnavailableError,
+        PiperTTSUnavailableError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
