@@ -8,19 +8,37 @@ import wave
 
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.voice import (
-    FusionHatVoiceProvider, VoiceInteraction, VoiceSessionPolicy,
+    FusionHatEspeakTTSProvider, FusionHatVoiceProvider, VoiceInteraction,
+    VoiceSessionPolicy,
 )
+
+
+class FakeTextToSpeechProvider:
+    def __init__(self, voice_provider=None):
+        self.spoken = []
+        self.close_calls = 0
+        self.voice_provider = voice_provider
+
+    async def speak(self, text):
+        if self.voice_provider is not None and getattr(
+            self.voice_provider, "active_listeners", 0
+        ):
+            raise AssertionError("TTS overlapped microphone listening")
+        self.spoken.append(text)
+
+    async def close(self):
+        self.close_calls += 1
 
 
 class FakeVoiceProvider:
     def __init__(self, results=()):
         self.results = list(results)
-        self.spoken = []
         self.stop_calls = 0
         self.close_calls = 0
         self.cue_calls = 0
         self.listening = asyncio.Event()
         self.release = asyncio.Event()
+        self.tts = FakeTextToSpeechProvider(self)
 
     async def listen(self):
         self.listening.set()
@@ -35,9 +53,6 @@ class FakeVoiceProvider:
     async def stop_listening(self):
         self.stop_calls += 1
         self.release.set()
-
-    async def speak(self, text):
-        self.spoken.append(text)
 
     async def play_engagement_cue(self):
         self.cue_calls += 1
@@ -54,9 +69,9 @@ class CoordinatedVoiceProvider:
         self.listen_calls = 0
         self.active_listeners = 0
         self.max_active_listeners = 0
-        self.spoken = []
         self.cue_calls = 0
         self.timeline = []
+        self.tts = FakeTextToSpeechProvider(self)
 
     async def listen(self):
         self.timeline.append("listen")
@@ -71,9 +86,6 @@ class CoordinatedVoiceProvider:
     async def stop_listening(self):
         if self.active_listeners:
             await self.results.put(None)
-
-    async def speak(self, text):
-        self.spoken.append(text)
 
     async def play_engagement_cue(self):
         if self.active_listeners:
@@ -98,7 +110,7 @@ class CoordinatedVoiceProvider:
 class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
     def interaction(self, provider, cognition):
         return VoiceInteraction(
-            provider, cognition,
+            provider, provider.tts, cognition,
             VoiceSessionPolicy(initial_timeout_seconds=0.01,
                                followup_timeout_seconds=0.01),
         )
@@ -110,16 +122,17 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await voice.start(source="console"), "Voice session closed.")
         self.assertEqual(cognition.await_args_list[0].args, ("first",))
         self.assertEqual(cognition.await_args_list[1].args, ("follow up",))
-        self.assertEqual(provider.spoken, ["one", "two"])
+        self.assertEqual(provider.tts.spoken, ["one", "two"])
         self.assertFalse(voice.active)
         self.assertEqual(provider.close_calls, 1)
+        self.assertEqual(provider.tts.close_calls, 1)
 
     async def test_followup_timeout_does_not_call_cognition_again(self):
         provider = FakeVoiceProvider(["first"])
         cognition = AsyncMock(return_value="answer")
         await self.interaction(provider, cognition).start()
         cognition.assert_awaited_once_with("first")
-        self.assertEqual(provider.spoken, ["answer"])
+        self.assertEqual(provider.tts.spoken, ["answer"])
 
     async def test_initial_timeout_does_not_invoke_cognition(self):
         provider = FakeVoiceProvider()
@@ -130,7 +143,9 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_only_one_session_can_be_active(self):
         provider = FakeVoiceProvider()
-        voice = VoiceInteraction(provider, AsyncMock(), VoiceSessionPolicy(1, 1))
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), VoiceSessionPolicy(1, 1)
+        )
         first = asyncio.create_task(voice.start())
         await provider.listening.wait()
         self.assertEqual(await voice.start(), "Voice interaction already active.")
@@ -141,7 +156,9 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shutdown_cancels_active_listen_and_cleans_up(self):
         provider = FakeVoiceProvider()
-        voice = VoiceInteraction(provider, AsyncMock(), VoiceSessionPolicy(1, 1))
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), VoiceSessionPolicy(1, 1)
+        )
         running = asyncio.create_task(voice.start())
         await provider.listening.wait()
         await voice.stop()
@@ -157,16 +174,37 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tts_failure_closes_and_cleans_up(self):
         provider = FakeVoiceProvider(["hello"])
-        provider.speak = AsyncMock(side_effect=RuntimeError("speaker failed"))
+        provider.tts.speak = AsyncMock(side_effect=RuntimeError("speaker failed"))
         result = await self.interaction(provider, AsyncMock(return_value="answer")).start()
         self.assertIn("speaker failed", result)
         self.assertEqual(provider.close_calls, 1)
 
     async def test_unavailable_is_clean(self):
         cognition = AsyncMock()
-        result = await VoiceInteraction(None, cognition).start(source="console")
+        result = await VoiceInteraction(None, None, cognition).start(source="console")
         self.assertEqual(result, "Voice interaction unavailable.")
         cognition.assert_not_awaited()
+
+    async def test_input_without_tts_is_unavailable(self):
+        provider = FakeVoiceProvider(["hello"])
+        cognition = AsyncMock()
+        voice = VoiceInteraction(provider, None, cognition)
+        self.assertFalse(voice.available)
+        self.assertEqual(await voice.start(), "Voice interaction unavailable.")
+        cognition.assert_not_awaited()
+
+    async def test_cleanup_failures_do_not_abandon_the_other_provider(self):
+        provider = FakeVoiceProvider([None])
+        provider.close = AsyncMock(side_effect=RuntimeError("input close failed"))
+        with self.assertLogs("embodied_runtime.voice", level="ERROR"):
+            await self.interaction(provider, AsyncMock()).start()
+        self.assertEqual(provider.tts.close_calls, 1)
+
+        provider = FakeVoiceProvider([None])
+        provider.tts.close = AsyncMock(side_effect=RuntimeError("TTS close failed"))
+        with self.assertLogs("embodied_runtime.voice", level="ERROR"):
+            await self.interaction(provider, AsyncMock()).start()
+        self.assertEqual(provider.close_calls, 1)
 
     async def test_console_voice_is_explicit_trigger(self):
         app = type("App", (), {})()
@@ -187,7 +225,8 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         app.profile = type("Profile", (), {"name": "Test"})()
         app.handle_operator_utterance = AsyncMock(return_value="answer")
         app.voice = VoiceInteraction(
-            FakeVoiceProvider(["spoken", None]),
+            (voice_provider := FakeVoiceProvider(["spoken", None])),
+            voice_provider.tts,
             app.handle_operator_utterance,
             VoiceSessionPolicy(0.01, 0.01),
         )
@@ -220,7 +259,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         voice = self.interaction(provider, AsyncMock(return_value="answer\nline"))
         with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
             await voice.start()
-        self.assertEqual(provider.spoken, ["answer\nline"])
+        self.assertEqual(provider.tts.spoken, ["answer\nline"])
         self.assertTrue(any(
             "[VOICE] response turn=1 text='answer\\nline'" in entry
             for entry in logs.output
@@ -230,7 +269,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider = CoordinatedVoiceProvider()
         cognition = AsyncMock(return_value="answer")
         voice = VoiceInteraction(
-            provider, cognition, VoiceSessionPolicy(0.05, 0.01),
+            provider, provider.tts, cognition, VoiceSessionPolicy(0.05, 0.01),
             wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
@@ -253,7 +292,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             "[VOICE] wake_detected heard='mirror'" in entry for entry in logs.output
         ))
         self.assertEqual(cognition.await_args_list[0].args, ("question",))
-        self.assertEqual(provider.spoken, ["answer"])
+        self.assertEqual(provider.tts.spoken, ["answer"])
         self.assertEqual(provider.cue_calls, 1)
         self.assertLess(provider.timeline.index("cue"), provider.timeline.index("listen", 2))
         self.assertEqual(provider.max_active_listeners, 1)
@@ -264,7 +303,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider = CoordinatedVoiceProvider()
         cognition = AsyncMock(return_value="answer")
         voice = VoiceInteraction(
-            provider, cognition, VoiceSessionPolicy(0.05, 0.01),
+            provider, provider.tts, cognition, VoiceSessionPolicy(0.05, 0.01),
             wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
@@ -281,7 +320,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider = CoordinatedVoiceProvider()
         cognition = AsyncMock()
         voice = VoiceInteraction(
-            provider, cognition, wake_words=["mira", "mirror"]
+            provider, provider.tts, cognition, wake_words=["mira", "mirror"]
         )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
@@ -308,7 +347,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_wake_resumes_after_voice_session_failure(self):
         provider = CoordinatedVoiceProvider()
         voice = VoiceInteraction(
-            provider, AsyncMock(side_effect=RuntimeError("failed")),
+            provider, provider.tts, AsyncMock(side_effect=RuntimeError("failed")),
             VoiceSessionPolicy(0.05, 0.01), wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
@@ -326,7 +365,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider.play_engagement_cue = AsyncMock(side_effect=RuntimeError("no audio"))
         cognition = AsyncMock(return_value="answer")
         voice = VoiceInteraction(
-            provider, cognition, VoiceSessionPolicy(0.05, 0.01),
+            provider, provider.tts, cognition, VoiceSessionPolicy(0.05, 0.01),
             wake_words=["mira"],
         )
         voice.start_wake_listener()
@@ -347,7 +386,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_session_suspends_and_resumes_wake_listener(self):
         provider = CoordinatedVoiceProvider()
         voice = VoiceInteraction(
-            provider, AsyncMock(return_value="answer"),
+            provider, provider.tts, AsyncMock(return_value="answer"),
             VoiceSessionPolicy(0.05, 0.01), wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
@@ -365,7 +404,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_shutdown_cooperatively_stops_wake_capture(self):
         provider = CoordinatedVoiceProvider()
         voice = VoiceInteraction(
-            provider, AsyncMock(), wake_words=["mira", "mirror"]
+            provider, provider.tts, AsyncMock(), wake_words=["mira", "mirror"]
         )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
@@ -376,7 +415,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_wake_shutdown_stop_failure_still_joins_all_tasks(self):
         provider = CoordinatedVoiceProvider()
         voice = VoiceInteraction(
-            provider, AsyncMock(return_value="answer"),
+            provider, provider.tts, AsyncMock(return_value="answer"),
             VoiceSessionPolicy(1, 1), wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
@@ -399,7 +438,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider = CoordinatedVoiceProvider()
         provider.stop_listening = AsyncMock(side_effect=RuntimeError("stop failed"))
         voice = VoiceInteraction(
-            provider, AsyncMock(), VoiceSessionPolicy(0.01, 0.01)
+            provider, provider.tts, AsyncMock(), VoiceSessionPolicy(0.01, 0.01)
         )
 
         result = await voice.start()
@@ -422,7 +461,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         provider.stop_listening = fail_once
         voice = VoiceInteraction(
-            provider, AsyncMock(return_value="answer"),
+            provider, provider.tts, AsyncMock(return_value="answer"),
             VoiceSessionPolicy(0.05, 0.01), wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
@@ -478,7 +517,11 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             "fusion_hat.device": device,
         }
         provider = FusionHatVoiceProvider()
-        voice = VoiceInteraction(provider, AsyncMock(return_value="answer"))
+        tts_provider = FusionHatEspeakTTSProvider()
+        voice = VoiceInteraction(
+            provider, tts_provider, AsyncMock(return_value="answer")
+        )
+        self.assertNotIn(("espeak",), calls)
 
         with patch.dict(sys.modules, modules):
             await voice.start()

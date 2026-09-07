@@ -59,7 +59,12 @@ from embodied_runtime.state import (
     BodyState, LifecycleState, PowerState, PresenceState, RuntimeState,
 )
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
-from embodied_runtime.voice import VoiceInteraction, VoiceProvider, VoiceSessionPolicy
+from embodied_runtime.voice import (
+    TextToSpeechProvider,
+    VoiceInteraction,
+    VoiceProvider,
+    VoiceSessionPolicy,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -266,6 +271,7 @@ class RobotApplication:
         temporal_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic_clock: Callable[[], float] | None = None,
         voice_provider: VoiceProvider | None = None,
+        text_to_speech_provider: TextToSpeechProvider | None = None,
         voice_policy: VoiceSessionPolicy = VoiceSessionPolicy(),
         voice_wake_words: list[str] | None = None,
     ) -> None:
@@ -284,6 +290,7 @@ class RobotApplication:
         )
         self.voice = VoiceInteraction(
             voice_provider,
+            text_to_speech_provider,
             lambda text: self.handle_operator_utterance(text),
             voice_policy,
             wake_words=voice_wake_words,

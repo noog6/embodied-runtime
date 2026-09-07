@@ -13,9 +13,13 @@ is deterministic speaker output: it does not involve cognition, TTS, working
 memory, RuntimeState, or the EventBus. Manual `voice` sessions do not play it.
 
 1. Enter `voice` in the runtime console.
-2. Local SunFounder Vosk STT listens for one utterance (18 seconds by default).
-3. Recognized text follows the same application cognition path as console `ask`.
-4. Local SunFounder Espeak TTS speaks only the final text response.
+2. The Fusion HAT voice provider uses local SunFounder Vosk STT to listen for
+   one utterance (18 seconds by default).
+3. `VoiceInteraction` sends recognized text through the same application
+   cognition path as console `ask`.
+4. The final text response is passed unchanged to a separate
+   `TextToSpeechProvider`; the current `FusionHatEspeakTTSProvider`
+   implementation speaks it locally with SunFounder eSpeak.
 5. Vosk offers one short follow-up opportunity (10 seconds by default).
 6. The session closes after the second utterance or a timeout, stops capture, and
    disables the Fusion HAT speaker.
@@ -31,6 +35,20 @@ wake_words = ["mira", "mirror"]
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
 ```
+
+The application constructs `FusionHatVoiceProvider` for local STT and wake
+interaction and `FusionHatEspeakTTSProvider` for physical speech output as
+distinct dependencies. `VoiceInteraction` coordinates both providers and
+keeps microphone capture and TTS playback half-duplex. It owns session-level
+coordination while input cleanup remains with the voice provider and speaker
+cleanup remains with the TTS provider; failure to close either one does not
+skip the other cleanup attempt.
+
+eSpeak remains the only configured TTS implementation, but the narrow
+`TextToSpeechProvider` seam makes speech output replaceable without changing
+the bounded conversation architecture. Piper or a network-backed provider can
+be added later; no additional TTS provider, selection configuration, fallback,
+or runtime switching is introduced by this refactor.
 
 Wake listening is local trigger detection, not an always-running cloud
 conversation. Matching is case-insensitive and exact after trimming against
