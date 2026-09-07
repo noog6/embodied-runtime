@@ -12,6 +12,9 @@ openai = [
 piper = [
     "piper-tts>=1.8,<2",
 ]
+elevenlabs = [
+    "elevenlabs>=2.66,<3",
+]
 
 [tool.setuptools.packages.find]
 include = ["embodied_runtime*"]

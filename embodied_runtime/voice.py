@@ -9,6 +9,7 @@ import importlib
 import io
 import logging
 import math
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -26,6 +27,10 @@ class PiperTTSUnavailableError(RuntimeError):
 
 class OpenAITTSUnavailableError(RuntimeError):
     """Raised when selected hosted OpenAI speech cannot be initialized."""
+
+
+class ElevenLabsTTSUnavailableError(RuntimeError):
+    """Raised when selected hosted ElevenLabs speech cannot be initialized."""
 
 
 class VoiceProvider(Protocol):
@@ -495,6 +500,86 @@ class FusionHatOpenAITTSProvider:
         except ImportError:
             return
         await asyncio.to_thread(disable_speaker)
+
+
+class FusionHatElevenLabsTTSProvider:
+    """Reusable hosted ElevenLabs synthesis with Fusion HAT playback."""
+
+    def __init__(
+        self, *, voice_id: str, model: str = "eleven_flash_v2_5"
+    ) -> None:
+        api_key = os.environ.get("ELEVENLABS_API_KEY")
+        if not api_key:
+            raise ElevenLabsTTSUnavailableError(
+                "ElevenLabs speech synthesis is unavailable; set ELEVENLABS_API_KEY"
+            )
+        try:
+            AsyncElevenLabs = getattr(
+                importlib.import_module("elevenlabs.client"), "AsyncElevenLabs"
+            )
+        except (ImportError, AttributeError) as error:
+            raise ElevenLabsTTSUnavailableError(
+                "ElevenLabs speech synthesis is unavailable; install it with: "
+                "python -m pip install -e '.[elevenlabs]'"
+            ) from error
+        self._model = model
+        self._voice_id = voice_id
+        self._client = AsyncElevenLabs(api_key=api_key)
+
+    async def speak(self, text: str) -> None:
+        try:
+            from fusion_hat.device import disable_speaker, enable_speaker
+        except ImportError as error:
+            raise RuntimeError("Fusion HAT speaker control is unavailable") from error
+
+        await asyncio.to_thread(disable_speaker)
+        synthesis_started = time.perf_counter()
+        audio_chunks = self._client.text_to_speech.convert(
+            voice_id=self._voice_id,
+            text=text,
+            model_id=self._model,
+            output_format="wav_24000",
+        )
+        wav_bytes = b"".join([chunk async for chunk in audio_chunks])
+        synthesis_ms = int((time.perf_counter() - synthesis_started) * 1_000)
+        _log_synthesis_completed(synthesis_ms, wav_bytes)
+
+        def play() -> None:
+            enable_speaker()
+            try:
+                playback_started = time.perf_counter()
+                subprocess.run(["aplay", "--quiet"], input=wav_bytes, check=True)
+                playback_ms = int(
+                    (time.perf_counter() - playback_started) * 1_000
+                )
+            finally:
+                disable_speaker()
+            LOGGER.info("[TTS] playback_completed duration_ms=%s", playback_ms)
+
+        await asyncio.to_thread(play)
+
+    async def close(self) -> None:
+        """Disable output while retaining the reusable ElevenLabs client."""
+        try:
+            from fusion_hat.device import disable_speaker
+        except ImportError:
+            return
+        await asyncio.to_thread(disable_speaker)
+
+
+def _log_synthesis_completed(synthesis_ms: int, wav_bytes: bytes) -> None:
+    """Log hosted synthesis timing without making WAV inspection operational."""
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+            audio_ms = int(wav.getnframes() * 1_000 / wav.getframerate())
+    except (EOFError, wave.Error, ZeroDivisionError):
+        LOGGER.info("[TTS] synthesis_completed duration_ms=%s", synthesis_ms)
+    else:
+        LOGGER.info(
+            "[TTS] synthesis_completed duration_ms=%s audio_ms=%s",
+            synthesis_ms,
+            audio_ms,
+        )
 
 
 def _engagement_cue_wav() -> bytes:
