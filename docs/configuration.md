@@ -53,8 +53,13 @@ numbers. All runtime values must be strings.
 provide narrow launch overrides. OpenAI TTS uses `voice.openai_tts_model` and
 `voice.openai_tts_voice`, overridden by `--openai-tts-model` and
 `--openai-tts-voice`; credentials remain environment-provided. ElevenLabs uses
-`voice.elevenlabs_tts_model` and the required `voice.elevenlabs_tts_voice_id`,
-overridden by `--elevenlabs-tts-model` and `--elevenlabs-tts-voice-id`. Its API
+`voice.elevenlabs_tts_model`, the required `voice.elevenlabs_tts_voice_id`, and
+`voice.elevenlabs_tts_speed`, overridden by the corresponding
+`--elevenlabs-tts-model`, `--elevenlabs-tts-voice-id`, and
+`--elevenlabs-tts-speed` options. Speed defaults to `1.0`, accepts numeric values
+from `0.7` through `1.2`, and values above `1.0` speed speech up. This is a
+request-level override that does not modify the saved ElevenLabs voice; no
+stability, similarity, style, or speaker-boost setting is overridden. Its API
 key is environment-provided, not TOML.
 Unknown tables, unknown keys, wrong types, unsupported values, and malformed
 TOML fail before a profile or backend is constructed.
@@ -79,6 +84,7 @@ The file may be partial. Omitted values retain the historical defaults:
 | `voice.openai_tts_voice` | `"cedar"` |
 | `voice.elevenlabs_tts_model` | `"eleven_flash_v2_5"` |
 | `voice.elevenlabs_tts_voice_id` | unset (required when selected) |
+| `voice.elevenlabs_tts_speed` | `1.0` (range `0.7`–`1.2`) |
 | `voice.initial_timeout_seconds` | `18.0` |
 | `voice.followup_timeout_seconds` | `10.0` |
 

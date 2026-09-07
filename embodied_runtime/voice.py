@@ -463,19 +463,7 @@ class FusionHatOpenAITTSProvider:
         )
         synthesis_ms = int((time.perf_counter() - synthesis_started) * 1_000)
         wav_bytes = response.content
-        try:
-            with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
-                audio_ms = int(wav.getnframes() * 1_000 / wav.getframerate())
-        except (EOFError, wave.Error, ZeroDivisionError):
-            # Duration is diagnostic only; preserve the existing playback path
-            # when a response cannot be inspected as WAV metadata.
-            LOGGER.info("[TTS] synthesis_completed duration_ms=%s", synthesis_ms)
-        else:
-            LOGGER.info(
-                "[TTS] synthesis_completed duration_ms=%s audio_ms=%s",
-                synthesis_ms,
-                audio_ms,
-            )
+        _log_synthesis_completed(synthesis_ms, wav_bytes)
 
         def play() -> None:
             enable_speaker()
@@ -506,7 +494,11 @@ class FusionHatElevenLabsTTSProvider:
     """Reusable hosted ElevenLabs synthesis with Fusion HAT playback."""
 
     def __init__(
-        self, *, voice_id: str, model: str = "eleven_flash_v2_5"
+        self,
+        *,
+        voice_id: str,
+        model: str = "eleven_flash_v2_5",
+        speed: float = 1.0,
     ) -> None:
         api_key = os.environ.get("ELEVENLABS_API_KEY")
         if not api_key:
@@ -517,6 +509,9 @@ class FusionHatElevenLabsTTSProvider:
             AsyncElevenLabs = getattr(
                 importlib.import_module("elevenlabs.client"), "AsyncElevenLabs"
             )
+            VoiceSettings = getattr(
+                importlib.import_module("elevenlabs"), "VoiceSettings"
+            )
         except (ImportError, AttributeError) as error:
             raise ElevenLabsTTSUnavailableError(
                 "ElevenLabs speech synthesis is unavailable; install it with: "
@@ -524,6 +519,8 @@ class FusionHatElevenLabsTTSProvider:
             ) from error
         self._model = model
         self._voice_id = voice_id
+        self._speed = speed
+        self._voice_settings_type = VoiceSettings
         self._client = AsyncElevenLabs(api_key=api_key)
 
     async def speak(self, text: str) -> None:
@@ -539,6 +536,7 @@ class FusionHatElevenLabsTTSProvider:
             text=text,
             model_id=self._model,
             output_format="wav_24000",
+            voice_settings=self._voice_settings_type(speed=self._speed),
         )
         wav_bytes = b"".join([chunk async for chunk in audio_chunks])
         synthesis_ms = int((time.perf_counter() - synthesis_started) * 1_000)
@@ -571,7 +569,15 @@ def _log_synthesis_completed(synthesis_ms: int, wav_bytes: bytes) -> None:
     """Log hosted synthesis timing without making WAV inspection operational."""
     try:
         with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
-            audio_ms = int(wav.getnframes() * 1_000 / wav.getframerate())
+            frame_size = wav.getnchannels() * wav.getsampwidth()
+            sample_rate = wav.getframerate()
+            if frame_size <= 0 or sample_rate <= 0:
+                raise wave.Error("invalid WAV format")
+            actual_audio_bytes = 0
+            while frames := wav.readframes(4096):
+                actual_audio_bytes += len(frames)
+            actual_frames = actual_audio_bytes // frame_size
+            audio_ms = int(actual_frames * 1_000 / sample_rate)
     except (EOFError, wave.Error, ZeroDivisionError):
         LOGGER.info("[TTS] synthesis_completed duration_ms=%s", synthesis_ms)
     else:
