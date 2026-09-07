@@ -670,6 +670,40 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         return {"openai": openai, "fusion_hat": fusion_hat,
                 "fusion_hat.device": device}
 
+    @staticmethod
+    def wav_bytes(*, frames=16_000, sample_rate=16_000):
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            wav.writeframes(b"\0\0" * frames)
+        return output.getvalue()
+
+    async def test_openai_tts_logs_independent_times_and_wav_duration(self):
+        calls = []
+        audio = self.wav_bytes(frames=4_000, sample_rate=16_000)
+
+        async def create(**kwargs):
+            return type("Response", (), {"content": audio})()
+
+        modules = self.openai_modules(calls, create)
+        with patch.dict(sys.modules, modules), patch(
+            "embodied_runtime.voice.time.perf_counter",
+            side_effect=[1.0, 2.25, 10.0, 10.4],
+        ), patch("embodied_runtime.voice.subprocess.run"), self.assertLogs(
+            "embodied_runtime.voice", level="INFO"
+        ) as logs:
+            provider = FusionHatOpenAITTSProvider()
+            await provider.speak("hello")
+
+        self.assertEqual(logs.output, [
+            "INFO:embodied_runtime.voice:"
+            "[TTS] synthesis_completed duration_ms=1250 audio_ms=250",
+            "INFO:embodied_runtime.voice:"
+            "[TTS] playback_completed duration_ms=400",
+        ])
+
     async def test_openai_tts_requests_exact_wav_and_controls_speaker(self):
         calls = []
 
@@ -709,12 +743,13 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(sys.modules, self.openai_modules(calls, create)), patch(
             "embodied_runtime.voice.subprocess.run"
-        ) as run:
+        ) as run, patch("embodied_runtime.voice.LOGGER.info") as log:
             provider = FusionHatOpenAITTSProvider()
             with self.assertRaisesRegex(RuntimeError, "API failed"):
                 await provider.speak("hello")
         self.assertEqual(calls, ["disable"])
         run.assert_not_called()
+        log.assert_not_called()
 
     async def test_openai_playback_failure_disables_speaker(self):
         calls = []
@@ -724,11 +759,14 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(sys.modules, self.openai_modules(calls, create)), patch(
             "embodied_runtime.voice.subprocess.run", side_effect=RuntimeError("failed")
-        ):
+        ), patch("embodied_runtime.voice.LOGGER.info") as log:
             provider = FusionHatOpenAITTSProvider()
             with self.assertRaisesRegex(RuntimeError, "failed"):
                 await provider.speak("hello")
         self.assertEqual(calls, ["disable", "enable", "disable"])
+        self.assertEqual(log.call_count, 1)
+        self.assertEqual(log.call_args.args[0],
+                         "[TTS] synthesis_completed duration_ms=%s")
 
     def test_openai_unavailable_has_install_guidance(self):
         unrelated_openai = ModuleType("openai")

@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 import struct
 import subprocess
+import time
 from typing import Protocol
 import wave
 
@@ -448,22 +449,42 @@ class FusionHatOpenAITTSProvider:
 
         # A previous failed session must not leave amplification active during I/O.
         await asyncio.to_thread(disable_speaker)
+        synthesis_started = time.perf_counter()
         response = await self._client.audio.speech.create(
             model=self._model,
             voice=self._voice,
             input=text,
             response_format="wav",
         )
+        synthesis_ms = int((time.perf_counter() - synthesis_started) * 1_000)
         wav_bytes = response.content
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+                audio_ms = int(wav.getnframes() * 1_000 / wav.getframerate())
+        except (EOFError, wave.Error, ZeroDivisionError):
+            # Duration is diagnostic only; preserve the existing playback path
+            # when a response cannot be inspected as WAV metadata.
+            LOGGER.info("[TTS] synthesis_completed duration_ms=%s", synthesis_ms)
+        else:
+            LOGGER.info(
+                "[TTS] synthesis_completed duration_ms=%s audio_ms=%s",
+                synthesis_ms,
+                audio_ms,
+            )
 
         def play() -> None:
             enable_speaker()
             try:
+                playback_started = time.perf_counter()
                 subprocess.run(
                     ["aplay", "--quiet"], input=wav_bytes, check=True
                 )
+                playback_ms = int(
+                    (time.perf_counter() - playback_started) * 1_000
+                )
             finally:
                 disable_speaker()
+            LOGGER.info("[TTS] playback_completed duration_ms=%s", playback_ms)
 
         await asyncio.to_thread(play)
 
