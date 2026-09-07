@@ -6,7 +6,11 @@ without an active microphone or model stream.
 
 The implementation is deliberately half-duplex and enters the same bounded
 conversation either from the console `voice` command or an optional local,
-exact recognition of a configured local wake phrase:
+exact recognition of a configured local wake phrase. A wake-triggered session
+first plays a fixed, local acknowledgement chirp (100 ms at 880 Hz, a 20 ms
+pause, then 100 ms at 1,175 Hz) and only then begins turn-1 listening. The cue
+is deterministic speaker output: it does not involve cognition, TTS, working
+memory, RuntimeState, or the EventBus. Manual `voice` sessions do not play it.
 
 1. Enter `voice` in the runtime console.
 2. Local SunFounder Vosk STT listens for one utterance (18 seconds by default).
@@ -34,9 +38,12 @@ the configured phrases. `"mirror"` is intentionally accepted because live Vosk
 testing commonly returned it for the spoken name “Mira”. Ambient non-matches
 remain local and never enter cognition or working memory. There is one
 microphone owner: a manual or wake-triggered bounded
-session cooperatively stops the wake capture, owns recognition through all STT,
-TTS, speaker disable, and cleanup, and only then allows wake listening to
-resume. The manual console command remains available while wake mode is on.
+session cooperatively stops the wake capture, owns recognition through the wake
+cue (when applicable), all STT, TTS, speaker disable, and cleanup, and only then
+allows wake listening to resume. Cue playback finishes and disables the speaker
+before turn-1 microphone capture starts. Failure to play the acknowledgement is
+logged but does not prevent the bounded session. The manual console command
+remains available while wake mode is on.
 
 The Vosk model may be downloaded by the vendor library on the first listen
 command. Initialization and download errors are reported for that session and do

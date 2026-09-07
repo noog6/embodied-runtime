@@ -5,8 +5,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import io
 import logging
+import math
+import struct
+import subprocess
 from typing import Protocol
+import wave
 
 
 LOGGER = logging.getLogger(__name__)
@@ -17,6 +22,7 @@ class VoiceProvider(Protocol):
 
     async def listen(self) -> str | None: ...
     async def stop_listening(self) -> None: ...
+    async def play_engagement_cue(self) -> None: ...
     async def speak(self, text: str) -> None: ...
     async def close(self) -> None: ...
 
@@ -161,6 +167,16 @@ class VoiceInteraction:
     async def _run(self, source: str) -> str:
         assert self._provider is not None
         reason = "initial_timeout"
+        if source == "wake_word":
+            try:
+                await self._provider.play_engagement_cue()
+            except Exception as error:
+                LOGGER.warning(
+                    "[VOICE] engagement_cue status=failed error=%s",
+                    type(error).__name__,
+                )
+            else:
+                LOGGER.info("[VOICE] engagement_cue status=played")
         LOGGER.info("[VOICE] session_started source=%s", source)
         try:
             for turn, timeout in (
@@ -272,6 +288,25 @@ class FusionHatVoiceProvider:
         if self._stt is not None:
             await asyncio.to_thread(self._stt.stop_listening)
 
+    async def play_engagement_cue(self) -> None:
+        """Play the fixed local wake acknowledgement through the HAT speaker."""
+        await asyncio.to_thread(self._play_engagement_cue_sync)
+
+    def _play_engagement_cue_sync(self) -> None:
+        try:
+            from fusion_hat.device import disable_speaker, enable_speaker
+        except ImportError as error:
+            raise RuntimeError("Fusion HAT speaker control is unavailable") from error
+        enable_speaker()
+        try:
+            subprocess.run(
+                ["aplay", "--quiet"],
+                input=_engagement_cue_wav(),
+                check=True,
+            )
+        finally:
+            disable_speaker()
+
     async def speak(self, text: str) -> None:
         await asyncio.to_thread(self._speak_sync, text)
 
@@ -289,3 +324,32 @@ class FusionHatVoiceProvider:
         except ImportError:
             return
         await asyncio.to_thread(disable_speaker)
+
+
+def _engagement_cue_wav() -> bytes:
+    """Return a 220 ms, two-note PCM WAV acknowledgement (880 then 1,175 Hz)."""
+    sample_rate = 16_000
+    amplitude = 7_000
+    note_seconds = 0.1
+    gap_seconds = 0.02
+    ramp_samples = int(sample_rate * 0.01)
+    samples: list[int] = []
+    for index, frequency in enumerate((880.0, 1_175.0)):
+        note_samples = int(sample_rate * note_seconds)
+        for position in range(note_samples):
+            edge = min(position + 1, note_samples - position, ramp_samples)
+            envelope = edge / ramp_samples
+            sample = amplitude * envelope * math.sin(
+                2.0 * math.pi * frequency * position / sample_rate
+            )
+            samples.append(round(sample))
+        if index == 0:
+            samples.extend([0] * int(sample_rate * gap_seconds))
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    return output.getvalue()

@@ -1,8 +1,10 @@
 import asyncio
+import io
 import sys
 from types import ModuleType
 import unittest
 from unittest.mock import AsyncMock, patch
+import wave
 
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.voice import (
@@ -16,6 +18,7 @@ class FakeVoiceProvider:
         self.spoken = []
         self.stop_calls = 0
         self.close_calls = 0
+        self.cue_calls = 0
         self.listening = asyncio.Event()
         self.release = asyncio.Event()
 
@@ -36,6 +39,9 @@ class FakeVoiceProvider:
     async def speak(self, text):
         self.spoken.append(text)
 
+    async def play_engagement_cue(self):
+        self.cue_calls += 1
+
     async def close(self):
         self.close_calls += 1
 
@@ -49,8 +55,11 @@ class CoordinatedVoiceProvider:
         self.active_listeners = 0
         self.max_active_listeners = 0
         self.spoken = []
+        self.cue_calls = 0
+        self.timeline = []
 
     async def listen(self):
+        self.timeline.append("listen")
         self.listen_calls += 1
         self.active_listeners += 1
         self.max_active_listeners = max(self.max_active_listeners, self.active_listeners)
@@ -65,6 +74,12 @@ class CoordinatedVoiceProvider:
 
     async def speak(self, text):
         self.spoken.append(text)
+
+    async def play_engagement_cue(self):
+        if self.active_listeners:
+            raise AssertionError("cue overlapped microphone listening")
+        self.cue_calls += 1
+        self.timeline.append("cue")
 
     async def close(self):
         pass
@@ -239,6 +254,8 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(cognition.await_args_list[0].args, ("question",))
         self.assertEqual(provider.spoken, ["answer"])
+        self.assertEqual(provider.cue_calls, 1)
+        self.assertLess(provider.timeline.index("cue"), provider.timeline.index("listen", 2))
         self.assertEqual(provider.max_active_listeners, 1)
         await voice.stop()
         self.assertFalse(voice.wake_active)
@@ -285,6 +302,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         cognition.assert_not_awaited()
+        self.assertEqual(provider.cue_calls, 0)
         await voice.stop()
 
     async def test_wake_resumes_after_voice_session_failure(self):
@@ -300,6 +318,30 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         await provider.feed("question")
         await provider.wait_for_listens(3)
         self.assertEqual(provider.max_active_listeners, 1)
+        self.assertEqual(provider.cue_calls, 1)
+        await voice.stop()
+
+    async def test_wake_cue_failure_still_starts_session(self):
+        provider = CoordinatedVoiceProvider()
+        provider.play_engagement_cue = AsyncMock(side_effect=RuntimeError("no audio"))
+        cognition = AsyncMock(return_value="answer")
+        voice = VoiceInteraction(
+            provider, cognition, VoiceSessionPolicy(0.05, 0.01),
+            wake_words=["mira"],
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
+            await provider.feed("mira")
+            await provider.wait_for_listens(2)
+            await provider.feed("question")
+            await provider.wait_for_listens(4)
+        provider.play_engagement_cue.assert_awaited_once_with()
+        self.assertEqual(cognition.await_args.args, ("question",))
+        self.assertTrue(any(
+            "engagement_cue status=failed error=RuntimeError" in entry
+            for entry in logs.output
+        ))
         await voice.stop()
 
     async def test_manual_session_suspends_and_resumes_wake_listener(self):
@@ -317,6 +359,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         await manual
         await provider.wait_for_listens(4)
         self.assertEqual(provider.max_active_listeners, 1)
+        self.assertEqual(provider.cue_calls, 0)
         await voice.stop()
 
     async def test_shutdown_cooperatively_stops_wake_capture(self):
@@ -449,3 +492,26 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             ("enable",), ("say", "answer"), ("disable",),
         ])
         self.assertEqual(calls.count(("espeak",)), 1)
+
+    async def test_fusion_engagement_cue_is_fixed_short_wav_and_disables_speaker(self):
+        calls = []
+        fusion_hat = ModuleType("fusion_hat")
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append(("enable",))
+        device.disable_speaker = lambda: calls.append(("disable",))
+        modules = {"fusion_hat": fusion_hat, "fusion_hat.device": device}
+        provider = FusionHatVoiceProvider()
+
+        with patch.dict(sys.modules, modules), patch(
+            "embodied_runtime.voice.subprocess.run"
+        ) as run:
+            await provider.play_engagement_cue()
+
+        self.assertEqual(calls, [("enable",), ("disable",)])
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["aplay", "--quiet"])
+        self.assertTrue(run.call_args.kwargs["check"])
+        with wave.open(io.BytesIO(run.call_args.kwargs["input"]), "rb") as wav:
+            self.assertEqual((wav.getnchannels(), wav.getsampwidth()), (1, 2))
+            self.assertEqual(wav.getframerate(), 16_000)
+            self.assertEqual(wav.getnframes(), 3_520)
