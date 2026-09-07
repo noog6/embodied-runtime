@@ -84,4 +84,12 @@ def configure_logging(
     ))
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
     for logger_name in ("httpx", "httpcore", "openai"):
-        logging.getLogger(logger_name).setLevel(logging.WARNING)
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.WARNING)
+        # The OpenAI SDK may configure its dependency loggers after application
+        # startup.  A handler owned by ``httpx`` handles records before they
+        # reach the filtered root handler, so protect the emitting logger too.
+        # In particular, httpx emits its request summary on the exact ``httpx``
+        # logger rather than on ``httpx._client``.
+        if not any(isinstance(item, TransportNoiseFilter) for item in logger.filters):
+            logger.addFilter(TransportNoiseFilter())
