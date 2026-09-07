@@ -10,12 +10,15 @@ from embodied_runtime.config import (
 
 
 EXPLICIT_AGENTIC = [
-    "--camera", "picamera2", "--cognition", "openai-responses",
+    "--hardware", "fusion-hat", "--camera", "picamera2",
+    "--cognition", "openai-responses",
     "--vision", "openai-responses", "--initiative",
     "--initiative-platform-attention", "--initiative-actions",
     "--initiative-messages", "--initiative-continuation",
     "--initiative-goal-closure", "--console",
-    "--voice",
+    "--voice", "--tts", "openai",
+    "--openai-tts-model", "gpt-4o-mini-tts",
+    "--openai-tts-voice", "marin",
 ]
 
 
@@ -41,7 +44,9 @@ class ConfigurationTests(unittest.TestCase):
             explicit.__class__(**{
                 **explicit.__dict__,
                 "voice_wake_word_enabled": True,
-                "voice_wake_words": ["mira", "mirror"],
+                "voice_wake_words": ["mira", "mirror", "huh mirror"],
+                "voice_initial_timeout_seconds": 18,
+                "voice_followup_timeout_seconds": 12,
             }),
         )
 
