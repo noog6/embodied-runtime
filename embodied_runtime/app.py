@@ -267,7 +267,7 @@ class RobotApplication:
         monotonic_clock: Callable[[], float] | None = None,
         voice_provider: VoiceProvider | None = None,
         voice_policy: VoiceSessionPolicy = VoiceSessionPolicy(),
-        voice_wake_word: str | None = None,
+        voice_wake_words: list[str] | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -286,7 +286,7 @@ class RobotApplication:
             voice_provider,
             lambda text: self.handle_operator_utterance(text),
             voice_policy,
-            wake_word=voice_wake_word,
+            wake_words=voice_wake_words,
         )
         self._active_goal: ActiveGoal | None = None
         self._reflexes = tuple(reflexes)

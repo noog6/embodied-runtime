@@ -215,7 +215,8 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider = CoordinatedVoiceProvider()
         cognition = AsyncMock(return_value="answer")
         voice = VoiceInteraction(
-            provider, cognition, VoiceSessionPolicy(0.05, 0.01), wake_word="mira"
+            provider, cognition, VoiceSessionPolicy(0.05, 0.01),
+            wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
@@ -223,7 +224,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         await provider.wait_for_listens(2)
         cognition.assert_not_awaited()
         with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
-            await provider.feed("  MiRa  ")
+            await provider.feed("mirror")
             await provider.wait_for_listens(3)
             await provider.feed("question")
             await provider.wait_for_listens(4)
@@ -234,7 +235,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             for entry in logs.output
         ))
         self.assertTrue(any(
-            "[VOICE] wake_detected word='mira'" in entry for entry in logs.output
+            "[VOICE] wake_detected heard='mirror'" in entry for entry in logs.output
         ))
         self.assertEqual(cognition.await_args_list[0].args, ("question",))
         self.assertEqual(provider.spoken, ["answer"])
@@ -242,15 +243,35 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         await voice.stop()
         self.assertFalse(voice.wake_active)
 
+    async def test_wake_matching_is_case_insensitive_and_trimmed(self):
+        provider = CoordinatedVoiceProvider()
+        cognition = AsyncMock(return_value="answer")
+        voice = VoiceInteraction(
+            provider, cognition, VoiceSessionPolicy(0.05, 0.01),
+            wake_words=["mira", "mirror"],
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        await provider.feed(" MIRA ")
+        await provider.wait_for_listens(2)
+        await provider.feed("question")
+        await provider.wait_for_listens(3)
+        await provider.wait_for_listens(4)
+        self.assertEqual(cognition.await_args.args, ("question",))
+        await voice.stop()
+
     async def test_rejected_wake_logs_only_non_empty_text_and_never_calls_cognition(self):
         provider = CoordinatedVoiceProvider()
         cognition = AsyncMock()
-        voice = VoiceInteraction(provider, cognition, wake_word="mira")
+        voice = VoiceInteraction(
+            provider, cognition, wake_words=["mira", "mirror"]
+        )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
 
         with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
-            for listen_count, result in enumerate(("mirror", "   ", None), start=2):
+            results = ("hi mirror", "unrelated speech", "   ", None)
+            for listen_count, result in enumerate(results, start=2):
                 await provider.feed(result)
                 await provider.wait_for_listens(listen_count)
 
@@ -258,8 +279,9 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             rejected,
             [
+                "INFO:embodied_runtime.voice:[VOICE] wake_rejected text='hi mirror'",
                 "INFO:embodied_runtime.voice:"
-                "[VOICE] wake_rejected text='mirror' expected='mira'"
+                "[VOICE] wake_rejected text='unrelated speech'",
             ],
         )
         cognition.assert_not_awaited()
@@ -269,7 +291,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider = CoordinatedVoiceProvider()
         voice = VoiceInteraction(
             provider, AsyncMock(side_effect=RuntimeError("failed")),
-            VoiceSessionPolicy(0.05, 0.01), wake_word="mira",
+            VoiceSessionPolicy(0.05, 0.01), wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
@@ -284,7 +306,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider = CoordinatedVoiceProvider()
         voice = VoiceInteraction(
             provider, AsyncMock(return_value="answer"),
-            VoiceSessionPolicy(0.05, 0.01), wake_word="mira",
+            VoiceSessionPolicy(0.05, 0.01), wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
@@ -299,7 +321,9 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shutdown_cooperatively_stops_wake_capture(self):
         provider = CoordinatedVoiceProvider()
-        voice = VoiceInteraction(provider, AsyncMock(), wake_word="mira")
+        voice = VoiceInteraction(
+            provider, AsyncMock(), wake_words=["mira", "mirror"]
+        )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
         await asyncio.wait_for(voice.stop(), 0.1)
@@ -310,7 +334,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider = CoordinatedVoiceProvider()
         voice = VoiceInteraction(
             provider, AsyncMock(return_value="answer"),
-            VoiceSessionPolicy(1, 1), wake_word="mira",
+            VoiceSessionPolicy(1, 1), wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
@@ -356,7 +380,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         provider.stop_listening = fail_once
         voice = VoiceInteraction(
             provider, AsyncMock(return_value="answer"),
-            VoiceSessionPolicy(0.05, 0.01), wake_word="mira",
+            VoiceSessionPolicy(0.05, 0.01), wake_words=["mira", "mirror"],
         )
         voice.start_wake_listener()
         await provider.wait_for_listens(1)

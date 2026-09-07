@@ -41,7 +41,7 @@ class ConfigurationTests(unittest.TestCase):
             explicit.__class__(**{
                 **explicit.__dict__,
                 "voice_wake_word_enabled": True,
-                "voice_wake_word": "mira",
+                "voice_wake_words": ["mira", "mirror"],
             }),
         )
 
@@ -136,6 +136,7 @@ class ConfigurationTests(unittest.TestCase):
             ("[initiative]\nfree_will=10\n", "initiative.free_will"),
             ("[cognition]\napi_key='secret'\n", "cognition"),
             ("[voice]\ngain_db=30\n", "voice.gain_db"),
+            ("[voice]\nwake_word='mira'\n", "voice.wake_word"),
         ):
             with self.subTest(key=key), self.assertRaisesRegex(
                 ConfigurationError, f"unknown configuration key: {key}"
@@ -165,14 +166,30 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(effective.voice_initial_timeout_seconds, 15)
         self.assertEqual(effective.voice_followup_timeout_seconds, 8.5)
 
-    def test_wake_word_configuration_is_strict_and_opt_in(self):
+    def test_wake_words_configuration_is_strict_and_opt_in(self):
         effective = self.effective(
-            "[voice]\nenabled=true\nwake_word_enabled=true\nwake_word='Mira'\n"
+            "[voice]\nenabled=true\nwake_word_enabled=true\n"
+            "wake_words=['Mira', 'mirror']\n"
         )
         self.assertTrue(effective.voice_wake_word_enabled)
-        self.assertEqual(effective.voice_wake_word, "Mira")
-        with self.assertRaisesRegex(ConfigurationError, "wake_word must be"):
-            load_runtime_config(self.write("[voice]\nwake_word=''\n"))
+        self.assertEqual(effective.voice_wake_words, ["Mira", "mirror"])
+
+    def test_wake_words_default_is_mira(self):
+        self.assertEqual(HISTORICAL_DEFAULTS.voice_wake_words, ["mira"])
+        self.assertEqual(self.effective("[voice]\nenabled=true\n").voice_wake_words,
+                         ["mira"])
+
+    def test_invalid_wake_words_are_rejected(self):
+        for value, message in (
+            ("[]", "must be a non-empty list"),
+            ("['mira', '   ']", "entries must be non-empty strings"),
+            ("['mira', 7]", "entries must be non-empty strings"),
+            ("'mira'", "must be a non-empty list"),
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ConfigurationError, message
+            ):
+                load_runtime_config(self.write(f"[voice]\nwake_words={value}\n"))
 
     def test_unsupported_enums_are_rejected(self):
         for key in ("hardware", "camera", "cognition", "vision", "mode"):
