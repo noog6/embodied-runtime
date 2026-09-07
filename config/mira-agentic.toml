@@ -1,10 +1,20 @@
 [runtime]
 profile = "mira"
-hardware = "virtual"
+hardware = "fusion-hat"
 camera = "picamera2"
 cognition = "openai-responses"
 vision = "openai-responses"
 mode = "console"
+
+[voice]
+enabled = true
+wake_word_enabled = true
+wake_words = ["mira", "mirror", "huh mirror"]
+tts = "openai"
+openai_tts_model = "gpt-4o-mini-tts"
+openai_tts_voice = "marin"
+initial_timeout_seconds = 18
+followup_timeout_seconds = 12
 
 [initiative]
 enabled = true
@@ -14,9 +24,3 @@ messages = true
 continuation = true
 goal_closure = true
 
-[voice]
-enabled = true
-wake_word_enabled = true
-wake_words = ["mira", "mirror"]
-initial_timeout_seconds = 18
-followup_timeout_seconds = 10
