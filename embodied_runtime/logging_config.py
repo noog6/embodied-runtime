@@ -11,15 +11,16 @@ from embodied_runtime.console_style import (
 )
 
 
+_TRANSPORT_LOG_NAMESPACES = ("httpx", "httpcore", "httpx2", "httpcore2", "openai")
+
+
 class TransportNoiseFilter(logging.Filter):
     """Suppress successful HTTP client chatter while retaining problems."""
-
-    _NAMESPACES = ("httpx", "httpcore", "openai")
 
     def filter(self, record: logging.LogRecord) -> bool:
         is_transport = any(
             record.name == namespace or record.name.startswith(namespace + ".")
-            for namespace in self._NAMESPACES
+            for namespace in _TRANSPORT_LOG_NAMESPACES
         )
         return not is_transport or record.levelno >= logging.WARNING
 
@@ -83,7 +84,7 @@ def configure_logging(
         colour=colour_enabled(stream, disabled=no_color),
     ))
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
-    for logger_name in ("httpx", "httpcore", "openai"):
+    for logger_name in _TRANSPORT_LOG_NAMESPACES:
         logger = logging.getLogger(logger_name)
         logger.setLevel(logging.WARNING)
         # The OpenAI SDK may configure its dependency loggers after application

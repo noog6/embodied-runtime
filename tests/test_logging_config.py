@@ -1,5 +1,6 @@
-import logging
+import importlib.util
 import io
+import logging
 import re
 import unittest
 from unittest.mock import patch
@@ -87,8 +88,13 @@ class LoggingFormatterTests(unittest.TestCase):
             ("httpx", logging.INFO, "httpx info"),
             ("httpx._client", logging.INFO, "httpx child info"),
             ("httpcore.some_child", logging.INFO, "httpcore child info"),
+            ("httpx2", logging.INFO, "httpx2 info"),
+            ("httpx2._client", logging.INFO, "httpx2 child info"),
+            ("httpcore2.some_child", logging.INFO, "httpcore2 child info"),
             ("openai.some_child", logging.INFO, "openai child info"),
             ("httpx._client", logging.WARNING, "transport warning"),
+            ("httpx2._client", logging.WARNING, "httpx2 warning"),
+            ("httpcore2.some_child", logging.ERROR, "httpcore2 error"),
             ("openai._base_client", logging.ERROR, "client error"),
             ("embodied_runtime.test", logging.INFO, "first-party info"),
             ("other_dependency", logging.INFO, "unrelated info"),
@@ -102,8 +108,13 @@ class LoggingFormatterTests(unittest.TestCase):
         self.assertNotIn("httpx info", output)
         self.assertNotIn("httpx child info", output)
         self.assertNotIn("httpcore child info", output)
+        self.assertNotIn("httpx2 info", output)
+        self.assertNotIn("httpx2 child info", output)
+        self.assertNotIn("httpcore2 child info", output)
         self.assertNotIn("openai child info", output)
         self.assertIn("transport warning", output)
+        self.assertIn("httpx2 warning", output)
+        self.assertIn("httpcore2 error", output)
         self.assertIn("client error", output)
         self.assertIn("first-party info", output)
         self.assertIn("unrelated info", output)
@@ -132,10 +143,9 @@ class LoggingFormatterTests(unittest.TestCase):
         self.assertIn("HTTP transport warning", runtime_stream.getvalue())
 
     def test_real_httpx_request_summary_uses_protected_logger(self):
-        try:
-            import httpx
-        except ImportError:
+        if importlib.util.find_spec("httpx") is None:
             self.skipTest("httpx is available only with the OpenAI extra")
+        import httpx
 
         runtime_stream = io.StringIO()
         library_stream = io.StringIO()
@@ -147,6 +157,29 @@ class LoggingFormatterTests(unittest.TestCase):
         try:
             with httpx.Client(transport=httpx.MockTransport(
                 lambda request: httpx.Response(200, text="ok")
+            )) as client:
+                client.post("https://api.openai.com/v1/responses")
+        finally:
+            logger.removeHandler(handler)
+
+        self.assertNotIn("HTTP Request", library_stream.getvalue())
+        self.assertNotIn("HTTP Request", runtime_stream.getvalue())
+
+    def test_real_httpx2_request_summary_uses_protected_logger(self):
+        if importlib.util.find_spec("httpx2") is None:
+            self.skipTest("httpx2 is available only with the current OpenAI extra")
+        import httpx2
+
+        runtime_stream = io.StringIO()
+        library_stream = io.StringIO()
+        configure_logging(stream=runtime_stream, no_color=True)
+        logger = logging.getLogger("httpx2")
+        handler = logging.StreamHandler(library_stream)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            with httpx2.Client(transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, text="ok")
             )) as client:
                 client.post("https://api.openai.com/v1/responses")
         finally:
