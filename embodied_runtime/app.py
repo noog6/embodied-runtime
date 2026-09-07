@@ -267,6 +267,7 @@ class RobotApplication:
         monotonic_clock: Callable[[], float] | None = None,
         voice_provider: VoiceProvider | None = None,
         voice_policy: VoiceSessionPolicy = VoiceSessionPolicy(),
+        voice_wake_word: str | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -285,6 +286,7 @@ class RobotApplication:
             voice_provider,
             lambda text: self.handle_operator_utterance(text),
             voice_policy,
+            wake_word=voice_wake_word,
         )
         self._active_goal: ActiveGoal | None = None
         self._reflexes = tuple(reflexes)
@@ -477,6 +479,7 @@ class RobotApplication:
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
         await self.events.publish(ApplicationStarted(source="application"))
         self._platform_monitor.start()
+        self.voice.start_wake_listener()
         LOGGER.info(
             "[PULSE] monitor=platform interval_s=%s heartbeat_s=%s status=ready",
             str(self._platform_monitor.policy.interval_seconds),

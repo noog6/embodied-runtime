@@ -80,6 +80,19 @@ class LoggingFormatterTests(unittest.TestCase):
         self.assertNotIn("\x1b[", stream.getvalue())
         self.assertIn("[BODY] status=ready", stream.getvalue())
 
+    def test_http_info_is_quiet_but_warnings_and_first_party_info_remain(self):
+        stream = io.StringIO()
+        configure_logging(stream=stream, no_color=True)
+        logging.getLogger("httpx").info("HTTP Request: 200 OK")
+        logging.getLogger("httpcore").warning("transport warning")
+        logging.getLogger("openai").error("client error")
+        logging.getLogger("embodied_runtime.test").info("[COGNITION] request=started")
+        output = stream.getvalue()
+        self.assertNotIn("200 OK", output)
+        self.assertIn("transport warning", output)
+        self.assertIn("client error", output)
+        self.assertIn("[COGNITION] request=started", output)
+
     def test_plain_formatter_preserves_timestamp_and_category_exactly(self):
         plain = "2026-09-03T18:28:27.968-04:00 [ATTENTION] decision=wake"
         record = logging.LogRecord(

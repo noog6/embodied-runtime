@@ -40,6 +40,46 @@ class FakeVoiceProvider:
         self.close_calls += 1
 
 
+class CoordinatedVoiceProvider:
+    """Queue-driven provider that detects overlapping microphone ownership."""
+
+    def __init__(self):
+        self.results = asyncio.Queue()
+        self.listen_calls = 0
+        self.active_listeners = 0
+        self.max_active_listeners = 0
+        self.spoken = []
+
+    async def listen(self):
+        self.listen_calls += 1
+        self.active_listeners += 1
+        self.max_active_listeners = max(self.max_active_listeners, self.active_listeners)
+        try:
+            return await self.results.get()
+        finally:
+            self.active_listeners -= 1
+
+    async def stop_listening(self):
+        if self.active_listeners:
+            await self.results.put(None)
+
+    async def speak(self, text):
+        self.spoken.append(text)
+
+    async def close(self):
+        pass
+
+    async def feed(self, text):
+        await self.results.put(text)
+
+    async def wait_for_listens(self, count):
+        for _ in range(100):
+            if self.listen_calls >= count:
+                return
+            await asyncio.sleep(0.001)
+        raise AssertionError(f"expected {count} listens, got {self.listen_calls}")
+
+
 class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
     def interaction(self, provider, cognition):
         return VoiceInteraction(
@@ -159,6 +199,155 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             "[VOICE] heard turn=1 text='recognized words'" in entry
             for entry in logs.output
         ))
+
+    async def test_response_subtitle_exactly_matches_tts_text(self):
+        provider = FakeVoiceProvider(["recognized words", None])
+        voice = self.interaction(provider, AsyncMock(return_value="answer\nline"))
+        with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
+            await voice.start()
+        self.assertEqual(provider.spoken, ["answer\nline"])
+        self.assertTrue(any(
+            "[VOICE] response turn=1 text='answer\\nline'" in entry
+            for entry in logs.output
+        ))
+
+    async def test_local_wake_filters_ambient_and_resumes_after_session(self):
+        provider = CoordinatedVoiceProvider()
+        cognition = AsyncMock(return_value="answer")
+        voice = VoiceInteraction(
+            provider, cognition, VoiceSessionPolicy(0.05, 0.01), wake_word="mira"
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        await provider.feed("background speech")
+        await provider.wait_for_listens(2)
+        cognition.assert_not_awaited()
+        with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
+            await provider.feed("  MiRa  ")
+            await provider.wait_for_listens(3)
+            await provider.feed("question")
+            await provider.wait_for_listens(4)
+            # Let the bounded follow-up time out and the local wake capture resume.
+            await provider.wait_for_listens(5)
+        self.assertTrue(any(
+            "[VOICE] session_started source=wake_word" in entry
+            for entry in logs.output
+        ))
+        self.assertEqual(cognition.await_args_list[0].args, ("question",))
+        self.assertEqual(provider.spoken, ["answer"])
+        self.assertEqual(provider.max_active_listeners, 1)
+        await voice.stop()
+        self.assertFalse(voice.wake_active)
+
+    async def test_wake_resumes_after_voice_session_failure(self):
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(
+            provider, AsyncMock(side_effect=RuntimeError("failed")),
+            VoiceSessionPolicy(0.05, 0.01), wake_word="mira",
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        await provider.feed("mira")
+        await provider.wait_for_listens(2)
+        await provider.feed("question")
+        await provider.wait_for_listens(3)
+        self.assertEqual(provider.max_active_listeners, 1)
+        await voice.stop()
+
+    async def test_manual_session_suspends_and_resumes_wake_listener(self):
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(
+            provider, AsyncMock(return_value="answer"),
+            VoiceSessionPolicy(0.05, 0.01), wake_word="mira",
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        manual = asyncio.create_task(voice.start(source="console"))
+        await provider.wait_for_listens(2)
+        await provider.feed("manual question")
+        await provider.wait_for_listens(3)
+        await manual
+        await provider.wait_for_listens(4)
+        self.assertEqual(provider.max_active_listeners, 1)
+        await voice.stop()
+
+    async def test_shutdown_cooperatively_stops_wake_capture(self):
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(provider, AsyncMock(), wake_word="mira")
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        await asyncio.wait_for(voice.stop(), 0.1)
+        self.assertFalse(voice.wake_active)
+        self.assertEqual(provider.active_listeners, 0)
+
+    async def test_wake_shutdown_stop_failure_still_joins_all_tasks(self):
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(
+            provider, AsyncMock(return_value="answer"),
+            VoiceSessionPolicy(1, 1), wake_word="mira",
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        session = asyncio.create_task(voice.start(source="console"))
+        await provider.wait_for_listens(2)
+        provider.stop_listening = AsyncMock(side_effect=RuntimeError("stop failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "stop failed"):
+            await voice.stop()
+        with self.assertRaises(asyncio.CancelledError):
+            await session
+
+        self.assertFalse(voice.wake_active)
+        self.assertFalse(voice.active)
+        self.assertIsNone(voice._wake_task)
+        self.assertEqual(provider.active_listeners, 0)
+
+    async def test_timeout_stop_failure_still_joins_listen_task(self):
+        provider = CoordinatedVoiceProvider()
+        provider.stop_listening = AsyncMock(side_effect=RuntimeError("stop failed"))
+        voice = VoiceInteraction(
+            provider, AsyncMock(), VoiceSessionPolicy(0.01, 0.01)
+        )
+
+        result = await voice.start()
+
+        self.assertIn("stop failed", result)
+        self.assertEqual(provider.active_listeners, 0)
+        self.assertIsNone(voice._listen_task)
+
+    async def test_failed_manual_wake_handoff_remains_recoverable(self):
+        provider = CoordinatedVoiceProvider()
+        original_stop = provider.stop_listening
+        stop_calls = 0
+
+        async def fail_once():
+            nonlocal stop_calls
+            stop_calls += 1
+            if stop_calls == 1:
+                raise RuntimeError("handoff failed")
+            await original_stop()
+
+        provider.stop_listening = fail_once
+        voice = VoiceInteraction(
+            provider, AsyncMock(return_value="answer"),
+            VoiceSessionPolicy(0.05, 0.01), wake_word="mira",
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+
+        with self.assertRaisesRegex(RuntimeError, "handoff failed"):
+            await voice.start(source="console")
+        self.assertFalse(voice._session_pending)
+        self.assertTrue(voice._wake_enabled.is_set())
+        self.assertTrue(voice.wake_active)
+
+        recovered = asyncio.create_task(voice.start(source="console"))
+        await provider.wait_for_listens(2)
+        await provider.feed("question")
+        await recovered
+        await provider.wait_for_listens(4)
+        self.assertTrue(voice.wake_active)
+        await voice.stop()
 
     async def test_fusion_provider_reenables_speaker_across_sessions(self):
         calls = []
