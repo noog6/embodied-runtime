@@ -175,6 +175,27 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(effective.voice_tts, "piper")
         self.assertEqual(effective.voice_piper_model, "~/voice.onnx")
 
+    def test_openai_tts_defaults_and_cli_precedence(self):
+        effective = self.effective("[voice]\ntts='openai'\n")
+        self.assertEqual(effective.voice_tts, "openai")
+        self.assertEqual(effective.voice_openai_tts_model, "gpt-4o-mini-tts")
+        self.assertEqual(effective.voice_openai_tts_voice, "cedar")
+
+        effective = self.effective(
+            "[voice]\ntts='openai'\nopenai_tts_model='configured-model'\n"
+            "openai_tts_voice='configured-voice'\n",
+            ("--openai-tts-model", "cli-model", "--openai-tts-voice", "cli-voice"),
+        )
+        self.assertEqual(effective.voice_openai_tts_model, "cli-model")
+        self.assertEqual(effective.voice_openai_tts_voice, "cli-voice")
+
+    def test_openai_tts_values_must_be_strings(self):
+        for key in ("openai_tts_model", "openai_tts_voice"):
+            with self.subTest(key=key), self.assertRaisesRegex(
+                ConfigurationError, f"voice.{key} must be a string"
+            ):
+                load_runtime_config(self.write(f"[voice]\n{key}=7\n"))
+
     def test_piper_requires_model_path_after_cli_and_file_merge(self):
         path = self.write("[voice]\ntts='piper'\n")
         with patch("sys.stderr"), self.assertRaises(SystemExit):
