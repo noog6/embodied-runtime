@@ -6,7 +6,7 @@ without an active microphone or model stream.
 
 The implementation is deliberately half-duplex and enters the same bounded
 conversation either from the console `voice` command or an optional local,
-exact wake-word recognition of "Mira":
+exact recognition of a configured local wake phrase:
 
 1. Enter `voice` in the runtime console.
 2. Local SunFounder Vosk STT listens for one utterance (18 seconds by default).
@@ -23,15 +23,17 @@ minimal configuration is:
 [voice]
 enabled = true
 wake_word_enabled = true
-wake_word = "mira"
+wake_words = ["mira", "mirror"]
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
 ```
 
 Wake listening is local trigger detection, not an always-running cloud
-conversation. Ambient recognition is discarded unless its stripped,
-case-insensitive value is exactly `mira`; it never enters cognition or working
-memory. There is one microphone owner: a manual or wake-triggered bounded
+conversation. Matching is case-insensitive and exact after trimming against
+the configured phrases. `"mirror"` is intentionally accepted because live Vosk
+testing commonly returned it for the spoken name “Mira”. Ambient non-matches
+remain local and never enter cognition or working memory. There is one
+microphone owner: a manual or wake-triggered bounded
 session cooperatively stops the wake capture, owns recognition through all STT,
 TTS, speaker disable, and cleanup, and only then allows wake listening to
 resume. The manual console command remains available while wake mode is on.

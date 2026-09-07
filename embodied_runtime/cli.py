@@ -152,7 +152,7 @@ def parse_launch_arguments(
     args.initiative_goal_closure = effective.initiative_goal_closure
     args.voice_enabled = effective.voice_enabled
     args.voice_wake_word_enabled = effective.voice_wake_word_enabled
-    args.voice_wake_word = effective.voice_wake_word
+    args.voice_wake_words = effective.voice_wake_words
     args.voice_initial_timeout_seconds = effective.voice_initial_timeout_seconds
     args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
     return parser, args, effective
@@ -293,7 +293,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         platform_monitor_policy=build_platform_monitor_policy(args),
         voice_provider=(FusionHatVoiceProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
         voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
-        voice_wake_word=(args.voice_wake_word if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
+        voice_wake_words=(args.voice_wake_words if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
     )
     if args.diagnostics:
         try:

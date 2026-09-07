@@ -33,7 +33,7 @@ class InitiativeFileConfig:
 class VoiceFileConfig:
     enabled: bool | None = None
     wake_word_enabled: bool | None = None
-    wake_word: str | None = None
+    wake_words: list[str] | None = None
     initial_timeout_seconds: float | None = None
     followup_timeout_seconds: float | None = None
 
@@ -63,7 +63,7 @@ class LaunchConfiguration:
     initiative_goal_closure: bool
     voice_enabled: bool
     voice_wake_word_enabled: bool
-    voice_wake_word: str
+    voice_wake_words: list[str]
     voice_initial_timeout_seconds: float
     voice_followup_timeout_seconds: float
 
@@ -73,7 +73,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     initiative=False, initiative_platform_attention=False,
     initiative_actions=False, initiative_messages=False,
     initiative_continuation=False, initiative_goal_closure=False,
-    voice_enabled=False, voice_wake_word_enabled=False, voice_wake_word="mira",
+    voice_enabled=False, voice_wake_word_enabled=False, voice_wake_words=["mira"],
     voice_initial_timeout_seconds=18.0,
     voice_followup_timeout_seconds=10.0,
 )
@@ -84,7 +84,7 @@ _INITIATIVE_KEYS = {
     "goal_closure",
 }
 _VOICE_KEYS = {
-    "enabled", "wake_word_enabled", "wake_word", "initial_timeout_seconds",
+    "enabled", "wake_word_enabled", "wake_words", "initial_timeout_seconds",
     "followup_timeout_seconds",
 }
 _ENUMS = {
@@ -137,10 +137,17 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         voice["wake_word_enabled"], bool
     ):
         raise ConfigurationError("voice.wake_word_enabled must be boolean")
-    if "wake_word" in voice and (
-        not isinstance(voice["wake_word"], str) or not voice["wake_word"].strip()
-    ):
-        raise ConfigurationError("voice.wake_word must be a non-empty string")
+    if "wake_words" in voice:
+        wake_words = voice["wake_words"]
+        if not isinstance(wake_words, list) or not wake_words:
+            raise ConfigurationError("voice.wake_words must be a non-empty list")
+        if any(
+            not isinstance(wake_word, str) or not wake_word.strip()
+            for wake_word in wake_words
+        ):
+            raise ConfigurationError(
+                "voice.wake_words entries must be non-empty strings"
+            )
     for key in ("initial_timeout_seconds", "followup_timeout_seconds"):
         if key in voice and (isinstance(voice[key], bool) or not isinstance(voice[key], (int, float)) or voice[key] <= 0):
             raise ConfigurationError(f"voice.{key} must be a positive number")
@@ -197,7 +204,7 @@ def resolve_launch_configuration(
         ),
         voice_enabled=opt_in("voice", voice.enabled, False),
         voice_wake_word_enabled=voice.wake_word_enabled or False,
-        voice_wake_word=voice.wake_word or "mira",
+        voice_wake_words=voice.wake_words or ["mira"],
         voice_initial_timeout_seconds=(voice.initial_timeout_seconds if voice.initial_timeout_seconds is not None else 18.0),
         voice_followup_timeout_seconds=(voice.followup_timeout_seconds if voice.followup_timeout_seconds is not None else 10.0),
     )

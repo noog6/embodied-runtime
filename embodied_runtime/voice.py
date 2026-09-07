@@ -40,14 +40,16 @@ class VoiceInteraction:
         handle_utterance: Callable[[str], Awaitable[str]],
         policy: VoiceSessionPolicy = VoiceSessionPolicy(),
         *,
-        wake_word: str | None = None,
+        wake_words: list[str] | None = None,
     ) -> None:
         self._provider = provider
         self._handle_utterance = handle_utterance
         self._policy = policy
         self._session_task: asyncio.Task[str] | None = None
         self._listen_task: asyncio.Task[str | None] | None = None
-        self._wake_word = wake_word.casefold().strip() if wake_word else None
+        self._wake_words = frozenset(
+            word.strip().casefold() for word in wake_words or ()
+        )
         self._wake_task: asyncio.Task[None] | None = None
         self._wake_enabled = asyncio.Event()
         self._microphone_lock = asyncio.Lock()
@@ -94,7 +96,7 @@ class VoiceInteraction:
         """Start application-owned local wake recognition when configured."""
         if (
             self._provider is None
-            or self._wake_word is None
+            or not self._wake_words
             or self._wake_task is not None
         ):
             return
@@ -111,20 +113,21 @@ class VoiceInteraction:
                 if self._stopping:
                     break
                 LOGGER.info(
-                    "[VOICE] wake_listener word=%r status=ready", self._wake_word
+                    "[VOICE] wake_listener words=%r status=ready",
+                    sorted(self._wake_words),
                 )
                 async with self._microphone_lock:
                     if not self._wake_enabled.is_set() or self._stopping:
                         continue
                     heard = await self._provider.listen()
                 normalized = heard.strip().casefold() if heard is not None else ""
-                if normalized == self._wake_word:
-                    LOGGER.info("[VOICE] wake_detected word=%r", self._wake_word)
+                if normalized in self._wake_words:
+                    LOGGER.info("[VOICE] wake_detected heard=%r", heard.strip())
                     await self.start(source="wake_word")
                 elif normalized:
                     LOGGER.info(
-                        "[VOICE] wake_rejected text=%r expected=%r",
-                        heard.strip(), self._wake_word,
+                        "[VOICE] wake_rejected text=%r",
+                        heard.strip(),
                     )
         except asyncio.CancelledError:
             raise

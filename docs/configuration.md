@@ -35,7 +35,7 @@ goal_closure = true
 [voice]
 enabled = true
 wake_word_enabled = true
-wake_word = "mira"
+wake_words = ["mira", "mirror"]
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
 ```
@@ -44,8 +44,9 @@ followup_timeout_seconds = 10
 CLI options. `runtime.mode` is exactly one of `run`, `console`, or `diagnostics`;
 it maps to neither mode flag, `--console`, or `--diagnostics`, respectively.
 The initiative values, `voice.enabled`, and `voice.wake_word_enabled` must be
-TOML booleans. `voice.wake_word` must be a non-empty string. Both voice
-timeouts must be positive TOML numbers. All runtime values must be strings.
+TOML booleans. `voice.wake_words` must be a non-empty TOML array whose entries
+are non-empty strings after trimming. Both voice timeouts must be positive TOML
+numbers. All runtime values must be strings.
 Unknown tables, unknown keys, wrong types, unsupported values, and malformed
 TOML fail before a profile or backend is constructed.
 
@@ -62,7 +63,7 @@ The file may be partial. Omitted values retain the historical defaults:
 | every `[initiative]` value | `false` |
 | `voice.enabled` | `false` |
 | `voice.wake_word_enabled` | `false` |
-| `voice.wake_word` | `"mira"` |
+| `voice.wake_words` | `["mira"]` |
 | `voice.initial_timeout_seconds` | `18.0` |
 | `voice.followup_timeout_seconds` | `10.0` |
 
