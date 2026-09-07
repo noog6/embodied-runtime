@@ -80,18 +80,33 @@ class LoggingFormatterTests(unittest.TestCase):
         self.assertNotIn("\x1b[", stream.getvalue())
         self.assertIn("[BODY] status=ready", stream.getvalue())
 
-    def test_http_info_is_quiet_but_warnings_and_first_party_info_remain(self):
+    def test_transport_filter_suppresses_only_namespaced_info(self):
         stream = io.StringIO()
         configure_logging(stream=stream, no_color=True)
-        logging.getLogger("httpx").info("HTTP Request: 200 OK")
-        logging.getLogger("httpcore").warning("transport warning")
-        logging.getLogger("openai").error("client error")
-        logging.getLogger("embodied_runtime.test").info("[COGNITION] request=started")
+        records = (
+            ("httpx", logging.INFO, "httpx info"),
+            ("httpx._client", logging.INFO, "httpx child info"),
+            ("httpcore.some_child", logging.INFO, "httpcore child info"),
+            ("openai.some_child", logging.INFO, "openai child info"),
+            ("httpx._client", logging.WARNING, "transport warning"),
+            ("openai._base_client", logging.ERROR, "client error"),
+            ("embodied_runtime.test", logging.INFO, "first-party info"),
+            ("other_dependency", logging.INFO, "unrelated info"),
+        )
+        for name, level, message in records:
+            # Set child loggers explicitly to reproduce libraries that override
+            # the configured ancestor logger level.
+            logging.getLogger(name).setLevel(logging.INFO)
+            logging.getLogger(name).log(level, message)
         output = stream.getvalue()
-        self.assertNotIn("200 OK", output)
+        self.assertNotIn("httpx info", output)
+        self.assertNotIn("httpx child info", output)
+        self.assertNotIn("httpcore child info", output)
+        self.assertNotIn("openai child info", output)
         self.assertIn("transport warning", output)
         self.assertIn("client error", output)
-        self.assertIn("[COGNITION] request=started", output)
+        self.assertIn("first-party info", output)
+        self.assertIn("unrelated info", output)
 
     def test_plain_formatter_preserves_timestamp_and_category_exactly(self):
         plain = "2026-09-03T18:28:27.968-04:00 [ATTENTION] decision=wake"

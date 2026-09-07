@@ -233,11 +233,37 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             "[VOICE] session_started source=wake_word" in entry
             for entry in logs.output
         ))
+        self.assertTrue(any(
+            "[VOICE] wake_detected word='mira'" in entry for entry in logs.output
+        ))
         self.assertEqual(cognition.await_args_list[0].args, ("question",))
         self.assertEqual(provider.spoken, ["answer"])
         self.assertEqual(provider.max_active_listeners, 1)
         await voice.stop()
         self.assertFalse(voice.wake_active)
+
+    async def test_rejected_wake_logs_only_non_empty_text_and_never_calls_cognition(self):
+        provider = CoordinatedVoiceProvider()
+        cognition = AsyncMock()
+        voice = VoiceInteraction(provider, cognition, wake_word="mira")
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+
+        with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
+            for listen_count, result in enumerate(("mirror", "   ", None), start=2):
+                await provider.feed(result)
+                await provider.wait_for_listens(listen_count)
+
+        rejected = [entry for entry in logs.output if "wake_rejected" in entry]
+        self.assertEqual(
+            rejected,
+            [
+                "INFO:embodied_runtime.voice:"
+                "[VOICE] wake_rejected text='mirror' expected='mira'"
+            ],
+        )
+        cognition.assert_not_awaited()
+        await voice.stop()
 
     async def test_wake_resumes_after_voice_session_failure(self):
         provider = CoordinatedVoiceProvider()
