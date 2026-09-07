@@ -1,15 +1,18 @@
 import asyncio
+import argparse
 import io
 import sys
 import tempfile
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 import wave
 
 from embodied_runtime.console import RuntimeConsole
+from embodied_runtime.cli import build_text_to_speech_provider
 from embodied_runtime.voice import (
-    FusionHatEspeakTTSProvider, FusionHatPiperTTSProvider,
+    FusionHatEspeakTTSProvider, FusionHatOpenAITTSProvider,
+    FusionHatPiperTTSProvider,
     FusionHatVoiceProvider, VoiceInteraction, VoiceSessionPolicy,
 )
 
@@ -115,6 +118,28 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             VoiceSessionPolicy(initial_timeout_seconds=0.01,
                                followup_timeout_seconds=0.01),
         )
+
+    def test_tts_selection_is_physical_and_preserves_all_providers(self):
+        base = dict(voice_enabled=True, hardware="fusion-hat", piper_model="model",
+                    openai_tts_model="model", openai_tts_voice="voice")
+        with patch("embodied_runtime.cli.FusionHatEspeakTTSProvider") as espeak, \
+             patch("embodied_runtime.cli.FusionHatPiperTTSProvider") as piper, \
+             patch("embodied_runtime.cli.FusionHatOpenAITTSProvider") as openai:
+            build_text_to_speech_provider(argparse.Namespace(**base, tts="espeak"))
+            espeak.assert_called_once_with()
+            build_text_to_speech_provider(argparse.Namespace(**base, tts="piper"))
+            piper.assert_called_once_with(model_path="model")
+            build_text_to_speech_provider(argparse.Namespace(**base, tts="openai"))
+            openai.assert_called_once_with(model="model", voice="voice")
+
+            for disabled in (
+                {**base, "voice_enabled": False, "tts": "openai"},
+                {**base, "hardware": "virtual", "tts": "openai"},
+            ):
+                self.assertIsNone(build_text_to_speech_provider(
+                    argparse.Namespace(**disabled)
+                ))
+            self.assertEqual(openai.call_count, 1)
 
     async def test_two_turns_use_same_handler_speak_and_close(self):
         provider = FakeVoiceProvider(["first", "follow up"])
@@ -631,6 +656,86 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "playback failed"):
                 await provider.speak("hello")
         self.assertEqual(calls, ["enable", "disable"])
+
+    def openai_modules(self, calls, create):
+        client = SimpleNamespace(audio=SimpleNamespace(
+            speech=SimpleNamespace(create=create)
+        ))
+        openai = ModuleType("openai")
+        openai.AsyncOpenAI = lambda: client
+        fusion_hat = ModuleType("fusion_hat")
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append("enable")
+        device.disable_speaker = lambda: calls.append("disable")
+        return {"openai": openai, "fusion_hat": fusion_hat,
+                "fusion_hat.device": device}
+
+    async def test_openai_tts_requests_exact_wav_and_controls_speaker(self):
+        calls = []
+
+        async def create(**kwargs):
+            self.assertEqual(calls[-1], "disable")
+            calls.append(("request", kwargs.copy()))
+            self.assertEqual(calls[0], "disable")
+            return type("Response", (), {"content": b"RIFF wav bytes"})()
+
+        modules = self.openai_modules(calls, create)
+        with patch.dict(sys.modules, modules), patch(
+            "embodied_runtime.voice.subprocess.run"
+        ) as run:
+            provider = FusionHatOpenAITTSProvider(
+                model="configured-model", voice="configured-voice"
+            )
+            await provider.speak("Exact **text**\nunchanged")
+            await provider.close()
+            await provider.speak("second session")
+
+        self.assertEqual(calls[1][1], {
+            "model": "configured-model", "voice": "configured-voice",
+            "input": "Exact **text**\nunchanged", "response_format": "wav",
+        })
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], ["aplay", "--quiet"])
+        self.assertEqual(run.call_args_list[0].kwargs["input"], b"RIFF wav bytes")
+        self.assertTrue(run.call_args_list[0].kwargs["check"])
+        self.assertEqual(calls.count("enable"), 2)
+        self.assertGreaterEqual(calls.count("disable"), 5)
+
+    async def test_openai_api_failure_never_plays_or_falls_back(self):
+        calls = []
+
+        async def create(**kwargs):
+            raise RuntimeError("API failed")
+
+        with patch.dict(sys.modules, self.openai_modules(calls, create)), patch(
+            "embodied_runtime.voice.subprocess.run"
+        ) as run:
+            provider = FusionHatOpenAITTSProvider()
+            with self.assertRaisesRegex(RuntimeError, "API failed"):
+                await provider.speak("hello")
+        self.assertEqual(calls, ["disable"])
+        run.assert_not_called()
+
+    async def test_openai_playback_failure_disables_speaker(self):
+        calls = []
+
+        async def create(**kwargs):
+            return type("Response", (), {"content": b"wav"})()
+
+        with patch.dict(sys.modules, self.openai_modules(calls, create)), patch(
+            "embodied_runtime.voice.subprocess.run", side_effect=RuntimeError("failed")
+        ):
+            provider = FusionHatOpenAITTSProvider()
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                await provider.speak("hello")
+        self.assertEqual(calls, ["disable", "enable", "disable"])
+
+    def test_openai_unavailable_has_install_guidance(self):
+        unrelated_openai = ModuleType("openai")
+        with patch.dict(sys.modules, {"openai": unrelated_openai}), self.assertRaisesRegex(
+            RuntimeError, r"unavailable; install it with: .*\[openai\]"
+        ):
+            FusionHatOpenAITTSProvider()
 
     def test_piper_unavailable_fails_at_construction_with_install_guidance(self):
         unrelated_piper = ModuleType("piper")

@@ -48,9 +48,11 @@ The initiative values, `voice.enabled`, and `voice.wake_word_enabled` must be
 TOML booleans. `voice.wake_words` must be a non-empty TOML array whose entries
 are non-empty strings after trimming. Both voice timeouts must be positive TOML
 numbers. All runtime values must be strings.
-`voice.tts` is `"espeak"` or `"piper"`; Piper additionally requires the
+`voice.tts` is `"espeak"`, `"piper"`, or `"openai"`; Piper additionally requires the
 `voice.piper_model` path to a local `.onnx` model. `--tts` and `--piper-model`
-provide narrow launch overrides for these two values.
+provide narrow launch overrides. OpenAI TTS uses `voice.openai_tts_model` and
+`voice.openai_tts_voice`, overridden by `--openai-tts-model` and
+`--openai-tts-voice`; credentials remain environment-provided.
 Unknown tables, unknown keys, wrong types, unsupported values, and malformed
 TOML fail before a profile or backend is constructed.
 
@@ -70,6 +72,8 @@ The file may be partial. Omitted values retain the historical defaults:
 | `voice.wake_words` | `["mira"]` |
 | `voice.tts` | `"espeak"` |
 | `voice.piper_model` | unset |
+| `voice.openai_tts_model` | `"gpt-4o-mini-tts"` |
+| `voice.openai_tts_voice` | `"cedar"` |
 | `voice.initial_timeout_seconds` | `18.0` |
 | `voice.followup_timeout_seconds` | `10.0` |
 

@@ -18,8 +18,8 @@ memory, RuntimeState, or the EventBus. Manual `voice` sessions do not play it.
 3. `VoiceInteraction` sends recognized text through the same application
    cognition path as console `ask`.
 4. The final text response is passed unchanged to a separate
-   `TextToSpeechProvider`; either `FusionHatEspeakTTSProvider` or
-   `FusionHatPiperTTSProvider` speaks it locally.
+   `TextToSpeechProvider`; the selected eSpeak, Piper, or OpenAI provider speaks
+   it through the Fusion HAT speaker.
 5. Vosk offers one short follow-up opportunity (10 seconds by default).
 6. The session closes after the second utterance or a timeout, stops capture, and
    disables the Fusion HAT speaker.
@@ -83,6 +83,24 @@ skip the other cleanup attempt.
 The narrow `TextToSpeechProvider` seam keeps selection from changing the bounded
 conversation architecture. There is no provider probing, fallback, runtime
 switching, streaming synthesis, or TTS text rewriting.
+
+Hosted speech is an explicit third option:
+
+```toml
+[voice]
+enabled = true
+tts = "openai"
+openai_tts_model = "gpt-4o-mini-tts"
+openai_tts_voice = "cedar"
+```
+
+Install it with `python -m pip install -e '.[openai]'` and provide
+`OPENAI_API_KEY` in the environment, never in TOML. OpenAI TTS requires network
+access. This initial implementation requests the complete WAV response in
+memory, then passes it to `aplay`; it does not stream or create a temporary
+file. eSpeak and Piper remain explicit alternatives, and failures never trigger
+an automatic fallback. Applications using OpenAI-generated voices must clearly
+disclose to end users that the voice they hear is AI-generated.
 
 Wake listening is local trigger detection, not an always-running cloud
 conversation. Matching is case-insensitive and exact after trimming against

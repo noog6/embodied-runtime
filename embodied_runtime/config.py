@@ -36,6 +36,8 @@ class VoiceFileConfig:
     wake_words: list[str] | None = None
     tts: str | None = None
     piper_model: str | None = None
+    openai_tts_model: str | None = None
+    openai_tts_voice: str | None = None
     initial_timeout_seconds: float | None = None
     followup_timeout_seconds: float | None = None
 
@@ -68,6 +70,8 @@ class LaunchConfiguration:
     voice_wake_words: list[str]
     voice_tts: str
     voice_piper_model: str | None
+    voice_openai_tts_model: str
+    voice_openai_tts_voice: str
     voice_initial_timeout_seconds: float
     voice_followup_timeout_seconds: float
 
@@ -79,6 +83,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     initiative_continuation=False, initiative_goal_closure=False,
     voice_enabled=False, voice_wake_word_enabled=False, voice_wake_words=["mira"],
     voice_tts="espeak", voice_piper_model=None,
+    voice_openai_tts_model="gpt-4o-mini-tts", voice_openai_tts_voice="cedar",
     voice_initial_timeout_seconds=18.0,
     voice_followup_timeout_seconds=10.0,
 )
@@ -90,7 +95,8 @@ _INITIATIVE_KEYS = {
 }
 _VOICE_KEYS = {
     "enabled", "wake_word_enabled", "wake_words", "initial_timeout_seconds",
-    "followup_timeout_seconds", "tts", "piper_model",
+    "followup_timeout_seconds", "tts", "piper_model", "openai_tts_model",
+    "openai_tts_voice",
 }
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
@@ -156,13 +162,16 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     if "tts" in voice:
         if not isinstance(voice["tts"], str):
             raise ConfigurationError("voice.tts must be a string")
-        if voice["tts"] not in {"espeak", "piper"}:
+        if voice["tts"] not in {"espeak", "openai", "piper"}:
             raise ConfigurationError(
                 f"unsupported value for voice.tts: {voice['tts']!r} "
-                "(choose from espeak, piper)"
+                "(choose from espeak, openai, piper)"
             )
     if "piper_model" in voice and not isinstance(voice["piper_model"], str):
         raise ConfigurationError("voice.piper_model must be a string")
+    for key in ("openai_tts_model", "openai_tts_voice"):
+        if key in voice and not isinstance(voice[key], str):
+            raise ConfigurationError(f"voice.{key} must be a string")
     for key in ("initial_timeout_seconds", "followup_timeout_seconds"):
         if key in voice and (isinstance(voice[key], bool) or not isinstance(voice[key], (int, float)) or voice[key] <= 0):
             raise ConfigurationError(f"voice.{key} must be a positive number")
@@ -222,6 +231,12 @@ def resolve_launch_configuration(
         voice_wake_words=voice.wake_words or ["mira"],
         voice_tts=scalar("tts", voice.tts, "espeak"),
         voice_piper_model=scalar("piper_model", voice.piper_model, None),
+        voice_openai_tts_model=scalar(
+            "openai_tts_model", voice.openai_tts_model, "gpt-4o-mini-tts"
+        ),
+        voice_openai_tts_voice=scalar(
+            "openai_tts_voice", voice.openai_tts_voice, "cedar"
+        ),
         voice_initial_timeout_seconds=(voice.initial_timeout_seconds if voice.initial_timeout_seconds is not None else 18.0),
         voice_followup_timeout_seconds=(voice.followup_timeout_seconds if voice.followup_timeout_seconds is not None else 10.0),
     )

@@ -23,6 +23,10 @@ class PiperTTSUnavailableError(RuntimeError):
     """Raised when selected local Piper speech cannot be initialized."""
 
 
+class OpenAITTSUnavailableError(RuntimeError):
+    """Raised when selected hosted OpenAI speech cannot be initialized."""
+
+
 class VoiceProvider(Protocol):
     """Transient speech input and wake acknowledgement for a voice session."""
 
@@ -412,6 +416,59 @@ class FusionHatPiperTTSProvider:
 
     async def close(self) -> None:
         """Disable physical output without unloading the cached neural voice."""
+        try:
+            from fusion_hat.device import disable_speaker
+        except ImportError:
+            return
+        await asyncio.to_thread(disable_speaker)
+
+
+class FusionHatOpenAITTSProvider:
+    """Reusable hosted OpenAI speech synthesis with Fusion HAT playback."""
+
+    def __init__(
+        self, *, model: str = "gpt-4o-mini-tts", voice: str = "cedar"
+    ) -> None:
+        try:
+            AsyncOpenAI = getattr(importlib.import_module("openai"), "AsyncOpenAI")
+        except (ImportError, AttributeError) as error:
+            raise OpenAITTSUnavailableError(
+                "OpenAI speech synthesis is unavailable; install it with: "
+                "python -m pip install -e '.[openai]'"
+            ) from error
+        self._model = model
+        self._voice = voice
+        self._client = AsyncOpenAI()
+
+    async def speak(self, text: str) -> None:
+        try:
+            from fusion_hat.device import disable_speaker, enable_speaker
+        except ImportError as error:
+            raise RuntimeError("Fusion HAT speaker control is unavailable") from error
+
+        # A previous failed session must not leave amplification active during I/O.
+        await asyncio.to_thread(disable_speaker)
+        response = await self._client.audio.speech.create(
+            model=self._model,
+            voice=self._voice,
+            input=text,
+            response_format="wav",
+        )
+        wav_bytes = response.content
+
+        def play() -> None:
+            enable_speaker()
+            try:
+                subprocess.run(
+                    ["aplay", "--quiet"], input=wav_bytes, check=True
+                )
+            finally:
+                disable_speaker()
+
+        await asyncio.to_thread(play)
+
+    async def close(self) -> None:
+        """Disable output while retaining the reusable OpenAI client."""
         try:
             from fusion_hat.device import disable_speaker
         except ImportError:

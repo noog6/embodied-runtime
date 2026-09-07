@@ -41,8 +41,10 @@ from embodied_runtime.sensing.camera.picamera2 import (
 )
 from embodied_runtime.voice import (
     FusionHatEspeakTTSProvider,
+    FusionHatOpenAITTSProvider,
     FusionHatPiperTTSProvider,
     FusionHatVoiceProvider,
+    OpenAITTSUnavailableError,
     PiperTTSUnavailableError,
     VoiceSessionPolicy,
 )
@@ -79,10 +81,16 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         "--voice", action="store_true", default=configurable_default(False),
         help="enable bounded Fusion HAT voice interaction",
     )
-    parser.add_argument("--tts", choices=("espeak", "piper"),
+    parser.add_argument("--tts", choices=("espeak", "piper", "openai"),
                         default=configurable_default("espeak"))
     parser.add_argument("--piper-model", default=configurable_default(None),
                         help="path to a local Piper .onnx voice model")
+    parser.add_argument(
+        "--openai-tts-model", default=configurable_default("gpt-4o-mini-tts")
+    )
+    parser.add_argument(
+        "--openai-tts-voice", default=configurable_default("cedar")
+    )
     parser.add_argument("--initiative", action="store_true",
                         default=configurable_default(False),
                         help="enable bounded goal-directed cognition initiative")
@@ -165,6 +173,8 @@ def parse_launch_arguments(
     args.voice_wake_words = effective.voice_wake_words
     args.tts = effective.voice_tts
     args.piper_model = effective.voice_piper_model
+    args.openai_tts_model = effective.voice_openai_tts_model
+    args.openai_tts_voice = effective.voice_openai_tts_voice
     args.voice_initial_timeout_seconds = effective.voice_initial_timeout_seconds
     args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
     return parser, args, effective
@@ -218,6 +228,10 @@ def build_text_to_speech_provider(args: argparse.Namespace):
         return None
     if args.tts == "piper":
         return FusionHatPiperTTSProvider(model_path=args.piper_model)
+    if args.tts == "openai":
+        return FusionHatOpenAITTSProvider(
+            model=args.openai_tts_model, voice=args.openai_tts_voice
+        )
     return FusionHatEspeakTTSProvider()
 
 
@@ -418,6 +432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         FusionHatUnavailableError, Picamera2UnavailableError,
         PiperTTSUnavailableError,
+        OpenAITTSUnavailableError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
