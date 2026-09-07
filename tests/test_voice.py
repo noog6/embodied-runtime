@@ -124,7 +124,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         base = dict(voice_enabled=True, hardware="fusion-hat", piper_model="model",
                     openai_tts_model="model", openai_tts_voice="voice",
                     elevenlabs_tts_model="el-model",
-                    elevenlabs_tts_voice_id="el-voice")
+                    elevenlabs_tts_voice_id="el-voice", elevenlabs_tts_speed=1.1)
         with patch("embodied_runtime.cli.FusionHatEspeakTTSProvider") as espeak, \
              patch("embodied_runtime.cli.FusionHatPiperTTSProvider") as piper, \
              patch("embodied_runtime.cli.FusionHatOpenAITTSProvider") as openai, \
@@ -136,7 +136,9 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             build_text_to_speech_provider(argparse.Namespace(**base, tts="openai"))
             openai.assert_called_once_with(model="model", voice="voice")
             build_text_to_speech_provider(argparse.Namespace(**base, tts="elevenlabs"))
-            elevenlabs.assert_called_once_with(model="el-model", voice_id="el-voice")
+            elevenlabs.assert_called_once_with(
+                model="el-model", voice_id="el-voice", speed=1.1
+            )
 
             for disabled in (
                 {**base, "voice_enabled": False, "tts": "openai"},
@@ -684,6 +686,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             text_to_speech=SimpleNamespace(convert=convert)
         )
         elevenlabs = ModuleType("elevenlabs")
+        elevenlabs.VoiceSettings = lambda **kwargs: SimpleNamespace(**kwargs)
         client_module = ModuleType("elevenlabs.client")
         client_module.AsyncElevenLabs = lambda **kwargs: client
         fusion_hat = ModuleType("fusion_hat")
@@ -726,6 +729,47 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             "INFO:embodied_runtime.voice:"
             "[TTS] playback_completed duration_ms=400",
         ])
+
+    async def test_hosted_wav_duration_uses_readable_frames_not_sentinel_size(self):
+        audio = bytearray(self.wav_bytes(frames=24_000, sample_rate=24_000))
+        data_offset = audio.index(b"data")
+        audio[data_offset + 4:data_offset + 8] = (0xFFFFFFF0).to_bytes(4, "little")
+        with wave.open(io.BytesIO(audio), "rb") as wav:
+            self.assertGreater(wav.getnframes(), 2_000_000_000)
+
+        with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
+            from embodied_runtime.voice import _log_synthesis_completed
+            _log_synthesis_completed(12, audio)
+
+        self.assertEqual(
+            logs.output,
+            ["INFO:embodied_runtime.voice:"
+             "[TTS] synthesis_completed duration_ms=12 audio_ms=1000"],
+        )
+
+    async def test_hosted_wav_inspection_reads_bounded_chunks(self):
+        audio = self.wav_bytes(frames=10_000)
+        read_sizes = []
+        real_open = wave.open
+
+        class TrackingWave:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.wrapped.close()
+            def __getattr__(self, name):
+                return getattr(self.wrapped, name)
+            def readframes(self, count):
+                read_sizes.append(count)
+                return self.wrapped.readframes(count)
+
+        with patch("embodied_runtime.voice.wave.open", side_effect=lambda *args, **kwargs: TrackingWave(real_open(*args, **kwargs))):
+            from embodied_runtime.voice import _log_synthesis_completed
+            _log_synthesis_completed(1, audio)
+        self.assertGreater(len(read_sizes), 2)
+        self.assertEqual(set(read_sizes), {4096})
 
     async def test_openai_tts_requests_exact_wav_and_controls_speaker(self):
         calls = []
@@ -818,7 +862,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
              patch("embodied_runtime.voice.subprocess.run") as run, \
              self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
             provider = FusionHatElevenLabsTTSProvider(
-                model="configured-model", voice_id="configured-voice"
+                model="configured-model", voice_id="configured-voice", speed=1.1
             )
             await provider.speak("Exact **text**\nunchanged")
             await provider.close()
@@ -826,6 +870,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1], ("request", {
             "voice_id": "configured-voice", "text": "Exact **text**\nunchanged",
             "model_id": "configured-model", "output_format": "wav_24000",
+            "voice_settings": SimpleNamespace(speed=1.1),
         }))
         self.assertEqual(run.call_args.args[0], ["aplay", "--quiet"])
         self.assertEqual(run.call_args.kwargs["input"], audio)

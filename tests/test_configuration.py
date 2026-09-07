@@ -47,6 +47,7 @@ class ConfigurationTests(unittest.TestCase):
                 "voice_wake_words": ["mira", "mirror", "huh mirror"],
                 "voice_initial_timeout_seconds": 18,
                 "voice_followup_timeout_seconds": 12,
+                "voice_elevenlabs_tts_speed": 1.1,
             }),
         )
 
@@ -205,16 +206,39 @@ class ConfigurationTests(unittest.TestCase):
         configured = self.effective(
             "[voice]\ntts='elevenlabs'\nelevenlabs_tts_model='file-model'\n"
             "elevenlabs_tts_voice_id='file-voice'\n",
-            ("--elevenlabs-tts-model", "cli-model",
+            ("--elevenlabs-tts-model", "cli-model", "--elevenlabs-tts-speed", "1.2",
              "--elevenlabs-tts-voice-id", "cli-voice"),
         )
         self.assertEqual(configured.voice_tts, "elevenlabs")
         self.assertEqual(configured.voice_elevenlabs_tts_model, "cli-model")
         self.assertEqual(configured.voice_elevenlabs_tts_voice_id, "cli-voice")
+        self.assertEqual(configured.voice_elevenlabs_tts_speed, 1.2)
         self.assertEqual(
             HISTORICAL_DEFAULTS.voice_elevenlabs_tts_model, "eleven_flash_v2_5"
         )
         self.assertIsNone(HISTORICAL_DEFAULTS.voice_elevenlabs_tts_voice_id)
+        self.assertEqual(HISTORICAL_DEFAULTS.voice_elevenlabs_tts_speed, 1.0)
+
+    def test_elevenlabs_tts_speed_is_strict_and_cli_overrides_toml(self):
+        configured = self.effective(
+            "[voice]\nelevenlabs_tts_speed=1.1\n",
+            ("--elevenlabs-tts-speed", "0.8"),
+        )
+        self.assertEqual(configured.voice_elevenlabs_tts_speed, 0.8)
+        for value in ("0.7", "1", "1.2"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.effective(f"[voice]\nelevenlabs_tts_speed={value}\n")
+                    .voice_elevenlabs_tts_speed,
+                    float(value),
+                )
+        for value in ("true", "'1.1'", "0.6", "1.3"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ConfigurationError, r"voice.elevenlabs_tts_speed must be"
+            ):
+                load_runtime_config(
+                    self.write(f"[voice]\nelevenlabs_tts_speed={value}\n")
+                )
 
     def test_elevenlabs_tts_values_must_be_strings(self):
         for key in ("elevenlabs_tts_model", "elevenlabs_tts_voice_id"):

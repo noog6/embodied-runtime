@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 import logging
+import math
 from pathlib import Path
 import sys
 import time
@@ -97,6 +98,10 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         "--elevenlabs-tts-model", default=configurable_default("eleven_flash_v2_5")
     )
     parser.add_argument("--elevenlabs-tts-voice-id", default=None)
+    parser.add_argument(
+        "--elevenlabs-tts-speed", type=_elevenlabs_tts_speed,
+        default=configurable_default(1.0),
+    )
     parser.add_argument("--initiative", action="store_true",
                         default=configurable_default(False),
                         help="enable bounded goal-directed cognition initiative")
@@ -183,6 +188,7 @@ def parse_launch_arguments(
     args.openai_tts_voice = effective.voice_openai_tts_voice
     args.elevenlabs_tts_model = effective.voice_elevenlabs_tts_model
     args.elevenlabs_tts_voice_id = effective.voice_elevenlabs_tts_voice_id
+    args.elevenlabs_tts_speed = effective.voice_elevenlabs_tts_speed
     args.voice_initial_timeout_seconds = effective.voice_initial_timeout_seconds
     args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
     return parser, args, effective
@@ -193,6 +199,20 @@ def _pwm_channel(value: str) -> str:
         return normalize_pwm_channel(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _elevenlabs_tts_speed(value: str) -> float:
+    try:
+        speed = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "ElevenLabs TTS speed must be a number from 0.7 to 1.2"
+        ) from error
+    if not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
+        raise argparse.ArgumentTypeError(
+            "ElevenLabs TTS speed must be from 0.7 to 1.2"
+        )
+    return speed
 
 
 def build_hardware_backend(args: argparse.Namespace) -> HardwareBackend:
@@ -244,6 +264,7 @@ def build_text_to_speech_provider(args: argparse.Namespace):
         return FusionHatElevenLabsTTSProvider(
             model=args.elevenlabs_tts_model,
             voice_id=args.elevenlabs_tts_voice_id,
+            speed=args.elevenlabs_tts_speed,
         )
     return FusionHatEspeakTTSProvider()
 

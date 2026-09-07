@@ -1,6 +1,7 @@
 """Strict startup configuration loading and CLI/default resolution."""
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import tomllib
 
@@ -40,6 +41,7 @@ class VoiceFileConfig:
     openai_tts_voice: str | None = None
     elevenlabs_tts_model: str | None = None
     elevenlabs_tts_voice_id: str | None = None
+    elevenlabs_tts_speed: float | None = None
     initial_timeout_seconds: float | None = None
     followup_timeout_seconds: float | None = None
 
@@ -76,6 +78,7 @@ class LaunchConfiguration:
     voice_openai_tts_voice: str
     voice_elevenlabs_tts_model: str
     voice_elevenlabs_tts_voice_id: str | None
+    voice_elevenlabs_tts_speed: float
     voice_initial_timeout_seconds: float
     voice_followup_timeout_seconds: float
 
@@ -90,6 +93,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     voice_openai_tts_model="gpt-4o-mini-tts", voice_openai_tts_voice="cedar",
     voice_elevenlabs_tts_model="eleven_flash_v2_5",
     voice_elevenlabs_tts_voice_id=None,
+    voice_elevenlabs_tts_speed=1.0,
     voice_initial_timeout_seconds=18.0,
     voice_followup_timeout_seconds=10.0,
 )
@@ -103,7 +107,7 @@ _VOICE_KEYS = {
     "enabled", "wake_word_enabled", "wake_words", "initial_timeout_seconds",
     "followup_timeout_seconds", "tts", "piper_model", "openai_tts_model",
     "openai_tts_voice",
-    "elevenlabs_tts_model", "elevenlabs_tts_voice_id",
+    "elevenlabs_tts_model", "elevenlabs_tts_voice_id", "elevenlabs_tts_speed",
 }
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
@@ -182,6 +186,17 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     for key in ("elevenlabs_tts_model", "elevenlabs_tts_voice_id"):
         if key in voice and not isinstance(voice[key], str):
             raise ConfigurationError(f"voice.{key} must be a string")
+    if "elevenlabs_tts_speed" in voice:
+        speed = voice["elevenlabs_tts_speed"]
+        if isinstance(speed, bool) or not isinstance(speed, (int, float)):
+            raise ConfigurationError(
+                "voice.elevenlabs_tts_speed must be a number from 0.7 to 1.2"
+            )
+        if not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
+            raise ConfigurationError(
+                "voice.elevenlabs_tts_speed must be from 0.7 to 1.2"
+            )
+        voice["elevenlabs_tts_speed"] = float(speed)
     for key in ("initial_timeout_seconds", "followup_timeout_seconds"):
         if key in voice and (isinstance(voice[key], bool) or not isinstance(voice[key], (int, float)) or voice[key] <= 0):
             raise ConfigurationError(f"voice.{key} must be a positive number")
@@ -253,6 +268,9 @@ def resolve_launch_configuration(
         ),
         voice_elevenlabs_tts_voice_id=scalar(
             "elevenlabs_tts_voice_id", voice.elevenlabs_tts_voice_id, None
+        ),
+        voice_elevenlabs_tts_speed=scalar(
+            "elevenlabs_tts_speed", voice.elevenlabs_tts_speed, 1.0
         ),
         voice_initial_timeout_seconds=(voice.initial_timeout_seconds if voice.initial_timeout_seconds is not None else 18.0),
         voice_followup_timeout_seconds=(voice.followup_timeout_seconds if voice.followup_timeout_seconds is not None else 10.0),

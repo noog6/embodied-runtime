@@ -110,6 +110,7 @@ enabled = true
 tts = "elevenlabs"
 elevenlabs_tts_model = "eleven_flash_v2_5"
 elevenlabs_tts_voice_id = "YOUR_VOICE_ID"
+elevenlabs_tts_speed = 1.0
 ```
 
 Install the official SDK with `python -m pip install -e '.[elevenlabs]'`, select
@@ -126,6 +127,16 @@ all asynchronously delivered SDK chunks into one complete in-memory WAV before
 enabling the speaker and invoking `aplay`. This is not streaming playback and
 does not create temporary files. eSpeak, Piper, and OpenAI remain explicit
 alternatives, and there is no automatic fallback.
+
+`elevenlabs_tts_speed` accepts numeric values from `0.7` through `1.2`; values
+above `1.0` speak faster. It is sent as request-level `VoiceSettings(speed=...)`
+and neither changes the saved ElevenLabs voice nor overrides stability,
+similarity boost, style, or speaker boost. Mira's checked-in OpenAI/Marin profile
+keeps ElevenLabs as an alternative and sets its delivery speed to `1.1` (110%).
+
+Hosted synthesis logs derive `audio_ms` by reading the PCM frames actually
+present in the returned in-memory WAV in bounded chunks. They do not blindly
+trust declared RIFF/data lengths, which may use an unknown-length sentinel.
 
 Wake listening is local trigger detection, not an always-running cloud
 conversation. Matching is case-insensitive and exact after trimming against
