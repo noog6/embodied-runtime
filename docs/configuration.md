@@ -11,6 +11,22 @@ console, and voice configuration, including the file-only local wake settings.
 It supplies launch values before existing application setup rather than adding
 implicit configuration discovery.
 
+Mira's checked-in physical voice is ElevenLabs model `eleven_flash_v2_5`, voice
+ID `pFZP5JQG7iQjIQuC4Bku`, at speed `1.1`. Normal startup requires the optional
+ElevenLabs dependency and `ELEVENLABS_API_KEY` in the environment. The profile
+also retains OpenAI model `gpt-4o-mini-tts` and voice `marin` as dormant
+alternative-provider settings. An operator can explicitly select that
+alternative without restating its model or voice:
+
+```console
+python main.py \
+  --config config/mira-agentic.toml \
+  --tts openai
+```
+
+This override is an explicit operator comparison or fallback choice, not an
+automatic fallback when ElevenLabs credentials or service are unavailable.
+
 ## Schema
 
 Only these three tables and keys are accepted:

@@ -16,9 +16,12 @@ EXPLICIT_AGENTIC = [
     "--initiative-platform-attention", "--initiative-actions",
     "--initiative-messages", "--initiative-continuation",
     "--initiative-goal-closure", "--console",
-    "--voice", "--tts", "openai",
+    "--voice", "--tts", "elevenlabs",
     "--openai-tts-model", "gpt-4o-mini-tts",
     "--openai-tts-voice", "marin",
+    "--elevenlabs-tts-model", "eleven_flash_v2_5",
+    "--elevenlabs-tts-voice-id", "pFZP5JQG7iQjIQuC4Bku",
+    "--elevenlabs-tts-speed", "1.1",
 ]
 
 
@@ -47,7 +50,6 @@ class ConfigurationTests(unittest.TestCase):
                 "voice_wake_words": ["mira", "mirror", "huh mirror"],
                 "voice_initial_timeout_seconds": 18,
                 "voice_followup_timeout_seconds": 12,
-                "voice_elevenlabs_tts_speed": 1.1,
             }),
         )
 
