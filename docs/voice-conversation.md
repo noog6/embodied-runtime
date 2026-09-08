@@ -131,8 +131,27 @@ alternatives, and there is no automatic fallback.
 `elevenlabs_tts_speed` accepts numeric values from `0.7` through `1.2`; values
 above `1.0` speak faster. It is sent as request-level `VoiceSettings(speed=...)`
 and neither changes the saved ElevenLabs voice nor overrides stability,
-similarity boost, style, or speaker boost. Mira's checked-in OpenAI/Marin profile
-keeps ElevenLabs as an alternative and sets its delivery speed to `1.1` (110%).
+similarity boost, style, or speaker boost. Mira's checked-in physical profile
+selects ElevenLabs model `eleven_flash_v2_5`, voice ID
+`pFZP5JQG7iQjIQuC4Bku`, and speed `1.1` (110%). With the optional ElevenLabs
+dependency installed and `ELEVENLABS_API_KEY` available in the environment,
+normal Mira startup needs no TTS override:
+
+```console
+python main.py --config config/mira-agentic.toml
+```
+
+OpenAI model `gpt-4o-mini-tts` with voice `marin` remains configured as an
+alternative. An operator can select it temporarily for comparison or fallback:
+
+```console
+python main.py \
+  --config config/mira-agentic.toml \
+  --tts openai
+```
+
+This is explicit operator selection; a missing ElevenLabs credential or other
+ElevenLabs failure does not trigger automatic fallback.
 
 Hosted synthesis logs derive `audio_ms` by reading the PCM frames actually
 present in the returned in-memory WAV in bounded chunks. They do not blindly
