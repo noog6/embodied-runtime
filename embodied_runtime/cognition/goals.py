@@ -11,6 +11,7 @@ MAX_GOAL_DESCRIPTION_CHARS = 500
 class ActiveGoal:
     """The single objective the application is currently committed to."""
 
+    id: int
     description: str
 
 
@@ -44,6 +45,7 @@ def render_active_goal(goal: ActiveGoal | None) -> str:
     else:
         lines.extend((
             "  state: active",
+            f"  id: G{goal.id}",
             f"  description: {json.dumps(goal.description, ensure_ascii=False)}",
         ))
     return "\n".join(lines)

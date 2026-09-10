@@ -199,6 +199,25 @@ See [Bounded temporal follow-up](temporal-followup.md).
 
 ## Current bounded autonomy episode grammar
 
+Phase 16.1 makes each accepted autonomous attention pass an explicit immutable
+`AttentionEpisode`: events nominate reality for attention, episodes provide
+temporary focus, goals provide continuity across episodes, runtime state provides
+current truth, and effects remain explicitly bounded. An event is merely a runtime
+occurrence and may be ignored; an episode is created only after existing eligibility
+and single-flight checks accept it. A goal is a longer-lived, runtime-owned intention
+with a monotonically allocated session-local identity and may span many episodes.
+Runtime state remains the authoritative reconstruction of current facts, while
+WorkingMemory is historical and may be stale.
+
+An episode is not a goal. Its runtime-generated ID, deterministic concern, trigger,
+and bound goal ID remain fixed until it closes as handled, no-action, stale-goal,
+error, or cancelled. Current and last-completed diagnostics are retained, not an
+episode history. A scheduled follow-up closes its scheduling episode and creates a
+new episode when due; it neither reopens the old episode nor reserves authority.
+Phase 16.1 still permits one active goal and one autonomous episode in flight.
+Ordinary voice and operator turns are not episodes yet. Continuity requires no
+persistent provider conversation, and there is no model-controlled deliberation loop.
+
 Semantic attention makes an initial decision. It either stops, applies semantic
 **effect #1** and may request one distinct effect continuation, or performs one
 read-only acquisition (`inspect_self` or `observe_scene`), makes one independent

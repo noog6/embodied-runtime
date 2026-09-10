@@ -11,8 +11,9 @@ import unicodedata
 from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.attention import (
     ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST, INITIATIVE_REQUEST,
-    AttentionStimulus, GoalAttentionController, InitiativeContinuationStimulus,
+    AttentionEpisode, AttentionStimulus, GoalAttentionController, InitiativeContinuationStimulus,
     InitiativeOutcome, InspectionFollowupStimulus, VisualPerceptionFollowupStimulus,
+    concern_for_stimulus,
 )
 from embodied_runtime.cognition import (
     ActiveGoal,
@@ -296,6 +297,7 @@ class RobotApplication:
             wake_words=voice_wake_words,
         )
         self._active_goal: ActiveGoal | None = None
+        self._next_goal_id = 1
         self._reflexes = tuple(reflexes)
         self._started_reflexes: list[Reflex] = []
         self._runtime_state = RuntimeState(LifecycleState.CREATED)
@@ -346,9 +348,10 @@ class RobotApplication:
         normalized = validate_goal_description(description)
         if self._active_goal is not None:
             raise RuntimeError("an active goal already exists")
-        goal = ActiveGoal(normalized)
+        goal = ActiveGoal(self._next_goal_id, normalized)
+        self._next_goal_id += 1
         self._active_goal = goal
-        LOGGER.info("[GOAL] status=active chars=%s", len(normalized))
+        LOGGER.info("[GOAL] goal=G%s status=active chars=%s", goal.id, len(normalized))
         return goal
 
     def resolve_goal(self, outcome: object) -> ActiveGoal:
@@ -626,7 +629,7 @@ class RobotApplication:
         )
 
     def _attention_instructions(
-        self, stimulus: AttentionStimulus, working_memory, *, capabilities_available: bool,
+        self, stimulus: AttentionStimulus, episode: AttentionEpisode, working_memory, *, capabilities_available: bool,
         expected_goal: ActiveGoal | None = None,
     ) -> str:
         context = compose_cognition_instructions(
@@ -649,20 +652,33 @@ class RobotApplication:
             if capabilities_available else ""
         )
         return (
-            f"{context}\n\n{stimulus.render(actions_enabled=capabilities_available)}"
+            f"{context}\n\n{episode.render()}\n\n{stimulus.render(actions_enabled=capabilities_available)}"
             f"{inspection_guidance}{sequencing}"
         )
 
-    async def _request_initiative(self, stimulus: AttentionStimulus) -> InitiativeOutcome:
+    async def _request_initiative(
+        self, stimulus: AttentionStimulus, episode: AttentionEpisode | None = None,
+    ) -> InitiativeOutcome:
         backend = self._cognition_backend
         if backend is None:
             raise RuntimeError("No cognition backend is configured")
         prior_memory = self.working_memory.snapshot()
         expected_goal = self._active_goal
+        # Private-call compatibility for focused executor tests. Accepted runtime
+        # attention always supplies the controller-allocated positive episode ID.
+        if episode is None and expected_goal is not None:
+            episode = AttentionEpisode(
+                0, stimulus.kind, stimulus.source, concern_for_stimulus(stimulus),
+                expected_goal.id, state="active",
+            )
+        if episode is None:
+            raise RuntimeError("attention initiative requires an active goal")
+        if expected_goal is None or expected_goal.id != episode.goal_id:
+            raise RuntimeError("attention episode's bound goal is no longer current")
         tools = self.initiative_tools()
         capabilities_available = bool(tools)
         instructions = self._attention_instructions(
-            stimulus, prior_memory, capabilities_available=capabilities_available,
+            stimulus, episode, prior_memory, capabilities_available=capabilities_available,
             expected_goal=expected_goal,
         )
         action: str | None = None
@@ -693,7 +709,13 @@ class RobotApplication:
                 )
             else:
                 action = call.name
-                result = await self._execute_initiative_tool(call)
+                if self._active_goal is not expected_goal:
+                    result = self._rejected_tool(
+                        call.name, "attention episode's bound goal is no longer current",
+                        log_prefix="INITIATIVE",
+                    )
+                else:
+                    result = await self._execute_initiative_tool(call)
             try:
                 result_status = json.loads(result.output).get("status", "rejected")
             except (json.JSONDecodeError, AttributeError):
@@ -719,7 +741,7 @@ class RobotApplication:
                 tool_executor=execute_tool if tools else None,
                 refreshed_instructions=(
                     lambda: self._attention_instructions(
-                        stimulus, prior_memory, capabilities_available=True,
+                        stimulus, episode, prior_memory, capabilities_available=True,
                         expected_goal=expected_goal,
                     )
                 ) if tools else None,
@@ -745,7 +767,7 @@ class RobotApplication:
             and self._active_goal is expected_goal and self.effect_tools()
         ):
             followup_completed, followup_effect = await self._request_acquisition_followup(
-                stimulus, expected_goal, prior_memory, inspection_result,
+                stimulus, episode, expected_goal, prior_memory, inspection_result,
                 perception_result,
             )
             continuation_completed = followup_completed
@@ -763,7 +785,7 @@ class RobotApplication:
             and self.continuation_tools(effects[0].name)
         ):
             continuation_completed, continuation_effect = await self._request_continuation(
-                stimulus, expected_goal, prior_memory, effects[0], inspection_result,
+                stimulus, episode, expected_goal, prior_memory, effects[0], inspection_result,
                 perception_result,
             )
             if continuation_effect is not None:
@@ -784,23 +806,25 @@ class RobotApplication:
                 perception_result=perception_result,
             )
             await self._request_outcome_evaluation(
-                stimulus_outcome, stimulus, expected_goal, prior_memory
+                stimulus_outcome, stimulus, episode, expected_goal, prior_memory
             )
         return InitiativeOutcome(response, action, action_status)
 
     def _inspection_followup_instructions(
         self, followup: InspectionFollowupStimulus | VisualPerceptionFollowupStimulus,
-        stimulus: AttentionStimulus, expected_goal: ActiveGoal, working_memory,
+        stimulus: AttentionStimulus, episode: AttentionEpisode,
+        expected_goal: ActiveGoal, working_memory,
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
                 self.cognition_context(), self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
-            ), stimulus.render(actions_enabled=None), followup.render(),
+            ), episode.render(), stimulus.render(actions_enabled=None), followup.render(),
         ))
 
     async def _request_acquisition_followup(
-        self, stimulus: AttentionStimulus, expected_goal: ActiveGoal, prior_memory,
+        self, stimulus: AttentionStimulus, episode: AttentionEpisode,
+        expected_goal: ActiveGoal, prior_memory,
         inspection_result: SelfInspectionResult | None,
         perception_result: VisualPerceptionResult | None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
@@ -857,10 +881,10 @@ class RobotApplication:
             await backend.respond(
                 followup_request,
                 instructions=self._inspection_followup_instructions(
-                    followup, stimulus, expected_goal, prior_memory
+                    followup, stimulus, episode, expected_goal, prior_memory
                 ), tools=tools, tool_executor=execute_tool,
                 refreshed_instructions=lambda: self._inspection_followup_instructions(
-                    followup, stimulus, expected_goal, prior_memory
+                    followup, stimulus, episode, expected_goal, prior_memory
                 ),
             )
         except asyncio.CancelledError:
@@ -875,19 +899,21 @@ class RobotApplication:
 
     def _continuation_instructions(
         self, continuation: InitiativeContinuationStimulus,
-        stimulus: AttentionStimulus, expected_goal: ActiveGoal, working_memory,
+        stimulus: AttentionStimulus, episode: AttentionEpisode,
+        expected_goal: ActiveGoal, working_memory,
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
                 self.cognition_context(), self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ),
-            stimulus.render(actions_enabled=None),
+            episode.render(), stimulus.render(actions_enabled=None),
             continuation.render(),
         ))
 
     async def _request_continuation(
-        self, stimulus: AttentionStimulus, expected_goal: ActiveGoal, prior_memory,
+        self, stimulus: AttentionStimulus, episode: AttentionEpisode,
+        expected_goal: ActiveGoal, prior_memory,
         first_effect: InitiativeEffectOutcome,
         inspection_result: SelfInspectionResult | None = None,
         perception_result: VisualPerceptionResult | None = None,
@@ -948,12 +974,12 @@ class RobotApplication:
             response = await backend.respond(
                 CONTINUATION_INITIATIVE_REQUEST,
                 instructions=self._continuation_instructions(
-                    continuation, stimulus, expected_goal, prior_memory
+                    continuation, stimulus, episode, expected_goal, prior_memory
                 ),
                 tools=tools,
                 tool_executor=execute_tool,
                 refreshed_instructions=lambda: self._continuation_instructions(
-                    continuation, stimulus, expected_goal, prior_memory
+                    continuation, stimulus, episode, expected_goal, prior_memory
                 ),
             )
         except asyncio.CancelledError:
@@ -979,20 +1005,20 @@ class RobotApplication:
 
     def _outcome_instructions(
         self, outcome: GoalOutcomeStimulus, stimulus: AttentionStimulus,
-        expected_goal: ActiveGoal, working_memory,
+        episode: AttentionEpisode, expected_goal: ActiveGoal, working_memory,
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
                 self.cognition_context(), self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ),
-            stimulus.render(actions_enabled=None),
+            episode.render(), stimulus.render(actions_enabled=None),
             outcome.render(),
         ))
 
     async def _request_outcome_evaluation(
         self, outcome: GoalOutcomeStimulus, stimulus: AttentionStimulus,
-        expected_goal: ActiveGoal, prior_memory,
+        episode: AttentionEpisode, expected_goal: ActiveGoal, prior_memory,
     ) -> None:
         backend = self._cognition_backend
         assert backend is not None
@@ -1014,13 +1040,13 @@ class RobotApplication:
             response = await backend.respond(
                 OUTCOME_EVALUATION_REQUEST,
                 instructions=self._outcome_instructions(
-                    outcome, stimulus, expected_goal, prior_memory
+                    outcome, stimulus, episode, expected_goal, prior_memory
                 ),
                 tools=tools,
                 tool_executor=execute_tool if tools else None,
                 refreshed_instructions=(
                     lambda: self._outcome_instructions(
-                        outcome, stimulus, expected_goal, prior_memory
+                        outcome, stimulus, episode, expected_goal, prior_memory
                     )
                 ) if tools else None,
             )

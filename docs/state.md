@@ -76,6 +76,13 @@ Local reflexes do not add or own authoritative state; they consume semantic
 events and request application capabilities that update state through its
 existing owner.
 
+Active goals and attention episodes are also volatile runtime-owned coordination,
+but are not physical `RuntimeState`: a goal supplies longer-lived intention and a
+session-local `G` identity, while an episode supplies temporary focus and an `E`
+identity bound to the goal present at acceptance. Neither is inferred from provider
+history. If that exact goal ceases to be current, goal-dependent episode execution
+fails closed rather than binding to a replacement.
+
 Phase 10 continuation data is request-local, not authoritative state. One
 immutable WorkingMemory snapshot and exact ActiveGoal identity are captured at
 the attention episode's start and reused for initiative, the optional

@@ -218,6 +218,7 @@ class RuntimeConsole:
             f"  state:         {'none' if goal is None else 'active'}",
         ]
         if goal is not None:
+            lines.append(f"  id:            G{goal.id}")
             lines.append(f"  description:   {goal.description}")
         return "\n".join(lines)
 
@@ -227,6 +228,15 @@ class RuntimeConsole:
             "Attention",
             f"  enabled:       {str(status.enabled).lower()}",
             f"  state:         {status.state}",
+            f"  current_episode_id: {'none' if status.current_episode_id is None else f'E{status.current_episode_id}'}",
+            f"  current_episode_state: {status.current_episode_state or 'none'}",
+            f"  current_episode_concern: {status.current_episode_concern or 'none'}",
+            f"  current_episode_goal_id: {'none' if status.current_episode_goal_id is None else f'G{status.current_episode_goal_id}'}",
+            f"  last_episode_id: {'none' if status.last_episode_id is None else f'E{status.last_episode_id}'}",
+            f"  last_episode_state: {status.last_episode_state or 'none'}",
+            f"  last_episode_concern: {status.last_episode_concern or 'none'}",
+            f"  last_episode_goal_id: {'none' if status.last_episode_goal_id is None else f'G{status.last_episode_goal_id}'}",
+            f"  last_episode_completion_reason: {status.last_episode_completion_reason or 'none'}",
             f"  last_trigger:  {status.last_trigger or 'none'}",
             f"  last_source:   {status.last_source or 'none'}",
             f"  last_action:   {status.last_action or 'none'}",
