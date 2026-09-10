@@ -199,7 +199,7 @@ See [Bounded temporal follow-up](temporal-followup.md).
 
 ## Current bounded autonomy episode grammar
 
-Phase 16.1 makes each accepted autonomous attention pass an explicit immutable
+Phase 16 makes each accepted autonomous attention pass an explicit immutable
 `AttentionEpisode`: events nominate reality for attention, episodes provide
 temporary focus, goals provide continuity across episodes, runtime state provides
 current truth, and effects remain explicitly bounded. An event is merely a runtime
@@ -214,20 +214,36 @@ and bound goal ID remain fixed until it closes as handled, no-action, stale-goal
 error, or cancelled. Current and last-completed diagnostics are retained, not an
 episode history. A scheduled follow-up closes its scheduling episode and creates a
 new episode when due; it neither reopens the old episode nor reserves authority.
-Phase 16.1 still permits one active goal and one autonomous episode in flight.
+The runtime still permits one active goal and one autonomous episode in flight.
 Ordinary voice and operator turns are not episodes yet. Continuity requires no
 persistent provider conversation, and there is no model-controlled deliberation loop.
 
 Semantic attention makes an initial decision. It either stops, applies semantic
-**effect #1** and may request one distinct effect continuation, or performs one
-read-only acquisition (`inspect_self` or `observe_scene`), makes one independent
-acquisition-informed effect decision, and may then request one distinct effect
+**effect #1**, or attempts read-only acquisition #1. After acquisition #1, one
+freshly grounded decision may stop, apply effect #1, or attempt acquisition #2.
+After acquisition #2, one freshly grounded, effect-only decision may stop or apply
+effect #1. An applied first effect may receive the existing one distinct effect
 continuation. Optional effect-outcome evaluation follows semantic effects only;
-there is intentionally no evidence-only goal-closure path.
+there is intentionally no evidence-only goal-closure path and no acquisition after
+the first effect.
 
-The fixed budgets are: one acquisition, two semantic effects, one effect
-continuation, one autonomous cognition episode in flight, one temporal
+The fixed budgets are: two acquisition attempts (including rejected attempts),
+two semantic effects, one effect
+continuation, one outcome evaluation, one autonomous cognition episode in flight, one temporal
 commitment, and zero autonomous WorkingMemory writes. A `TemporalFollowupDue`
 starts a new episode; it never continues the scheduling episode. Acquisition
 follow-up and effect continuation are separate provider requests, but only the
-latter is controlled by `--initiative-continuation`.
+latter is controlled by `--initiative-continuation`. The same acquisition tool may
+be used twice for different information. Cognition is instructed to keep both
+attempts material to the immutable concern and bound goal; no semantic relevance
+classifier is added.
+
+Ordered acquisition outcomes are bounded to two and remain request-local. They
+preserve capability, status, and provenance: inspection facts are runtime-produced
+and authoritative for their area, while visual descriptions are model-generated,
+possibly incomplete or uncertain, and never authoritative Runtime state. Between
+passes the application reconstructs current `RuntimeState`, while reusing the fixed
+episode/goal identities, original observation, and episode-start WorkingMemory
+snapshot. No provider conversation or model-controlled loop drives progression;
+the explicit path has at most initial, post-acquisition-1, and post-acquisition-2
+decisions. Operator and voice turns remain outside episodes.

@@ -83,13 +83,16 @@ identity bound to the goal present at acceptance. Neither is inferred from provi
 history. If that exact goal ceases to be current, goal-dependent episode execution
 fails closed rather than binding to a replacement.
 
-Phase 10 continuation data is request-local, not authoritative state. One
+Autonomous acquisition and continuation data is request-local, not authoritative
+state. Up to two ordered acquisition outcomes retain their capability, status, and
+inspection/visual provenance without entering `RuntimeState` or WorkingMemory. One
 immutable WorkingMemory snapshot and exact ActiveGoal identity are captured at
-the attention episode's start and reused for initiative, the optional
-continuation, and optional outcome evaluation. RuntimeState is freshly projected
-for each request. `InitiativeContinuationStimulus` contains only the first effect
-name/status/runtime result and original attention identity; outcome grounding
-contains one or two immutable effect results. Neither stimulus, autonomous
+the attention episode's start and reused for every acquisition decision, the
+optional continuation, and optional outcome evaluation. RuntimeState is freshly
+projected for each request. `InitiativeContinuationStimulus` contains the first
+effect name/status/runtime result, original attention identity, and bounded prior
+acquisitions; outcome grounding contains one or two immutable effect results plus
+that same bounded evidence. Neither stimulus, autonomous
 response, effect result, nor operator message is persisted or appended to
 WorkingMemory. Continuation diagnostics are latest-episode volatile metadata
 only.

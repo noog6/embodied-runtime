@@ -8,15 +8,17 @@ provider-neutral summary. `RobotApplication` validates and executes the semantic
 request, while the injectable `HostSelfInspector` owns passive host reads.
 
 Operator cognition may make one tool call and use its provider-local result
-continuation. Autonomous Request A may instead spend its separate budget of one
-inspection per attention episode. An applied inspection can cause one new,
-independent follow-up decision with fresh `RuntimeState`, the exact same
+continuation. An autonomous episode may spend either or both of its two acquisition
+attempts on inspection, including the same capability for different exact areas.
+Every attempt, including a rejection, consumes a slot. An inspection causes one
+independent bounded follow-up decision with fresh `RuntimeState`, the exact same
 `ActiveGoal`, the episode-start `WorkingMemory` snapshot, original semantic
-observation, and inspection result. That request exposes effects only, never
-inspection or goal tools. If it applies effect one, the existing single Phase 10
-continuation may apply one distinct second effect. Thus inspection does not count
-as an effect: the ceilings remain one inspection and two semantic effects. Outcome
-evaluation receives inspection separately and never runs for inspection alone.
+observation, and ordered request-local evidence. After the first attempt it exposes
+the remaining acquisition tools plus effects; after the second it exposes effects
+only. If it applies effect one, the existing continuation may apply one distinct
+second effect. Thus inspection does not count as an effect: the ceilings remain two
+acquisition attempts and two semantic effects. Outcome evaluation receives all
+bounded evidence separately and never runs for inspection alone.
 
 Storage always uses `shutil.disk_usage("/")`. Network inspection sorts and caps
 local interfaces at eight and reads only local kernel interface/default-route
@@ -24,8 +26,8 @@ metadata; it performs no connectivity test and cannot claim Internet reachabilit
 Camera inspection reports application-owned resource readiness without capture.
 Runtime inspection exposes only bounded capability/lifecycle metadata, never goal
 prose, memory text, messages, environment, credentials, or logs. Optional missing
-host facts become `unavailable`; failure rejects the inspection and ends that path
-without retry or an effect follow-up.
+host facts become `unavailable`; failure rejects the inspection without automatic
+retry, is grounded honestly, and still consumes its acquisition slot.
 
 There is no shell, subprocess capability, arbitrary filesystem access, outbound
 probe, image capture, polling, history, new event, CLI flag, or TOML key. Power and

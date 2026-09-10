@@ -65,8 +65,8 @@ given fresh Runtime context, ActiveGoal, and bounded operator WorkingMemory plus
 a provider-neutral attention stimulus. Initiative now has independent capability permissions:
 
 - without `--initiative`, cognition occurs only for explicit operator asks;
-- `--initiative` enables bounded goal-directed initiative, may receive one
-  read-only `inspect_self` or `observe_scene` acquisition where available, and
+- `--initiative` enables bounded goal-directed initiative, may receive up to two
+  read-only `inspect_self` or `observe_scene` attempts where available, and
   permits the single bounded `schedule_followup` semantic effect;
 - `--initiative-actions` permits `orient_body` only on a nonphysical body;
 - `--initiative-messages` permits `address_operator` only with a configured sink;
@@ -166,8 +166,9 @@ attention. Phase 10 works identically for every supported observation kind.
 ## Bounded semantic self-inspection
 
 Phase 13 adds one provider-neutral, read-only `inspect_self` capability for four
-bounded local areas. Autonomous inspection is limited to one per episode and may
-precede—but never count as—at most two existing semantic effects. See
+bounded local areas. Autonomous self-inspection may consume either or both of the
+episode's two read-only acquisition attempts and may precede—but never count as—
+the existing bounded semantic effects. See
 [Bounded semantic self-inspection](self-inspection.md).
 
 ## Phase 15: bounded temporal follow-up
@@ -182,5 +183,9 @@ due request takes fresh runtime context and a fresh WorkingMemory snapshot. See
 
 The normative current episode grammar and fixed budgets are summarized in
 [architecture](architecture.md#current-bounded-autonomy-episode-grammar). In
-particular, acquisition follow-up is not effect continuation, temporal due work
-starts a fresh single-flight episode, and goal closure remains post-effect only.
+particular, the explicit grammar permits at most two request-local acquisition
+attempts before any effect. Rejections consume slots, the same tool can gather
+different information twice, each pass reconstructs Runtime state, and no third
+acquisition or acquisition after an effect exists. Acquisition follow-up is not
+effect continuation, temporal due work starts a fresh single-flight episode, and
+goal closure remains post-effect only.

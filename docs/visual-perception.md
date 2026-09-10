@@ -37,12 +37,16 @@ reports these resource and interpretation facts separately and never captures.
 
 ## Autonomous bound
 
-An autonomous attention episode can make at most one read-only acquisition:
-either `inspect_self` or `observe_scene`. After a successful acquisition, one
-fresh request receives effect tools only. If it applies an effect, the existing
-Phase 10 continuation may apply one distinct second effect; the semantic-effect
-ceiling remains two. The visual grounding can inform that continuation and the
-optional outcome evaluation but remains separate from effect outcomes.
+An autonomous attention episode can attempt at most two ordered read-only
+acquisitions, using `inspect_self`, `observe_scene`, or the same capability twice
+for materially different information. Rejected attempts consume their slot. After
+the first, a fresh request receives one remaining acquisition opportunity plus
+effects; after the second, a fresh request receives effects only. No acquisition is
+possible after the first effect. The existing continuation may apply one distinct
+second effect, so the semantic-effect ceiling remains two and outcome evaluation
+remains one. All bounded visual grounding can inform continuation and outcome, but
+remains model-generated, uncertain, request-local, and separate from authoritative
+Runtime facts and effect outcomes.
 
 Visual perception is on demand. There is no streaming, background or continuous
 vision, polling, image history, visual memory, change detection, or new
