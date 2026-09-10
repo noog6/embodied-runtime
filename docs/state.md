@@ -118,3 +118,10 @@ The zero/one `PendingFollowup` is a volatile application-owned future attention
 commitment, not physical reality, goal state, or memory. It binds the exact goal
 object and is cleared on due, goal change, explicit cancellation, or shutdown.
 It is never persisted. See [Bounded temporal follow-up](temporal-followup.md).
+
+## Deliberative state
+
+Current RuntimeState remains authoritative continuous truth while an attention
+episode is active. Operator acquisition stages reconstruct it afresh and include
+the current zero-or-one ActiveGoal even though operator episodes normally are not
+goal-bound. Episode lifecycle state is volatile, session-local, and not persisted.

@@ -19,7 +19,8 @@ from embodied_runtime.cognition.goals import (
     validate_goal_description,
 )
 from embodied_runtime.cognition.outcome import (
-    GoalOutcomeStimulus, InitiativeAcquisitionOutcome, InitiativeEffectOutcome,
+    EpisodeAcquisitionOutcome, GoalOutcomeStimulus,
+    InitiativeAcquisitionOutcome, InitiativeEffectOutcome,
 )
 from embodied_runtime.cognition.working_memory import (
     WorkingMemory,
@@ -31,6 +32,7 @@ from embodied_runtime.cognition.working_memory import (
 __all__ = [
     "CognitionContext",
     "GoalOutcomeStimulus",
+    "EpisodeAcquisitionOutcome",
     "InitiativeAcquisitionOutcome",
     "InitiativeEffectOutcome",
     "ActiveGoal",

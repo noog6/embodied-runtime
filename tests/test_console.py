@@ -170,38 +170,13 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.app.events.is_running)
 
     def test_attention_diagnostics_are_explicit_and_not_in_status(self):
-        self.assertEqual(self.console.execute("attention"), (
-            "Attention\n"
-            "  enabled:       false\n"
-            "  state:         disabled\n"
-            "  current_episode_id: none\n"
-            "  current_episode_state: none\n"
-            "  current_episode_concern: none\n"
-            "  current_episode_goal_id: none\n"
-            "  last_episode_id: none\n"
-            "  last_episode_state: none\n"
-            "  last_episode_concern: none\n"
-            "  last_episode_goal_id: none\n"
-            "  last_episode_completion_reason: none\n"
-            "  last_trigger:  none\n"
-            "  last_source:   none\n"
-            "  last_action:   none\n"
-            "  last_action_status: none\n"
-            "  last_response: unavailable\n"
-            "  last_inspection_state: not_run\n"
-            "  last_inspection_area: none\n"
-            "  last_inspection_status: none\n"
-            "  last_visual_state: not_run\n"
-            "  last_visual_focus: none\n"
-            "  last_visual_status: none\n"
-            "  last_continuation_state: not_run\n"
-            "  last_continuation_action: none\n"
-            "  last_continuation_status: none\n"
-            "  last_continuation_response: unavailable\n"
-            "  last_outcome_state: not_run\n"
-            "  last_goal_closure: none\n"
-            "  last_outcome_response: unavailable", False
-        ))
+        report, stop = self.console.execute("attention")
+        self.assertFalse(stop)
+        self.assertIn("autonomous_enabled: false", report)
+        self.assertIn("autonomous_state: disabled", report)
+        self.assertIn("Current episode\n  id:            none", report)
+        self.assertIn("Last episode\n  id:            none", report)
+        self.assertIn("Last autonomous initiative", report)
         self.assertNotIn("Attention", self.console.execute("status")[0])
 
     async def test_ask_uses_raw_payload_and_displays_response(self):

@@ -111,3 +111,11 @@ A temporal `followup` state of `due_pending` means its timer is due and its one
 exact-goal attention opportunity is waiting for the current single-flight episode
 to finish. Self-inspection remains `temporal_followup_pending=true` in both
 `pending` and `due_pending`; goal change, clear, completion, or shutdown removes it.
+
+## Attention episodes
+
+`ask <message>` is the only deliberative console command and labels its operator
+episode with source `console`. Administrative commands remain direct runtime
+operations. `attention` separates shared current/last episode lifecycle fields
+(including trigger and source) from the last autonomous-initiative diagnostics;
+it never displays the operator utterance as an episode concern.

@@ -1,4 +1,4 @@
-"""Narrow goal-directed attention for selected semantic transitions."""
+"""Bounded deliberative attention and autonomous transition selection."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -54,7 +54,7 @@ EpisodeCompletionReason = Literal["handled", "no_action", "error", "cancelled", 
 
 @dataclass(frozen=True, slots=True)
 class AttentionEpisode:
-    """One runtime-owned, bounded autonomous deliberation."""
+    """Identity, focus, binding, and lifecycle for one bounded deliberation."""
 
     id: int
     trigger_kind: str
@@ -74,6 +74,78 @@ class AttentionEpisode:
             f"  goal_id: {goal}",
             "The episode ends after the currently authorized bounded execution path.",
         ))
+
+
+class AttentionEpisodeCoordinator:
+    """Own the session-local episode namespace and minimal single-flight fence."""
+
+    def __init__(self) -> None:
+        self._next_id = 1
+        self._current: AttentionEpisode | None = None
+        self._last: AttentionEpisode | None = None
+        self._operator_waiters = 0
+        self._condition = asyncio.Condition()
+
+    @property
+    def current(self) -> AttentionEpisode | None:
+        return self._current
+
+    @property
+    def last(self) -> AttentionEpisode | None:
+        return self._last
+
+    @property
+    def operator_waiting(self) -> bool:
+        return self._operator_waiters > 0
+
+    def try_start(self, trigger_kind: str, trigger_source: str, concern: str,
+                  goal_id: int | None) -> AttentionEpisode | None:
+        """Start autonomous work only when idle and no operator is waiting."""
+        if self._current is not None or self._operator_waiters:
+            return None
+        return self._start(trigger_kind, trigger_source, concern, goal_id)
+
+    async def start_operator(self, trigger_source: str, concern: str) -> AttentionEpisode:
+        """Wait fairly enough to serialize an explicit operator request."""
+        async with self._condition:
+            self._operator_waiters += 1
+            try:
+                await self._condition.wait_for(lambda: self._current is None)
+                return self._start("operator_utterance", trigger_source, concern, None)
+            finally:
+                self._operator_waiters -= 1
+
+    def _start(self, trigger_kind: str, trigger_source: str, concern: str,
+               goal_id: int | None) -> AttentionEpisode:
+        episode = AttentionEpisode(
+            self._next_id, trigger_kind, trigger_source, concern, goal_id,
+            state="active",
+        )
+        self._next_id += 1
+        self._current = episode
+        goal = "none" if goal_id is None else f"G{goal_id}"
+        LOGGER.info("[ATTENTION] episode=E%s status=started trigger=%s source=%s goal=%s",
+                    episode.id, trigger_kind, trigger_source, goal)
+        return episode
+
+    def close(self, episode: AttentionEpisode,
+              reason: EpisodeCompletionReason) -> AttentionEpisode:
+        if self._current is not episode:
+            return dataclass_replace(episode, state="closed", completion_reason=reason)
+        closed = dataclass_replace(episode, state="closed", completion_reason=reason)
+        self._current = None
+        self._last = closed
+        goal = "none" if episode.goal_id is None else f"G{episode.goal_id}"
+        LOGGER.info("[ATTENTION] episode=E%s status=closed reason=%s goal=%s",
+                    episode.id, reason, goal)
+        # close() is synchronous so autonomous completion callbacks cannot race it;
+        # wake explicit waiters on the next loop turn.
+        asyncio.get_running_loop().create_task(self._notify_idle())
+        return closed
+
+    async def _notify_idle(self) -> None:
+        async with self._condition:
+            self._condition.notify_all()
 
 
 def concern_for_stimulus(stimulus: "AttentionStimulus") -> str:
@@ -250,10 +322,14 @@ class AttentionStatus:
     current_episode_state: str | None
     current_episode_concern: str | None
     current_episode_goal_id: int | None
+    current_episode_trigger: str | None
+    current_episode_source: str | None
     last_episode_id: int | None
     last_episode_state: str | None
     last_episode_concern: str | None
     last_episode_goal_id: int | None
+    last_episode_trigger: str | None
+    last_episode_source: str | None
     last_episode_completion_reason: str | None
 
 
@@ -272,6 +348,7 @@ class GoalAttentionController:
                  is_running: Callable[[], bool], has_active_goal: Callable[[], bool],
                  current_goal: Callable[[], object | None],
                  claim_temporal_due: Callable[..., TemporalFollowupDue | None],
+                 coordinator: AttentionEpisodeCoordinator | None = None,
                  run_initiative: Callable[[AttentionStimulus, AttentionEpisode], Awaitable[InitiativeOutcome]]) -> None:
         self.enabled = enabled
         self.platform_attention_enabled = platform_attention_enabled
@@ -283,9 +360,7 @@ class GoalAttentionController:
         self._run_initiative = run_initiative
         self._subscriptions: list[Subscription[Event]] = []
         self._task: asyncio.Task[None] | None = None
-        self._next_episode_id = 1
-        self._current_episode: AttentionEpisode | None = None
-        self._last_episode: AttentionEpisode | None = None
+        self.coordinator = coordinator or AttentionEpisodeCoordinator()
         self._state = "idle" if enabled else "disabled"
         self._last_trigger: str | None = None
         self._last_source: str | None = None
@@ -349,15 +424,19 @@ class GoalAttentionController:
                                self._last_inspection_status,
                                self._last_visual_state, self._last_visual_focus,
                                self._last_visual_status,
-                               self._current_episode.id if self._current_episode else None,
-                               self._current_episode.state if self._current_episode else None,
-                               self._current_episode.concern if self._current_episode else None,
-                               self._current_episode.goal_id if self._current_episode else None,
-                               self._last_episode.id if self._last_episode else None,
-                               self._last_episode.state if self._last_episode else None,
-                               self._last_episode.concern if self._last_episode else None,
-                               self._last_episode.goal_id if self._last_episode else None,
-                               self._last_episode.completion_reason if self._last_episode else None)
+                               self.coordinator.current.id if self.coordinator.current else None,
+                               self.coordinator.current.state if self.coordinator.current else None,
+                               self.coordinator.current.concern if self.coordinator.current else None,
+                               self.coordinator.current.goal_id if self.coordinator.current else None,
+                               self.coordinator.current.trigger_kind if self.coordinator.current else None,
+                               self.coordinator.current.trigger_source if self.coordinator.current else None,
+                               self.coordinator.last.id if self.coordinator.last else None,
+                               self.coordinator.last.state if self.coordinator.last else None,
+                               self.coordinator.last.concern if self.coordinator.last else None,
+                               self.coordinator.last.goal_id if self.coordinator.last else None,
+                               self.coordinator.last.trigger_kind if self.coordinator.last else None,
+                               self.coordinator.last.trigger_source if self.coordinator.last else None,
+                               self.coordinator.last.completion_reason if self.coordinator.last else None)
 
     def record_visual(self, *, state: str | None = None,
                       focus: str | None = None, status: str | None = None) -> None:
@@ -429,7 +508,7 @@ class GoalAttentionController:
                 "reason=goal_changed"
             )
             return
-        if self._task is not None and not self._task.done():
+        if self.coordinator.current is not None or self.coordinator.operator_waiting:
             LOGGER.info(
                 "[ATTENTION] event=temporal_followup_due decision=deferred reason=in_flight"
             )
@@ -453,7 +532,7 @@ class GoalAttentionController:
     ) -> None:
         if not self._is_running() or not self._backend_available or not self._has_active_goal():
             return
-        if self._task is not None and not self._task.done():
+        if self.coordinator.current is not None or self.coordinator.operator_waiting:
             LOGGER.info("[ATTENTION] event=%s decision=suppressed reason=in_flight",
                         observation.kind)
             return
@@ -462,13 +541,13 @@ class GoalAttentionController:
         goal_id = getattr(goal, "id", None)
         if goal is None or goal_id is None:
             return
-        episode = AttentionEpisode(
-            self._next_episode_id, stimulus.kind, stimulus.source,
-            concern_for_stimulus(stimulus), goal_id,
+        episode = self.coordinator.try_start(
+            stimulus.kind, stimulus.source, concern_for_stimulus(stimulus), goal_id
         )
-        self._next_episode_id += 1
-        episode = dataclass_replace(episode, state="active")
-        self._current_episode = episode
+        if episode is None:
+            LOGGER.info("[ATTENTION] event=%s decision=suppressed reason=in_flight",
+                        observation.kind)
+            return
         self._last_trigger = stimulus.kind
         self._last_source = stimulus.source
         self._last_response = None
@@ -488,8 +567,6 @@ class GoalAttentionController:
         self._last_visual_focus = None
         self._last_visual_status = None
         self._state = "in_flight"
-        LOGGER.info("[ATTENTION] episode=E%s status=started trigger=%s source=%s goal=G%s",
-                    episode.id, stimulus.kind, stimulus.source, goal_id)
         self._task = asyncio.create_task(
             self._reflect(stimulus, episode, goal, required_goal=required_goal),
             name="initiative:goal_attention",
@@ -504,7 +581,7 @@ class GoalAttentionController:
 
     async def _release_temporal_due(self) -> None:
         """Atomically claim and accept due work when attention is actually idle."""
-        if self._task is not None and not self._task.done():
+        if self.coordinator.current is not None or self.coordinator.operator_waiting:
             return
         due = self._claim_temporal_due(self._current_goal())
         if due is None:
@@ -512,6 +589,10 @@ class GoalAttentionController:
         # Neither this await nor the nested _consider suspends before it installs
         # the new attention task, so no observation can win after the claim.
         await self._deliver_claimed_temporal(due)
+
+    async def release_temporal_due(self) -> None:
+        """Offer deferred temporal work after externally owned attention closes."""
+        await self._release_temporal_due()
 
     async def _reflect(
         self, stimulus: AttentionStimulus, episode: AttentionEpisode, bound_goal: object,
@@ -549,10 +630,4 @@ class GoalAttentionController:
 
     def _close_episode(self, episode: AttentionEpisode,
                        reason: EpisodeCompletionReason) -> None:
-        closed = dataclass_replace(episode, state="closed", completion_reason=reason)
-        if self._current_episode is episode:
-            self._current_episode = None
-        self._last_episode = closed
-        goal = "none" if episode.goal_id is None else f"G{episode.goal_id}"
-        LOGGER.info("[ATTENTION] episode=E%s status=closed reason=%s goal=%s",
-                    episode.id, reason, goal)
+        self.coordinator.close(episode, reason)

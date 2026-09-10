@@ -51,3 +51,8 @@ Runtime facts and effect outcomes.
 Visual perception is on demand. There is no streaming, background or continuous
 vision, polling, image history, visual memory, change detection, or new
 attention source.
+
+Operator and autonomous attention episodes may use one-frame visual perception as
+a bounded acquisition. Its typed evidence remains model-generated, potentially
+incomplete or uncertain, and not authoritative RuntimeState. It is not flattened
+into runtime fact text when carried to a later acquisition stage.

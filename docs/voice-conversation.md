@@ -190,3 +190,11 @@ storage, OpenAI realtime audio, or SunFounder's `VoiceAssistant` orchestration.
 Successful third-party HTTP request INFO lines are intentionally hidden in
 normal logging; first-party lifecycle INFO records and third-party warnings and
 errors remain visible.
+
+## Attention boundary
+
+A voice session is transport, not an attention episode. Each recognized utterance
+is passed to `RobotApplication` with source `voice` and creates a separate operator
+episode. That episode closes before TTS playback and before follow-up listening;
+a second voice turn creates a new episode and obtains continuity from bounded
+WorkingMemory. Voice owns no episode identity or provider conversation session.

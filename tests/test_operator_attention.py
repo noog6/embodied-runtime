@@ -1,0 +1,335 @@
+import asyncio
+import json
+import unittest
+
+from embodied_runtime.app import ApplicationOptions, RobotApplication
+from embodied_runtime.attention import AttentionEpisodeCoordinator
+from embodied_runtime.body.virtual import VirtualBodyBackend
+from embodied_runtime.cognition import CognitionToolCall, TextCognitionBackend
+from embodied_runtime.hardware.virtual import VirtualHardwareBackend
+from embodied_runtime.profile import RobotProfile
+from embodied_runtime.observations import SemanticObservation
+from embodied_runtime.voice import VoiceSessionPolicy
+from tests.test_platform import snapshot
+
+
+class Platform:
+    def snapshot(self):
+        return snapshot()
+
+
+class ScriptedBackend(TextCognitionBackend):
+    identifier = "scripted-operator-attention"
+
+    def __init__(self, calls=()):
+        self.calls = list(calls)
+        self.requests = []
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((message, instructions, tuple(tool.name for tool in tools)))
+        if self.calls:
+            name, arguments = self.calls.pop(0)
+            await tool_executor(CognitionToolCall(name, json.dumps(arguments)))
+            return "provisional"
+        return "final answer"
+
+
+class BlockingBackend(TextCognitionBackend):
+    identifier = "blocking-operator-attention"
+
+    def __init__(self):
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.active = 0
+        self.maximum = 0
+        self.requests = []
+        self.cancelled = asyncio.Event()
+        self.completed = 0
+
+    async def respond(self, message, **kwargs):
+        self.requests.append(message)
+        self.active += 1
+        self.maximum = max(self.maximum, self.active)
+        self.entered.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        finally:
+            self.active -= 1
+        self.completed += 1
+        return message
+
+
+class CancellationResistantBackend(TextCognitionBackend):
+    identifier = "cancellation-resistant"
+
+    def __init__(self):
+        self.app = None
+        self.entered = asyncio.Event()
+        self.attempted_tool = asyncio.Event()
+        self.lifecycle_at_attempt = None
+        self.completed = False
+
+    async def respond(self, message, *, tool_executor=None, **kwargs):
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        self.lifecycle_at_attempt = self.app.state
+        self.attempted_tool.set()
+        await tool_executor(CognitionToolCall(
+            "orient_body", '{"yaw_degrees": 30, "pitch_degrees": 10}'
+        ))
+        self.completed = True
+        return "must not complete"
+
+
+class VoiceBackend(TextCognitionBackend):
+    identifier = "voice-operator-attention"
+
+    def __init__(self):
+        self.app = None
+        self.episodes = []
+        self.instructions = []
+
+    async def respond(self, message, *, instructions=None, **kwargs):
+        episode = self.app.episode_coordinator.current
+        self.episodes.append((episode.id, episode.trigger_source))
+        self.instructions.append(instructions)
+        return f"answer {len(self.episodes)}"
+
+
+class TwoTurnVoice:
+    def __init__(self):
+        self.results = ["first", "second"]
+        self.listen_calls = 0
+
+    async def listen(self):
+        self.listen_calls += 1
+        return self.results.pop(0)
+
+    async def stop_listening(self):
+        pass
+
+    async def play_engagement_cue(self):
+        pass
+
+    async def close(self):
+        pass
+
+
+class CheckingTTS:
+    def __init__(self):
+        self.app = None
+        self.spoken = []
+
+    async def speak(self, text):
+        if self.app.episode_coordinator.current is not None:
+            raise AssertionError("attention episode remained active during TTS")
+        self.spoken.append(text)
+
+    async def close(self):
+        pass
+
+
+class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
+    def app(self, backend, *, initiative=False, voice=None, tts=None, body=None):
+        return RobotApplication(
+            RobotProfile("test", "Test", "test"), VirtualHardwareBackend(),
+            ApplicationOptions(initiative_enabled=initiative),
+            platform_provider=Platform(), cognition_backend=backend,
+            body_backend=body,
+            voice_provider=voice, text_to_speech_provider=tts,
+            voice_policy=VoiceSessionPolicy(initial_timeout_seconds=0.1, followup_timeout_seconds=0.1),
+        )
+
+    async def test_plain_operator_episode_has_shared_identity_and_no_goal_binding(self):
+        backend = ScriptedBackend()
+        app = self.app(backend)
+        await app.start()
+        app.set_goal("keep watch")
+        self.assertEqual(await app.handle_operator_utterance("hello", source="console"),
+                         "final answer")
+        episode = app.episode_coordinator.last
+        self.assertEqual((episode.id, episode.trigger_kind, episode.trigger_source),
+                         (1, "operator_utterance", "console"))
+        self.assertIsNone(episode.goal_id)
+        self.assertEqual(episode.completion_reason, "handled")
+        self.assertIn("id: G1", backend.requests[0][1])
+        self.assertEqual(len(app.working_memory.snapshot()), 1)
+        await app.stop()
+
+    async def test_two_acquisitions_use_three_fresh_requests_and_one_memory_turn(self):
+        backend = ScriptedBackend((
+            ("inspect_self", {"area": "runtime"}),
+            ("inspect_self", {"area": "storage"}),
+        ))
+        app = self.app(backend)
+        await app.start()
+        self.assertEqual(await app.request_cognition("inspect both"), "final answer")
+        self.assertEqual(len(backend.requests), 3)
+        self.assertEqual({request[0] for request in backend.requests}, {"inspect both"})
+        self.assertIn("acquisitions_used: 1", backend.requests[1][1])
+        self.assertIn("acquisitions_used: 2", backend.requests[2][1])
+        self.assertNotIn("inspect_self", backend.requests[2][2])
+        turn = app.working_memory.snapshot()[0]
+        self.assertEqual([outcome.name for outcome in turn.tool_outcomes],
+                         ["inspect_self", "inspect_self"])
+        await app.stop()
+
+    async def test_operator_requests_are_serialized(self):
+        backend = BlockingBackend()
+        app = self.app(backend)
+        await app.start()
+        first = asyncio.create_task(app.request_cognition("one"))
+        await backend.entered.wait()
+        second = asyncio.create_task(app.request_cognition("two"))
+        await asyncio.sleep(0)
+        self.assertEqual(backend.maximum, 1)
+        self.assertEqual(app.episode_coordinator.current.id, 1)
+        backend.release.set()
+        self.assertEqual(await first, "one")
+        self.assertEqual(await second, "two")
+        self.assertEqual(backend.maximum, 1)
+        self.assertEqual(app.episode_coordinator.last.id, 2)
+        await app.stop()
+
+    async def test_autonomous_start_yields_to_operator_waiter(self):
+        coordinator = AttentionEpisodeCoordinator()
+        autonomous = coordinator.try_start("event", "test", "concern", 1)
+        waiter = asyncio.create_task(coordinator.start_operator("voice", "respond"))
+        await asyncio.sleep(0)
+        coordinator.close(autonomous, "handled")
+        self.assertIsNone(coordinator.try_start("event", "test", "concern", 1))
+        operator = await waiter
+        self.assertEqual((operator.id, operator.trigger_source), (2, "voice"))
+        coordinator.close(operator, "handled")
+
+    async def test_operator_active_suppresses_ordinary_autonomous_event(self):
+        backend = BlockingBackend()
+        app = self.app(backend, initiative=True)
+        await app.start(); app.set_goal("goal")
+        operator = asyncio.create_task(app.request_cognition("operator"))
+        await backend.entered.wait()
+        await app.attention._consider(SemanticObservation("test", "test", ()))
+        self.assertEqual(len(app.working_memory.snapshot()), 0)
+        self.assertEqual(backend.maximum, 1)
+        backend.release.set(); await operator; await asyncio.sleep(0)
+        self.assertEqual(app.episode_coordinator.last.trigger_kind,
+                         "operator_utterance")
+        self.assertEqual(backend.maximum, 1)
+        await app.stop()
+
+    async def test_autonomous_active_blocks_operator_and_new_events(self):
+        backend = BlockingBackend()
+        app = self.app(backend, initiative=True)
+        await app.start(); app.set_goal("goal")
+        await app.attention._consider(SemanticObservation("first", "test", ()))
+        await backend.entered.wait()
+        operator = asyncio.create_task(app.request_cognition("operator"))
+        await asyncio.sleep(0)
+        await app.attention._consider(SemanticObservation("second", "test", ()))
+        self.assertTrue(app.episode_coordinator.operator_waiting)
+        self.assertEqual(app.episode_coordinator.current.id, 1)
+        backend.release.set(); await operator
+        self.assertEqual(backend.maximum, 1)
+        self.assertEqual(app.episode_coordinator.last.id, 2)
+        self.assertEqual(app.episode_coordinator.last.trigger_kind,
+                         "operator_utterance")
+        await app.stop()
+
+    async def test_shutdown_cancels_operator_after_coordinator_wait(self):
+        backend = BlockingBackend()
+        app = self.app(backend, initiative=True)
+        await app.start(); app.set_goal("goal")
+        await app.attention._consider(SemanticObservation("first", "test", ()))
+        await backend.entered.wait()
+        operator = asyncio.create_task(app.request_cognition("operator"))
+        await asyncio.sleep(0)
+        self.assertTrue(app.episode_coordinator.operator_waiting)
+        await app.stop()
+        with self.assertRaisesRegex(RuntimeError, "running application"):
+            await operator
+        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(app.working_memory.snapshot(), ())
+        self.assertIsNone(app.episode_coordinator.current)
+        self.assertFalse(app.episode_coordinator.operator_waiting)
+
+    async def test_shutdown_cancels_and_joins_active_operator_cognition(self):
+        backend = BlockingBackend()
+        app = self.app(backend)
+        await app.start()
+        operator = asyncio.create_task(app.request_cognition("operator"))
+        await backend.entered.wait()
+        episode = app.episode_coordinator.current
+        self.assertEqual((episode.id, episode.trigger_kind),
+                         (1, "operator_utterance"))
+        self.assertIs(app._active_operator_cognition_task, operator)
+
+        await app.stop()
+
+        self.assertTrue(operator.cancelled())
+        self.assertTrue(backend.cancelled.is_set())
+        self.assertEqual(backend.active, 0)
+        self.assertEqual(backend.completed, 0)
+        self.assertEqual(app.state.value, "stopped")
+        self.assertIsNone(app.episode_coordinator.current)
+        self.assertEqual(app.episode_coordinator.last.id, 1)
+        self.assertEqual(app.episode_coordinator.last.completion_reason, "cancelled")
+        self.assertEqual(app.working_memory.snapshot(), ())
+        self.assertIsNone(app._active_operator_cognition_task)
+
+    async def test_shutdown_fences_tool_from_cancellation_resistant_backend(self):
+        backend = CancellationResistantBackend()
+        body = VirtualBodyBackend()
+        app = self.app(backend, body=body)
+        backend.app = app
+        await app.start()
+        before = app.runtime_state.body
+        closed = []
+        original_close = app.episode_coordinator.close
+
+        def record_close(episode, reason):
+            closed.append((episode.id, reason))
+            return original_close(episode, reason)
+
+        app.episode_coordinator.close = record_close
+        operator = asyncio.create_task(app.request_cognition("move"))
+        await backend.entered.wait()
+
+        await app.stop()
+
+        self.assertTrue(backend.attempted_tool.is_set())
+        self.assertNotEqual(backend.lifecycle_at_attempt.value, "running")
+        self.assertFalse(backend.completed)
+        self.assertTrue(operator.cancelled())
+        self.assertEqual(app.runtime_state.body, before)
+        self.assertEqual(closed, [(1, "cancelled")])
+        self.assertEqual(app.episode_coordinator.last.completion_reason, "cancelled")
+        self.assertIsNone(app.episode_coordinator.current)
+        self.assertEqual(app.working_memory.snapshot(), ())
+        self.assertIsNone(app._active_operator_cognition_task)
+
+    async def test_two_voice_turns_are_distinct_episodes_closed_before_tts(self):
+        backend, voice, tts = VoiceBackend(), TwoTurnVoice(), CheckingTTS()
+        app = self.app(backend, voice=voice, tts=tts)
+        backend.app = tts.app = app
+        await app.start()
+        self.assertEqual(await app.voice.start(source="console"),
+                         "Voice session closed.")
+        self.assertEqual(backend.episodes, [(1, "voice"), (2, "voice")])
+        self.assertEqual(tts.spoken, ["answer 1", "answer 2"])
+        self.assertEqual(voice.listen_calls, 2)
+        self.assertIn("Working memory\n  state: empty", backend.instructions[0])
+        self.assertIn('operator: "first"', backend.instructions[1])
+        self.assertEqual(len(app.working_memory.snapshot()), 2)
+        self.assertIsNone(app.episode_coordinator.current)
+        await app.stop()
+
+
+if __name__ == "__main__":
+    unittest.main()

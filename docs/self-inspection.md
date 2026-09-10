@@ -37,3 +37,8 @@ no Raspberry Pi command runner is introduced.
 Phase 15 adds the single runtime-area fact
 `temporal_followup_pending=true|false`. It reveals no purpose, due point, task,
 or scheduler internals. Scheduling itself is a semantic effect, not inspection.
+
+Operator and autonomous attention episodes may use self-inspection as one of at
+most two ordered read-only acquisition attempts. Successful facts are
+runtime-produced and authoritative for the inspected area; rejected attempts are
+represented honestly and consume their slot.
