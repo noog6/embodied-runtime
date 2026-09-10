@@ -14,7 +14,7 @@ class InitiativeEffectOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class InitiativeAcquisitionOutcome:
+class EpisodeAcquisitionOutcome:
     """One ordered, request-local read-only acquisition attempt."""
 
     capability: str
@@ -55,6 +55,11 @@ class InitiativeAcquisitionOutcome:
                 f"{json.dumps(self.runtime_result, ensure_ascii=False)}"
             )
         return lines
+
+
+# Compatibility alias for Phase 16.2 callers. The evidence itself is shared by
+# operator and autonomous episodes; effect and outcome types remain autonomous.
+InitiativeAcquisitionOutcome = EpisodeAcquisitionOutcome
 
 
 @dataclass(frozen=True, slots=True)

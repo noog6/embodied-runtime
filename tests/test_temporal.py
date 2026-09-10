@@ -124,6 +124,24 @@ class FailingAfterReleaseBackend(Backend):
         return "no action"
 
 
+class FirstRequestBlocksBackend(Backend):
+    """Block only the first request, optionally failing it after release."""
+
+    def __init__(self, *, fail=False):
+        super().__init__()
+        self.fail = fail
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((message, instructions, tools))
+        self.started.set()
+        if len(self.requests) == 1:
+            await self.release.wait()
+            if self.fail:
+                raise RuntimeError("operator failed")
+        return "no action"
+
+
 class TemporalTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, *, enabled=True, backend=None, sink=None, continuation=False,
                  closure=False, events=None, camera=None, vision=None):
@@ -230,6 +248,127 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("did not reserve future authority", backend.requests[0][1])
         await asyncio.sleep(0)
         self.assertEqual(len(events), 1)
+        await app.stop()
+
+    async def test_due_waits_for_active_operator_then_starts_new_episode(self):
+        backend = FirstRequestBlocksBackend()
+        app = self.make_app(backend=backend)
+        await app.start(); goal = app.set_goal("goal"); await self.schedule(app)
+        operator = asyncio.create_task(app.request_cognition("hold"))
+        await backend.started.wait()
+        self.assertEqual(app.episode_coordinator.current.id, 1)
+        await self.timer.advance()
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+        self.assertEqual(len(backend.requests), 1)
+        backend.release.set()
+        await operator
+        while app.attention.status().state == "in_flight":
+            await asyncio.sleep(0)
+        episode = app.episode_coordinator.last
+        self.assertEqual((episode.id, episode.trigger_kind, episode.goal_id),
+                         (2, "temporal_followup_due", goal.id))
+        await app.stop()
+
+    async def test_due_is_not_claimed_in_operator_waiter_handoff_gap(self):
+        events = HoldingEventBus()
+        backend = FirstRequestBlocksBackend()
+        app = self.make_app(backend=backend, events=events)
+        await app.start(); goal = app.set_goal("goal"); await self.schedule(app)
+        closed = []
+        original_close = app.episode_coordinator.close
+
+        def record_close(episode, reason):
+            result = original_close(episode, reason)
+            closed.append(result)
+            return result
+
+        app.episode_coordinator.close = record_close
+        await app.attention._consider(SemanticObservation("test", "test", ()))
+        await backend.started.wait()
+        operator = asyncio.create_task(app.request_cognition("operator"))
+        await asyncio.sleep(0)
+        self.assertTrue(app.episode_coordinator.operator_waiting)
+        await self.timer.advance()
+        due = events.temporal_events[0]
+
+        release_waiter = asyncio.Event()
+        original_notify = app.episode_coordinator._notify_idle
+
+        async def held_notify():
+            await release_waiter.wait()
+            await original_notify()
+
+        app.episode_coordinator._notify_idle = held_notify
+        backend.release.set()
+        while app.episode_coordinator.current is not None:
+            await asyncio.sleep(0)
+        self.assertTrue(app.episode_coordinator.operator_waiting)
+        await app.attention._on_temporal_event(due)
+        self.assertEqual(app.temporal_followup_status().state, "due_pending")
+        self.assertIs(app.temporal.pending.goal, goal)
+        release_waiter.set()
+        await operator
+        while app.attention.status().state == "in_flight":
+            await asyncio.sleep(0)
+        self.assertEqual(len(backend.requests), 3)
+        self.assertEqual(backend.requests[1][0], "operator")
+        self.assertEqual([(episode.id, episode.trigger_kind) for episode in closed], [
+            (1, "test"), (2, "operator_utterance"), (3, "temporal_followup_due")
+        ])
+        self.assertEqual(app.episode_coordinator.last.id, 3)
+        self.assertEqual(app.episode_coordinator.last.trigger_kind, "temporal_followup_due")
+        await app.stop()
+
+    async def test_operator_error_releases_due_temporal_work(self):
+        backend = FirstRequestBlocksBackend(fail=True)
+        app = self.make_app(backend=backend)
+        await app.start(); goal = app.set_goal("goal"); await self.schedule(app)
+        closed = []
+        original_close = app.episode_coordinator.close
+
+        def record_close(episode, reason):
+            result = original_close(episode, reason); closed.append(result); return result
+
+        app.episode_coordinator.close = record_close
+        operator = asyncio.create_task(app.request_cognition("fail"))
+        await backend.started.wait(); await self.timer.advance()
+        backend.release.set()
+        with self.assertRaises(RuntimeError):
+            await operator
+        self.assertEqual(app.working_memory.snapshot(), ())
+        while app.attention.status().state == "in_flight":
+            await asyncio.sleep(0)
+        self.assertEqual(app.episode_coordinator.last.trigger_kind,
+                         "temporal_followup_due")
+        self.assertEqual(app.episode_coordinator.last.goal_id, goal.id)
+        self.assertEqual((closed[0].id, closed[0].completion_reason), (1, "error"))
+        await app.stop()
+
+    async def test_operator_cancellation_releases_due_temporal_work(self):
+        backend = FirstRequestBlocksBackend()
+        app = self.make_app(backend=backend)
+        await app.start(); goal = app.set_goal("goal"); await self.schedule(app)
+        closed = []
+        original_close = app.episode_coordinator.close
+
+        def record_close(episode, reason):
+            result = original_close(episode, reason); closed.append(result); return result
+
+        app.episode_coordinator.close = record_close
+        operator = asyncio.create_task(app.request_cognition("cancel"))
+        await backend.started.wait(); await self.timer.advance()
+        operator.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await operator
+        backend.release.set()
+        while app.attention.status().state == "in_flight":
+            await asyncio.sleep(0)
+        self.assertEqual(app.working_memory.snapshot(), ())
+        self.assertEqual((app.episode_coordinator.last.trigger_kind,
+                          app.episode_coordinator.last.goal_id),
+                         ("temporal_followup_due", goal.id))
+        self.assertEqual((closed[0].id, closed[0].completion_reason),
+                         (1, "cancelled"))
         await app.stop()
 
     async def test_consumption_rechecks_exact_goal_after_due_publication(self):

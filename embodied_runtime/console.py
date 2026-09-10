@@ -114,7 +114,9 @@ class RuntimeConsole:
             if not message.strip():
                 return "Usage: ask <message>.", False
             try:
-                response = await self._application.handle_operator_utterance(message)
+                response = await self._application.handle_operator_utterance(
+                    message, source="console"
+                )
             except (CognitionError, RuntimeError, ValueError) as error:
                 return f"Cognition request failed: {error}.", False
             return f"{self._application.profile.name}: {response}", False
@@ -224,19 +226,29 @@ class RuntimeConsole:
 
     def _attention(self) -> str:
         status = self._application.attention.status()
-        return "\n".join((
+        lines = [
             "Attention",
-            f"  enabled:       {str(status.enabled).lower()}",
-            f"  state:         {status.state}",
-            f"  current_episode_id: {'none' if status.current_episode_id is None else f'E{status.current_episode_id}'}",
-            f"  current_episode_state: {status.current_episode_state or 'none'}",
-            f"  current_episode_concern: {status.current_episode_concern or 'none'}",
-            f"  current_episode_goal_id: {'none' if status.current_episode_goal_id is None else f'G{status.current_episode_goal_id}'}",
-            f"  last_episode_id: {'none' if status.last_episode_id is None else f'E{status.last_episode_id}'}",
-            f"  last_episode_state: {status.last_episode_state or 'none'}",
-            f"  last_episode_concern: {status.last_episode_concern or 'none'}",
-            f"  last_episode_goal_id: {'none' if status.last_episode_goal_id is None else f'G{status.last_episode_goal_id}'}",
-            f"  last_episode_completion_reason: {status.last_episode_completion_reason or 'none'}",
+            f"  autonomous_enabled: {str(status.enabled).lower()}",
+            f"  autonomous_state: {status.state}",
+            "",
+            "Current episode",
+            f"  id:            {'none' if status.current_episode_id is None else f'E{status.current_episode_id}'}",
+            f"  state:         {status.current_episode_state or 'none'}",
+            f"  trigger:       {status.current_episode_trigger or 'none'}",
+            f"  source:        {status.current_episode_source or 'none'}",
+            f"  concern:       {status.current_episode_concern or 'none'}",
+            f"  goal_id:       {'none' if status.current_episode_goal_id is None else f'G{status.current_episode_goal_id}'}",
+            "",
+            "Last episode",
+            f"  id:            {'none' if status.last_episode_id is None else f'E{status.last_episode_id}'}",
+            f"  state:         {status.last_episode_state or 'none'}",
+            f"  trigger:       {status.last_episode_trigger or 'none'}",
+            f"  source:        {status.last_episode_source or 'none'}",
+            f"  concern:       {status.last_episode_concern or 'none'}",
+            f"  goal_id:       {'none' if status.last_episode_goal_id is None else f'G{status.last_episode_goal_id}'}",
+            f"  completion_reason: {status.last_episode_completion_reason or 'none'}",
+            "",
+            "Last autonomous initiative",
             f"  last_trigger:  {status.last_trigger or 'none'}",
             f"  last_source:   {status.last_source or 'none'}",
             f"  last_action:   {status.last_action or 'none'}",
@@ -255,7 +267,8 @@ class RuntimeConsole:
             f"  last_outcome_state: {status.last_outcome_state}",
             f"  last_goal_closure: {status.last_goal_closure}",
             f"  last_outcome_response: {status.last_outcome_response or 'unavailable'}",
-        ))
+        ]
+        return "\n".join(lines)
 
     def _followup(self) -> str:
         status = self._application.temporal_followup_status()

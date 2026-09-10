@@ -189,3 +189,14 @@ different information twice, each pass reconstructs Runtime state, and no third
 acquisition or acquisition after an effect exists. Acquisition follow-up is not
 effect continuation, temporal due work starts a fresh single-flight episode, and
 goal closure remains post-effect only.
+
+## Finite operator cognition grammar
+
+An operator episode snapshots WorkingMemory once. Its initial independently
+grounded request may answer, invoke one operator action and answer, or attempt one
+read-only acquisition. Acquisition one permits one fresh request with the same
+snapshot and accumulated typed evidence. Acquisition two permits one final fresh
+request with acquisitions removed. Thus there are at most three cognition stages,
+two acquisition attempts (rejections count), and one non-acquisition capability.
+There is no tool loop, recursive continuation, autonomous outcome evaluation, or
+provider session. Only terminal prose is returned and persisted.

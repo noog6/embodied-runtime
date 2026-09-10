@@ -42,3 +42,11 @@ implementation.
 12. **Let implementation drive architecture.** Do not generalize a robotics
     framework around hypothetical robots. Mira is the first reference
     implementation and should reveal which abstractions are genuinely reusable.
+
+- One shared runtime-local attention episode ID sequence covers operator and
+  autonomous deliberation, and at most one such episode is active.
+- Explicit operator cognition waits for occupied attention; ordinary autonomous
+  events are lossy while occupied; reflexes remain independent and temporal due
+  work is boundedly deferred.
+- Every cognition path has a statically finite grammar. No provider session or
+  model-controlled deliberation loop supplies continuity.

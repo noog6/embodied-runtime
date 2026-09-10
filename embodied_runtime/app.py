@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 import json
 import logging
@@ -12,7 +13,8 @@ from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.attention import (
     ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST, INITIATIVE_REQUEST,
     AcquisitionFollowupStimulus, AttentionEpisode, AttentionStimulus,
-    GoalAttentionController, InitiativeContinuationStimulus, InitiativeOutcome,
+    AttentionEpisodeCoordinator, GoalAttentionController,
+    EpisodeCompletionReason, InitiativeContinuationStimulus, InitiativeOutcome,
     MAX_AUTONOMOUS_ACQUISITIONS_PER_EPISODE,
     concern_for_stimulus,
 )
@@ -70,6 +72,7 @@ from embodied_runtime.voice import (
 )
 
 LOGGER = logging.getLogger(__name__)
+OPERATOR_SOURCE: ContextVar[str] = ContextVar("operator_source", default="operator")
 
 ORIENT_BODY_TOOL = CognitionToolDefinition(
     name="orient_body",
@@ -197,6 +200,7 @@ ACQUISITION_FOLLOWUP_REQUEST = (
     "context and the SAME episode concern and active goal. Follow the explicit remaining "
     "acquisition budget in the stimulus. Request at most one offered capability, or none."
 )
+OPERATOR_EPISODE_CONCERN = "Respond to operator utterance"
 # Compatibility names for callers that identified the Phase 16.1 request by
 # acquisition type. Both now use the cumulative Phase 16.2 grammar.
 INSPECTION_FOLLOWUP_REQUEST = ACQUISITION_FOLLOWUP_REQUEST
@@ -282,6 +286,7 @@ class RobotApplication:
         self.body_backend = body_backend
         self.camera_backend = camera_backend
         self._cognition_backend = cognition_backend
+        self._active_operator_cognition_task: asyncio.Task[object] | None = None
         self._operator_message_sink = operator_message_sink
         self._self_inspector = self_inspector or HostSelfInspector()
         self._visual_perception_backend = visual_perception_backend
@@ -291,7 +296,7 @@ class RobotApplication:
         self.voice = VoiceInteraction(
             voice_provider,
             text_to_speech_provider,
-            lambda text: self.handle_operator_utterance(text),
+            lambda text: self.handle_operator_utterance(text, source="voice"),
             voice_policy,
             wake_words=voice_wake_words,
         )
@@ -317,6 +322,7 @@ class RobotApplication:
             current_goal=lambda: self._active_goal, sleep=temporal_sleep,
             **temporal_arguments,
         )
+        self.episode_coordinator = AttentionEpisodeCoordinator()
         self.attention = GoalAttentionController(
             enabled=self.options.initiative_enabled,
             platform_attention_enabled=self.options.initiative_platform_attention_enabled,
@@ -325,6 +331,7 @@ class RobotApplication:
             has_active_goal=lambda: self._active_goal is not None,
             current_goal=lambda: self._active_goal,
             claim_temporal_due=self.temporal.claim_due,
+            coordinator=self.episode_coordinator,
             run_initiative=self._request_initiative,
         )
 
@@ -507,6 +514,10 @@ class RobotApplication:
         except BaseException as error:
             failure = error
         try:
+            await self._stop_operator_cognition()
+        except BaseException as error:
+            failure = failure or error
+        try:
             await self.temporal.stop()
         except BaseException as error:
             failure = error
@@ -575,8 +586,8 @@ class RobotApplication:
         )
         return frame
 
-    async def request_cognition(self, message: str) -> str:
-        """Request one independent text response through the application boundary."""
+    async def request_cognition(self, message: str, *, source: str | None = None) -> str:
+        """Run one finite operator attention episode."""
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Cognition requires a running application")
         if self._cognition_backend is None:
@@ -584,40 +595,191 @@ class RobotApplication:
         if not message or not message.strip():
             raise ValueError("Cognition message must be non-empty")
         backend = self._cognition_backend
-        prior_memory = self.working_memory.snapshot()
-        instructions = self._cognition_instructions(prior_memory)
-        tools = self.cognition_tools()
-        tool_outcomes: list[WorkingMemoryToolOutcome] = []
-
-        async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
-            result = await self._execute_cognition_tool(call)
-            tool_outcomes.append(WorkingMemoryToolOutcome(call.name, result.output))
-            return result
-        LOGGER.info("[COGNITION] backend=%s request=started", backend.identifier)
+        episode = await self.episode_coordinator.start_operator(
+            source or OPERATOR_SOURCE.get(), OPERATOR_EPISODE_CONCERN
+        )
+        if self.state is not LifecycleState.RUNNING:
+            await self._finish_operator_episode(episode, "cancelled")
+            raise RuntimeError("Cognition requires a running application")
+        task = asyncio.current_task()
+        if task is None:
+            await self._finish_operator_episode(episode, "cancelled")
+            raise RuntimeError("Cognition requires an application task")
+        self._active_operator_cognition_task = task
         try:
-            response = await backend.respond(
-                message,
-                instructions=instructions,
-                tools=tools,
-                tool_executor=execute_tool if tools else None,
-                refreshed_instructions=(
-                    lambda: self._cognition_instructions(prior_memory)
-                ) if tools else None,
-            )
+            return await self._run_operator_episode(message, backend, episode)
+        finally:
+            if self._active_operator_cognition_task is task:
+                self._active_operator_cognition_task = None
+
+    async def _run_operator_episode(
+        self, message: str, backend: TextCognitionBackend,
+        episode: AttentionEpisode,
+    ) -> str:
+        """Execute the already-acquired finite operator episode."""
+        prior_memory = self.working_memory.snapshot()
+        tool_outcomes: list[WorkingMemoryToolOutcome] = []
+        acquisitions: list[InitiativeAcquisitionOutcome] = []
+        acquisition_requests: dict[tuple[str, str], CognitionToolResult] = {}
+        try:
+            # Explicitly bounded grammar: initial decision, then at most two
+            # post-acquisition decisions. A non-acquisition decision terminates.
+            response = ""
+            for stage in range(3):
+                if self.state is not LifecycleState.RUNNING:
+                    raise asyncio.CancelledError
+                acquired = False
+                capability_consumed = False
+                grounded_goal = self._active_goal
+                tools = self._operator_episode_tools(len(acquisitions))
+
+                async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
+                    nonlocal acquired, capability_consumed
+                    if self.state is not LifecycleState.RUNNING:
+                        raise asyncio.CancelledError
+                    if capability_consumed:
+                        return self._rejected_tool(
+                            call.name, "operator capability request already consumed"
+                        )
+                    capability_consumed = True
+                    if not any(tool.name == call.name for tool in tools):
+                        result = self._rejected_tool(call.name, "tool is not available")
+                        tool_outcomes.append(
+                            WorkingMemoryToolOutcome(call.name, result.output)
+                        )
+                        return result
+                    if call.name in (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name):
+                        number = len(acquisitions) + 1
+                        LOGGER.info(
+                            "[ATTENTION] episode=E%s acquisition=%s/2 tool=%s status=requested",
+                            episode.id, number, call.name,
+                        )
+                        acquisition_key = (call.name, call.arguments)
+                        if acquisition_key in acquisition_requests:
+                            # Re-present already accumulated evidence without
+                            # repeating I/O or consuming another acquisition.
+                            result = acquisition_requests[acquisition_key]
+                            return result
+                        elif call.name == INSPECT_SELF_TOOL.name:
+                            result, inspection = self._execute_self_inspection(call)
+                            perception = None
+                        else:
+                            result, perception = await self._execute_visual_perception(call)
+                            inspection = None
+                        acquisition_requests[acquisition_key] = result
+                        try:
+                            status = json.loads(result.output).get("status", "rejected")
+                        except (json.JSONDecodeError, AttributeError):
+                            status = "rejected"
+                        acquisitions.append(InitiativeAcquisitionOutcome(
+                            call.name, status, result.output,
+                            inspection_result=inspection,
+                            perception_result=perception,
+                        ))
+                        acquired = True
+                        LOGGER.info(
+                            "[ATTENTION] episode=E%s acquisition=%s/2 tool=%s status=%s",
+                            episode.id, number, call.name, status,
+                        )
+                    else:
+                        result = await self._execute_cognition_tool(
+                            call, expected_goal=grounded_goal
+                        )
+                    tool_outcomes.append(WorkingMemoryToolOutcome(call.name, result.output))
+                    return result
+
+                LOGGER.info("[COGNITION] backend=%s request=started", backend.identifier)
+                response = await backend.respond(
+                    message,
+                    instructions=self._operator_episode_instructions(
+                        episode, message, prior_memory, acquisitions
+                    ),
+                    tools=tools,
+                    tool_executor=execute_tool if tools else None,
+                    refreshed_instructions=lambda: self._operator_episode_instructions(
+                        episode, message, prior_memory, acquisitions
+                    ),
+                )
+                LOGGER.info(
+                    "[COGNITION] backend=%s request=completed response_chars=%s",
+                    backend.identifier, len(response),
+                )
+                if not acquired:
+                    break
+        except asyncio.CancelledError:
+            await self._finish_operator_episode(episode, "cancelled")
+            raise
         except Exception:
             LOGGER.warning("[COGNITION] backend=%s request=failed", backend.identifier)
+            await self._finish_operator_episode(episode, "error")
             raise
-        LOGGER.info(
-            "[COGNITION] backend=%s request=completed response_chars=%s",
-            backend.identifier,
-            len(response),
-        )
+        if self.state is not LifecycleState.RUNNING:
+            await self._finish_operator_episode(episode, "cancelled")
+            raise asyncio.CancelledError
         self.working_memory.append(message, response, tool_outcomes)
+        await self._finish_operator_episode(episode, "handled")
         return response
 
-    async def handle_operator_utterance(self, message: str) -> str:
+    async def _stop_operator_cognition(self) -> None:
+        """Cancel and join the sole active operator cognition during shutdown."""
+        task = self._active_operator_cognition_task
+        if task is None or task.done():
+            return
+        if task is asyncio.current_task():
+            raise RuntimeError("operator cognition cannot await its own shutdown")
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _finish_operator_episode(
+        self, episode: AttentionEpisode, reason: EpisodeCompletionReason,
+    ) -> None:
+        """Close operator attention and offer due work only while still running."""
+        self.episode_coordinator.close(episode, reason)
+        if self.state is LifecycleState.RUNNING:
+            await self.attention.release_temporal_due()
+
+    async def handle_operator_utterance(
+        self, message: str, *, source: str = "operator"
+    ) -> str:
         """Route one typed or spoken operator utterance through cognition."""
-        return await self.request_cognition(message)
+        token = OPERATOR_SOURCE.set(source)
+        try:
+            return await self.request_cognition(message)
+        finally:
+            OPERATOR_SOURCE.reset(token)
+
+    def _operator_episode_tools(self, acquisitions_used: int) -> tuple[CognitionToolDefinition, ...]:
+        tools = self.cognition_tools()
+        if acquisitions_used >= 2:
+            return tuple(tool for tool in tools if tool.name not in (
+                INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name
+            ))
+        return tools
+
+    def _operator_episode_instructions(
+        self, episode: AttentionEpisode, message: str, working_memory,
+        acquisitions: list[InitiativeAcquisitionOutcome],
+    ) -> str:
+        remaining = 2 - len(acquisitions)
+        lines = [
+            compose_cognition_instructions(
+                self.cognition_context(), self.options.startup_prompt,
+                working_memory, self._active_goal,
+            ),
+            episode.render(),
+            "Operator episode policy",
+            "The original operator request is the current request; do not copy it into episode identity.",
+            f"  acquisitions_used: {len(acquisitions)}",
+            f"  acquisitions_remaining: {remaining}",
+            "At most one offered capability may be requested in this cognition stage.",
+        ]
+        if acquisitions:
+            lines.append("Ordered acquisition evidence:")
+            for index, acquisition in enumerate(acquisitions, 1):
+                lines.extend(acquisition.render(index))
+        if remaining == 0:
+            lines.append("No further read-only acquisition is available.")
+        return "\n\n".join(lines)
 
     def _cognition_instructions(self, working_memory=None) -> str:
         if working_memory is None:
@@ -1263,7 +1425,7 @@ class RobotApplication:
         )
 
     async def _execute_cognition_tool(
-        self, call: CognitionToolCall
+        self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
     ) -> CognitionToolResult:
         LOGGER.info("[COGNITION] tool=%s status=requested", call.name)
         if call.name == ORIENT_BODY_TOOL.name:
@@ -1273,7 +1435,7 @@ class RobotApplication:
         if call.name == SET_GOAL_TOOL.name:
             return self._execute_set_goal(call)
         if call.name == RESOLVE_GOAL_TOOL.name:
-            return self._execute_resolve_goal(call)
+            return self._execute_resolve_goal(call, expected_goal=expected_goal)
         if call.name == INSPECT_SELF_TOOL.name:
             result, _ = self._execute_self_inspection(call)
             return result
@@ -1590,8 +1752,12 @@ class RobotApplication:
             )
         )
 
-    def _execute_resolve_goal(self, call: CognitionToolCall) -> CognitionToolResult:
+    def _execute_resolve_goal(
+        self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
+    ) -> CognitionToolResult:
         try:
+            if expected_goal is not None and self._active_goal is not expected_goal:
+                raise RuntimeError("active goal changed since this decision was grounded")
             arguments = self._tool_arguments(call, {"outcome"})
             outcome = arguments["outcome"]
             goal = self.resolve_goal(outcome)

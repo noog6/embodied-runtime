@@ -59,10 +59,11 @@ cancelled cannot be claimed and starts no cognition. Other observation types rem
 not a general queue, replay, retry, priority, or recurrence mechanism.
 
 `schedule_followup` is a semantic effect, not read-only acquisition. It consumes
-one of the existing maximum two effect positions. An episode may still use at
-most one `inspect_self` **or** `observe_scene`; that acquisition does not consume
-an effect. Successfully applied scheduling remains authoritative if provider
-finalization fails, and no continuation, outcome evaluation, or retry follows.
+one of the existing maximum two effect positions. An episode may make at most two
+ordered read-only acquisition attempts, using `inspect_self` or `observe_scene`
+according to the bounded acquisition grammar; acquisitions do not consume the
+semantic-effect budget. Successfully applied scheduling remains authoritative if
+provider finalization fails, and no continuation, outcome evaluation, or retry follows.
 
 There is no automatic recurrence. Once the due episode is accepted and clears the slot, fresh cognition may
 explicitly request one new follow-up if the same current goal still warrants it.
@@ -74,3 +75,9 @@ explicitly request one new follow-up if the same current goal still warrants it.
 only `temporal_followup_pending=true|false`; it does not expose task internals.
 Structured `[TEMPORAL]` logs report schedule, due, and cancellation reason but
 never purpose text.
+
+A due follow-up cannot overlap an operator episode. The temporal controller keeps
+the due commitment pending; when shared deliberative attention becomes idle it
+may create a new, later-ID autonomous episode if the exact bound goal is still
+current. It never reopens the scheduling episode, and waiting operators take
+precedence over new autonomous work.

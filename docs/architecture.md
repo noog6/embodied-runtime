@@ -246,4 +246,35 @@ passes the application reconstructs current `RuntimeState`, while reusing the fi
 episode/goal identities, original observation, and episode-start WorkingMemory
 snapshot. No provider conversation or model-controlled loop drives progression;
 the explicit path has at most initial, post-acquisition-1, and post-acquisition-2
-decisions. Operator and voice turns remain outside episodes.
+decisions. Operator and voice transport were outside autonomous episodes in Phase 16.2; Phase 16.3 supersedes that limitation below.
+
+## Common bounded attention episodes
+
+Deliberative cognition uses one runtime-local substrate:
+
+```
+CONTINUOUS RUNTIME (sensors, monitors, one active goal, timers, reflexes)
+             -> attention-worthy trigger
+             -> ATTENTION EPISODE
+             -> freshly grounded, bounded deliberation
+             -> close
+```
+
+A shared coordinator owns the monotonically increasing `E<n>` namespace, current
+and last lifecycle records, and the one-episode-at-a-time fence. Trigger policy
+remains separate. Operator requests wait for this fence; ordinary autonomous
+semantic events are suppressed rather than queued while it is occupied. Reflex
+execution is outside the fence. Due temporal work remains pending and is offered
+again after attention becomes idle.
+
+The application owns only the currently active operator cognition task. Shutdown
+cancels and joins it before body and hardware teardown; waiting operator requests
+remain waiters and fail the post-wait lifecycle fence without starting cognition.
+
+Operator episodes need no goal and normally have `goal_id: none`; an existing
+ActiveGoal is nevertheless included as current intention in every fresh grounding.
+They permit two read-only acquisitions and at most one existing operator action,
+produce one final response and one WorkingMemory turn, and have no autonomous
+continuation or outcome pass. Autonomous episodes remain exactly goal-bound with
+the Phase 16.2 limits: two acquisitions, two effects (the second through one
+continuation), one outcome evaluation, and no WorkingMemory write.
