@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import unicodedata
+from time import monotonic
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -66,7 +67,7 @@ from embodied_runtime.state import (
     BodyState, LifecycleState, PowerState, PresenceState, RuntimeState,
 )
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
-from embodied_runtime.temporal_context import TemporalContext
+from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
 from embodied_runtime.voice import (
     TextToSpeechProvider,
     VoiceInteraction,
@@ -309,6 +310,9 @@ class RobotApplication:
             wake_words=voice_wake_words,
         )
         self._active_goal: ActiveGoal | None = None
+        self._monotonic = monotonic_clock or monotonic
+        self._active_goal_started_monotonic: tuple[ActiveGoal, float] | None = None
+        self._last_operator_turn_completed_monotonic: float | None = None
         self._next_goal_id = 1
         self._reflexes = tuple(reflexes)
         self._started_reflexes: list[Reflex] = []
@@ -322,15 +326,12 @@ class RobotApplication:
             lambda: self.state is LifecycleState.RUNNING,
             policy=platform_monitor_policy,
         )
-        temporal_arguments = {}
-        if monotonic_clock is not None:
-            temporal_arguments["monotonic_clock"] = monotonic_clock
         self.temporal = TemporalFollowupController(
             self.events, is_running=lambda: self.state is LifecycleState.RUNNING,
             current_goal=lambda: self._active_goal, sleep=temporal_sleep,
-            **temporal_arguments,
+            monotonic_clock=self._monotonic,
         )
-        self.episode_coordinator = AttentionEpisodeCoordinator()
+        self.episode_coordinator = AttentionEpisodeCoordinator(self._monotonic)
         self.attention = GoalAttentionController(
             enabled=self.options.initiative_enabled,
             platform_attention_enabled=self.options.initiative_platform_attention_enabled,
@@ -365,6 +366,26 @@ class RobotApplication:
             instant.astimezone(self._timezone), self._timezone_name
         )
 
+    def temporal_situation(self) -> TemporalSituation:
+        """Build fresh elapsed-time grounding from the shared monotonic clock."""
+        now = self._monotonic()
+        goal = self._active_goal
+        marker = self._active_goal_started_monotonic
+        goal_age = None
+        if goal is not None and marker is not None and marker[0] is goal:
+            goal_age = int(max(0.0, now - marker[1]))
+        status = self.temporal.status()
+        last = self.episode_coordinator.last
+        completed = self.episode_coordinator.last_completed_monotonic
+        return TemporalSituation(
+            goal.id if goal_age is not None else None, goal_age,
+            status.state, status.remaining_seconds, status.purpose,
+            None if self._last_operator_turn_completed_monotonic is None else
+            int(max(0.0, now - self._last_operator_turn_completed_monotonic)),
+            None if last is None or completed is None else last.id,
+            None if last is None or completed is None else int(max(0.0, now - completed)),
+        )
+
     def set_goal(self, description: object) -> ActiveGoal:
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Setting a goal requires a running application")
@@ -374,6 +395,7 @@ class RobotApplication:
         goal = ActiveGoal(self._next_goal_id, normalized)
         self._next_goal_id += 1
         self._active_goal = goal
+        self._active_goal_started_monotonic = (goal, self._monotonic())
         LOGGER.info("[GOAL] goal=G%s status=active chars=%s", goal.id, len(normalized))
         return goal
 
@@ -386,6 +408,7 @@ class RobotApplication:
             raise RuntimeError("no active goal exists")
         previous = self._active_goal
         self._active_goal = None
+        self._active_goal_started_monotonic = None
         self.temporal.cancel("goal_changed")
         LOGGER.info("[GOAL] status=%s", outcome)
         return previous
@@ -395,6 +418,7 @@ class RobotApplication:
             raise RuntimeError("Clearing a goal requires a running application")
         cleared = self._active_goal is not None
         self._active_goal = None
+        self._active_goal_started_monotonic = None
         if cleared:
             self.temporal.cancel("goal_changed")
             LOGGER.info("[GOAL] status=cleared")
@@ -734,6 +758,7 @@ class RobotApplication:
             await self._finish_operator_episode(episode, "cancelled")
             raise asyncio.CancelledError
         self.working_memory.append(message, response, tool_outcomes)
+        self._last_operator_turn_completed_monotonic = self._monotonic()
         await self._finish_operator_episode(episode, "handled")
         return response
 
@@ -780,7 +805,7 @@ class RobotApplication:
         remaining = 2 - len(acquisitions)
         lines = [
             compose_cognition_instructions(
-                self.cognition_context(), self.temporal_context(),
+                self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt,
                 working_memory, self._active_goal,
             ),
@@ -803,7 +828,7 @@ class RobotApplication:
         if working_memory is None:
             working_memory = self.working_memory.snapshot()
         return compose_cognition_instructions(
-            self.cognition_context(), self.temporal_context(),
+            self.cognition_context(), self.temporal_context(), self.temporal_situation(),
             self.options.startup_prompt, working_memory,
             self._active_goal,
         )
@@ -813,7 +838,7 @@ class RobotApplication:
         expected_goal: ActiveGoal | None = None,
     ) -> str:
         context = compose_cognition_instructions(
-            self.cognition_context(), self.temporal_context(),
+            self.cognition_context(), self.temporal_context(), self.temporal_situation(),
             self.options.startup_prompt, working_memory,
             expected_goal if self._active_goal is expected_goal else None,
         )
@@ -1013,7 +1038,7 @@ class RobotApplication:
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
-                self.cognition_context(), self.temporal_context(),
+                self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ), episode.render(), stimulus.render(actions_enabled=None), followup.render(),
@@ -1181,7 +1206,7 @@ class RobotApplication:
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
-                self.cognition_context(), self.temporal_context(),
+                self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ),
@@ -1286,7 +1311,7 @@ class RobotApplication:
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
-                self.cognition_context(), self.temporal_context(),
+                self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ),

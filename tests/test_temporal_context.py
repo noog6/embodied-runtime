@@ -3,7 +3,9 @@ from dataclasses import FrozenInstanceError
 import unittest
 from zoneinfo import ZoneInfo
 
-from embodied_runtime.temporal_context import TemporalContext
+from embodied_runtime.temporal_context import (
+    TemporalContext, TemporalSituation, format_duration,
+)
 
 
 class LocaleSensitiveDatetime(datetime):
@@ -71,3 +73,36 @@ authoritative for the moment this cognition grounding was constructed.
     def test_naive_datetime_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "offset-aware"):
             TemporalContext(datetime(2026, 1, 1), "UTC")
+
+
+class TemporalSituationTests(unittest.TestCase):
+    def test_empty_rendering_is_explicit_and_immutable(self):
+        situation = TemporalSituation(None, None, "none", None, None, None, None, None)
+        rendered = situation.render()
+        self.assertEqual(rendered.count("  state: none"), 4)
+        self.assertIn("No active goal or temporal follow-up is currently pending.", rendered)
+        with self.assertRaises(FrozenInstanceError):
+            situation.followup_state = "pending"
+
+    def test_fully_populated_rendering_and_quoted_purpose(self):
+        situation = TemporalSituation(4, 742, "pending", 182,
+                                      'check "battery" voltage', 38, 12, 38)
+        rendered = situation.render()
+        self.assertIn("  id: G4\n  age_s: 742", rendered)
+        self.assertIn('purpose: "check \\"battery\\" voltage"', rendered)
+        self.assertIn("One follow-up is pending in about 3 minutes.", rendered)
+        self.assertIn("  id: E12\n  age_s: 38", rendered)
+
+    def test_duration_buckets_are_deterministic_and_clamped(self):
+        cases = {
+            -1: "a few seconds", 9: "a few seconds",
+            10: "less than a minute", 59: "less than a minute",
+            60: "about 1 minute", 119: "about 1 minute",
+            120: "about 2 minutes", 3599: "about 59 minutes",
+            3600: "about 1 hour", 7199: "about 1 hour",
+            7200: "about 2 hours", 86399: "about 23 hours",
+            86400: "about 1 day", 172800: "about 2 days",
+        }
+        for seconds, expected in cases.items():
+            with self.subTest(seconds=seconds):
+                self.assertEqual(format_duration(seconds), expected)

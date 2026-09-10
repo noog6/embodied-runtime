@@ -155,6 +155,26 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(app.attention, "_episodes"))
         await app.stop()
 
+    async def test_autonomous_attention_receives_temporal_situation(self):
+        now = [100.0]
+        backend = FakeCognition()
+        app = self.make_app(backend, monotonic_clock=lambda: now[0])
+        await app.start()
+        app.set_goal("watch")
+        now[0] = 400
+        await app.set_body_orientation(yaw_degrees=1, pitch_degrees=0,
+                                       source="reflex:test")
+        await backend.started.wait()
+        while app.attention.status().state == "in_flight":
+            await asyncio.sleep(0)
+        instructions = backend.requests[0][1]
+        self.assertIn("Temporal situation", instructions)
+        self.assertIn("Active goal timing\n  state: active\n  id: G1\n  age_s: 300",
+                      instructions)
+        self.assertEqual(tuple(tool.name for tool in backend.requests[0][2]),
+                         ("inspect_self", "schedule_followup"))
+        await app.stop()
+
     async def test_episode_is_active_single_flight_and_ids_increase(self):
         backend = FakeCognition(blocked=True)
         app = self.make_app(backend)

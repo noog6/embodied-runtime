@@ -290,8 +290,10 @@ timezone is `UTC`; Mira's checked-in agentic configuration explicitly selects
 `America/Toronto`.
 
 Wall-clock datetime is used only for calendar and local-time cognition
-grounding. Existing monotonic time remains independently responsible for
-elapsed timers and temporal-follow-up deadlines. Temporal situation and recency
-(such as goal age, interaction age, idle duration, or what the robot is waiting
-for) remain deferred to Phase 17.2; existing domain objects therefore do not
-gain timestamps in Phase 17.1.
+grounding. `TemporalSituation` separately reconstructs monotonic relationships
+around the current goal, an existing one-shot follow-up, the previous successful
+operator turn, and the previous completed attention episode. WorkingMemory still
+supplies recent semantic interaction content; cognition may combine that content
+with recency, but the runtime does not classify or summarize recent activity.
+No domain object gained timestamps, no temporal history database exists, and
+the existing operator and autonomous attention bounds are unchanged.
