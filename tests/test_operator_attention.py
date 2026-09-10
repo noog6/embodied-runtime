@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from datetime import UTC, datetime
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.attention import AttentionEpisodeCoordinator
@@ -137,7 +138,8 @@ class CheckingTTS:
 
 
 class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
-    def app(self, backend, *, initiative=False, voice=None, tts=None, body=None):
+    def app(self, backend, *, initiative=False, voice=None, tts=None, body=None,
+            **kwargs):
         return RobotApplication(
             RobotProfile("test", "Test", "test"), VirtualHardwareBackend(),
             ApplicationOptions(initiative_enabled=initiative),
@@ -145,6 +147,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
             body_backend=body,
             voice_provider=voice, text_to_speech_provider=tts,
             voice_policy=VoiceSessionPolicy(initial_timeout_seconds=0.1, followup_timeout_seconds=0.1),
+            **kwargs,
         )
 
     async def test_plain_operator_episode_has_shared_identity_and_no_goal_binding(self):
@@ -179,6 +182,27 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         turn = app.working_memory.snapshot()[0]
         self.assertEqual([outcome.name for outcome in turn.tool_outcomes],
                          ["inspect_self", "inspect_self"])
+        await app.stop()
+
+    async def test_temporal_grounding_is_fresh_across_operator_acquisition(self):
+        backend = ScriptedBackend((("inspect_self", {"area": "runtime"}),))
+        instants = iter((datetime(2026, 9, 10, 22, 0, 1, tzinfo=UTC),
+                         datetime(2026, 9, 10, 22, 0, 5, tzinfo=UTC)))
+        app = self.app(backend, timezone_name="America/Toronto",
+                       wall_clock=lambda: next(instants))
+        await app.start()
+        await app.request_cognition("what is true now?")
+        self.assertEqual(len(backend.requests), 2)
+        first, second = (request[1] for request in backend.requests)
+        self.assertIn("Temporal context", first)
+        self.assertIn("local_time: 18:00:01", first)
+        self.assertIn("local_time: 18:00:05", second)
+        self.assertIn("id: E1", first)
+        self.assertIn("id: E1", second)
+        self.assertIn("Working memory\n  state: empty", first)
+        self.assertIn("Working memory\n  state: empty", second)
+        self.assertEqual(backend.requests[0][2].count("inspect_self"), 1)
+        self.assertNotIn("get_time", backend.requests[0][2])
         await app.stop()
 
     async def test_operator_requests_are_serialized(self):

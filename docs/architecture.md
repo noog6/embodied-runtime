@@ -278,3 +278,20 @@ produce one final response and one WorkingMemory turn, and have no autonomous
 continuation or outcome pass. Autonomous episodes remain exactly goal-bound with
 the Phase 16.2 limits: two acquisitions, two effects (the second through one
 continuation), one outcome evaluation, and no WorkingMemory write.
+
+## Authoritative temporal grounding
+
+Temporal context is a fresh provider-neutral projection of the configured local
+wall clock. It is reconstructed independently at every cognition boundary and
+is not `RuntimeState`, WorkingMemory, an acquisition, or a model tool. Each
+projection supplies an offset-aware local datetime, calendar date, weekday,
+configured IANA timezone, UTC offset, and deterministic day period. The default
+timezone is `UTC`; Mira's checked-in agentic configuration explicitly selects
+`America/Toronto`.
+
+Wall-clock datetime is used only for calendar and local-time cognition
+grounding. Existing monotonic time remains independently responsible for
+elapsed timers and temporal-follow-up deadlines. Temporal situation and recency
+(such as goal age, interaction age, idle duration, or what the robot is waiting
+for) remain deferred to Phase 17.2; existing domain objects therefore do not
+gain timestamps in Phase 17.1.

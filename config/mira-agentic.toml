@@ -5,6 +5,7 @@ camera = "picamera2"
 cognition = "openai-responses"
 vision = "openai-responses"
 mode = "console"
+timezone = "America/Toronto"
 
 [voice]
 enabled = true

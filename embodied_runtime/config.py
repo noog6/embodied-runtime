@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 import tomllib
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ConfigurationError(ValueError):
@@ -18,6 +19,7 @@ class RuntimeFileConfig:
     cognition: str | None = None
     vision: str | None = None
     mode: str | None = None
+    timezone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,7 @@ class LaunchConfiguration:
     cognition: str
     vision: str
     mode: str
+    timezone: str
     initiative: bool
     initiative_platform_attention: bool
     initiative_actions: bool
@@ -85,6 +88,7 @@ class LaunchConfiguration:
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
     profile="mira", hardware="virtual", camera="none", cognition="none", vision="none", mode="run",
+    timezone="UTC",
     initiative=False, initiative_platform_attention=False,
     initiative_actions=False, initiative_messages=False,
     initiative_continuation=False, initiative_goal_closure=False,
@@ -98,7 +102,9 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     voice_followup_timeout_seconds=10.0,
 )
 
-_RUNTIME_KEYS = {"profile", "hardware", "camera", "cognition", "vision", "mode"}
+_RUNTIME_KEYS = {
+    "profile", "hardware", "camera", "cognition", "vision", "mode", "timezone",
+}
 _INITIATIVE_KEYS = {
     "enabled", "platform_attention", "actions", "messages", "continuation",
     "goal_closure",
@@ -150,6 +156,13 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
                 f"unsupported value for {name}: {value!r} "
                 f"(choose from {', '.join(sorted(choices))})"
             )
+        if key == "timezone":
+            try:
+                ZoneInfo(value)
+            except (ZoneInfoNotFoundError, ValueError) as error:
+                raise ConfigurationError(
+                    f"unknown IANA timezone for runtime.timezone: {value!r}"
+                ) from error
     for key, value in initiative.items():
         if not isinstance(value, bool):
             raise ConfigurationError(f"initiative.{key} must be boolean")
@@ -239,6 +252,7 @@ def resolve_launch_configuration(
         cognition=scalar("cognition", runtime.cognition, HISTORICAL_DEFAULTS.cognition),
         vision=scalar("vision", runtime.vision, HISTORICAL_DEFAULTS.vision),
         mode=mode,
+        timezone=runtime.timezone or HISTORICAL_DEFAULTS.timezone,
         initiative=opt_in("initiative", initiative.enabled, False),
         initiative_platform_attention=opt_in(
             "initiative_platform_attention", initiative.platform_attention, False

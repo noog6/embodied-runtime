@@ -39,6 +39,7 @@ camera = "picamera2"
 cognition = "openai-responses"
 vision = "openai-responses"
 mode = "console"
+timezone = "America/Toronto"
 
 [initiative]
 enabled = true
@@ -90,6 +91,7 @@ The file may be partial. Omitted values retain the historical defaults:
 | `runtime.cognition` | `"none"` |
 | `runtime.vision` | `"none"` |
 | `runtime.mode` | `"run"` |
+| `runtime.timezone` | `"UTC"` |
 | every `[initiative]` value | `false` |
 | `voice.enabled` | `false` |
 | `voice.wake_word_enabled` | `false` |
@@ -106,6 +108,12 @@ The file may be partial. Omitted values retain the historical defaults:
 
 There is no implicit configuration file. Without `--config`, all historical
 CLI defaults and specialized operations remain unchanged.
+
+`runtime.timezone` is an explicit IANA timezone name validated by the standard
+library. The deterministic historical default is `UTC`; the checked-in Mira
+agentic configuration explicitly uses `America/Toronto`. The runtime never
+discovers or inherits the host operating system timezone, and there is no CLI
+timezone override.
 
 ## Precedence and validation
 
