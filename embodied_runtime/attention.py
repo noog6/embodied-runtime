@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace as dataclass_replace
 import logging
 from typing import Literal
 
+from embodied_runtime.cognition.outcome import InitiativeAcquisitionOutcome
+
 from embodied_runtime.events import (
     BodyOrientationChanged, Event, EventBus, MemoryPressureCleared,
     MemoryPressureRaised, Subscription, ThermalWarningCleared,
@@ -44,6 +46,7 @@ CONTINUATION_INITIATIVE_REQUEST = (
     "permissions, not obligations."
 )
 MAX_DIAGNOSTIC_RESPONSE_CHARS = 2000
+MAX_AUTONOMOUS_ACQUISITIONS_PER_EPISODE = 2
 
 EpisodeState = Literal["created", "active", "closed"]
 EpisodeCompletionReason = Literal["handled", "no_action", "error", "cancelled", "stale_goal"]
@@ -164,8 +167,7 @@ class InitiativeContinuationStimulus:
     first_effect_result: str
     attention_kind: str
     attention_source: str
-    inspection_result: object | None = None
-    perception_result: object | None = None
+    acquisitions: tuple[InitiativeAcquisitionOutcome, ...] = ()
 
     def render(self) -> str:
         lines = [
@@ -177,61 +179,49 @@ class InitiativeContinuationStimulus:
             f"  attention_kind: {self.attention_kind}",
             f"  attention_source: {self.attention_source}",
         ]
-        if self.inspection_result is not None:
-            lines.append(f"  prior_self_inspection: {self.inspection_result!s}")
-        if self.perception_result is not None:
-            result = self.perception_result
+        if self.acquisitions:
+            lines.append("Prior ordered acquisition evidence:")
+            for index, acquisition in enumerate(self.acquisitions, start=1):
+                lines.extend(acquisition.render(index))
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionFollowupStimulus:
+    """Ground one of the two explicit post-acquisition decisions."""
+
+    acquisitions: tuple[InitiativeAcquisitionOutcome, ...]
+
+    def render(self) -> str:
+        used = len(self.acquisitions)
+        if not 1 <= used <= MAX_AUTONOMOUS_ACQUISITIONS_PER_EPISODE:
+            raise ValueError("follow-up requires one or two acquisition outcomes")
+        remaining = MAX_AUTONOMOUS_ACQUISITIONS_PER_EPISODE - used
+        lines = [
+            "Autonomous acquisition follow-up stimulus",
+            f"  acquisitions_used: {used}",
+            f"  acquisitions_remaining: {remaining}",
+            "Current Runtime context was freshly reconstructed for this request.",
+            "Ordered acquisition evidence follows; rejected attempts still consumed a slot.",
+        ]
+        for index, acquisition in enumerate(self.acquisitions, start=1):
+            lines.extend(acquisition.render(index))
+        if remaining:
             lines.extend((
-                "The prior visual interpretation is model-generated and may be incomplete "
-                "or uncertain; Runtime context remains authoritative for runtime facts.",
-                f"  prior_visual_focus: {result.focus}",
-                f"  prior_visual_description: {result.description}",
+                "You may request one more read-only acquisition only when materially "
+                "necessary for the SAME episode concern and SAME active goal.",
+                "Do not retry or request the same information again merely because a tool "
+                "is available; stop gathering once enough evidence exists.",
+                "Alternatively request at most one semantic effect, or do nothing. There "
+                "will be no acquisition opportunity after the next acquisition.",
+            ))
+        else:
+            lines.extend((
+                "Both acquisition opportunities are consumed. No further self-inspection "
+                "or scene observation is available.",
+                "Request at most one available semantic effect, or do nothing.",
             ))
         return "\n".join(lines)
-
-
-@dataclass(frozen=True, slots=True)
-class InspectionFollowupStimulus:
-    """Ground the one independent decision after an applied inspection."""
-
-    inspection_result: object
-
-    def render(self) -> str:
-        result = self.inspection_result
-        lines = [
-            "Self-inspection follow-up stimulus",
-            "One bounded read-only self-inspection already occurred.",
-            "Its runtime-produced result is authoritative for that inspected area.",
-            f"  area: {result.area}",
-        ]
-        lines.extend(f"  {fact.name}: {fact.value}" for fact in result.facts)
-        lines.extend((
-            "Review it with fresh Runtime context and the SAME active goal.",
-            "You may request at most one available semantic effect if necessary.",
-            "Do not inspect again or set, replace, resolve, or complete a goal.",
-        ))
-        return "\n".join(lines)
-
-
-@dataclass(frozen=True, slots=True)
-class VisualPerceptionFollowupStimulus:
-    """Ground the sole independent effect decision after deliberate looking."""
-
-    perception_result: object
-
-    def render(self) -> str:
-        result = self.perception_result
-        return "\n".join((
-            "Visual-perception follow-up stimulus",
-            "This is a model-generated interpretation of one current camera frame.",
-            "It may be incomplete or uncertain.",
-            "Runtime context remains authoritative for runtime facts.",
-            f"  visual_focus: {result.focus}",
-            f"  visual_description: {result.description}",
-            f"  visual_description_truncated: {str(result.truncated).lower()}",
-            "You may request at most one available semantic effect if necessary.",
-            "Do not inspect or observe again, or change goals.",
-        ))
 
 
 @dataclass(frozen=True, slots=True)

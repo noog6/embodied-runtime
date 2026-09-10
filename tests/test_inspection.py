@@ -147,7 +147,7 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.working_memory.snapshot(), memory)
         await app.stop()
 
-    async def test_request_a_enforces_one_inspection_budget(self):
+    async def test_initial_request_enforces_one_capability_call(self):
         fake = FakeInspector()
 
         async def malicious(backend, executor):
@@ -169,7 +169,7 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r["status"] for r in backend.results], ["applied", "rejected"])
         await app.stop()
 
-    async def test_failed_inspection_stops_without_followup(self):
+    async def test_failed_inspection_consumes_slot_and_is_grounded_in_followup(self):
         class FailingInspector(FakeInspector):
             def inspect(self, area):
                 self.areas.append(area)
@@ -187,13 +187,128 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
             "body_orientation_changed", "reflex:test", 1, 1, 0, 0
         ))
         self.assertEqual((outcome.action, outcome.action_status), (None, None))
-        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(len(backend.requests), 2)
+        self.assertIn("acquisition_1_status: rejected", backend.requests[1][1])
+        self.assertIn("acquisitions_remaining: 1", backend.requests[1][1])
         self.assertEqual(fake.areas, ["storage"])
         status = app.attention.status()
         self.assertEqual((status.last_inspection_state, status.last_inspection_status),
                          ("failed", "rejected"))
         self.assertIs(app.active_goal, goal)
         self.assertEqual(app.working_memory.snapshot(), memory)
+        await app.stop()
+
+    async def test_two_distinct_self_inspections_share_bounded_episode_evidence(self):
+        fake = FakeInspector()
+        backend = SequenceBackend([
+            await call(CognitionToolCall("inspect_self", '{"area":"runtime"}')),
+            await call(CognitionToolCall("inspect_self", '{"area":"storage"}')),
+            no_call,
+        ])
+        app = self.make_initiative_app(backend, inspector=fake)
+        await app.start()
+        goal = app.set_goal("Compare runtime and storage")
+        app.working_memory.append("operator", "fixed history")
+        memory = app.working_memory.snapshot()
+        await app._request_initiative(AttentionStimulus(
+            "body_orientation_changed", "reflex:test", 1, 1, 0, 0
+        ))
+        self.assertEqual(fake.areas, ["storage"])
+        self.assertEqual(len(backend.requests), 3)
+        for _, instructions, _ in backend.requests:
+            self.assertIn("id: E0", instructions)
+            self.assertIn(f"goal_id: G{goal.id}", instructions)
+            self.assertIn("fixed history", instructions)
+        final = backend.requests[2]
+        self.assertIn("acquisition_1_area: runtime", final[1])
+        self.assertIn("acquisition_2_area: storage", final[1])
+        self.assertIn("acquisitions_remaining: 0", final[1])
+        self.assertNotIn("inspect_self", final[2])
+        self.assertEqual(app.working_memory.snapshot(), memory)
+        await app.stop()
+
+    async def test_third_acquisition_is_rejected_by_effect_only_stage(self):
+        fake = FakeInspector()
+        backend = SequenceBackend([
+            await call(CognitionToolCall("inspect_self", '{"area":"runtime"}')),
+            await call(CognitionToolCall("inspect_self", '{"area":"storage"}')),
+            await call(CognitionToolCall("inspect_self", '{"area":"network"}')),
+        ])
+        app = self.make_initiative_app(backend, inspector=fake)
+        await app.start(); app.set_goal("bounded inspection")
+        await app._request_initiative(AttentionStimulus(
+            "body_orientation_changed", "reflex:test", 1, 1, 0, 0
+        ))
+        self.assertEqual(fake.areas, ["storage"])
+        self.assertEqual(backend.results[-1]["status"], "rejected")
+        self.assertNotIn("inspect_self", backend.requests[2][2])
+        await app.stop()
+
+    async def test_runtime_is_fresh_but_episode_goal_and_memory_stay_fixed(self):
+        fake = FakeInspector()
+        app_holder = {}
+
+        async def second_acquisition_then_change_runtime(backend, executor):
+            result = await executor(CognitionToolCall(
+                "inspect_self", '{"area":"storage"}'
+            ))
+            backend.results.append(json.loads(result.output))
+            await app_holder["app"].set_body_orientation(
+                yaw_degrees=27, pitch_degrees=0, source="console"
+            )
+            return "done"
+
+        backend = SequenceBackend([
+            await call(CognitionToolCall("inspect_self", '{"area":"runtime"}')),
+            second_acquisition_then_change_runtime,
+            no_call,
+        ])
+        app = self.make_initiative_app(backend, inspector=fake)
+        app_holder["app"] = app
+        await app.start(); goal = app.set_goal("fresh grounding")
+        app.working_memory.append("operator", "episode snapshot")
+        memory = app.working_memory.snapshot()
+        await app._request_initiative(AttentionStimulus(
+            "body_orientation_changed", "reflex:test", 1, 1, 0, 0
+        ))
+        self.assertIn("yaw_deg: 0.0", backend.requests[0][1])
+        self.assertIn("yaw_deg: 27.0", backend.requests[2][1])
+        for _, instructions, _ in backend.requests:
+            self.assertIn("id: E0", instructions)
+            self.assertIn(f"goal_id: G{goal.id}", instructions)
+            self.assertIn("episode snapshot", instructions)
+        self.assertEqual(app.working_memory.snapshot(), memory)
+        await app.stop()
+
+    async def test_two_acquisitions_then_two_effects_and_one_outcome(self):
+        fake, sink = FakeInspector(), RecordingSink()
+        backend = SequenceBackend([
+            await call(CognitionToolCall("inspect_self", '{"area":"runtime"}')),
+            await call(CognitionToolCall("inspect_self", '{"area":"storage"}')),
+            await call(CognitionToolCall(
+                "address_operator", '{"message":"Evidence gathered."}'
+            )),
+            await call(CognitionToolCall(
+                "orient_body", '{"yaw_degrees":12,"pitch_degrees":0}'
+            )),
+            await call(CognitionToolCall("complete_goal", '{}')),
+        ])
+        app = self.make_initiative_app(
+            backend, inspector=fake, sink=sink, continuation=True, closure=True
+        )
+        await app.start(); app.set_goal("Gather, report, and orient")
+        await app._request_initiative(AttentionStimulus(
+            "body_orientation_changed", "reflex:test", 1, 1, 0, 0
+        ))
+        self.assertEqual(len(backend.requests), 5)
+        self.assertEqual(len(fake.areas), 1)
+        self.assertEqual(len(sink.messages), 1)
+        self.assertIn("first_effect_name: address_operator", backend.requests[3][1])
+        self.assertIn("acquisition_2_area: storage", backend.requests[3][1])
+        self.assertIn("effect_2_name: orient_body", backend.requests[4][1])
+        self.assertIn("acquisition_1_area: runtime", backend.requests[4][1])
+        self.assertIn("acquisition_2_area: storage", backend.requests[4][1])
+        self.assertIsNone(app.active_goal)
         await app.stop()
 
     async def test_followup_failure_preserves_effect_and_stops_sequence(self):

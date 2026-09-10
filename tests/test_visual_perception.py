@@ -216,7 +216,7 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.description), 2000)
         self.assertIn("visible evidence only", responses.arguments["instructions"])
 
-    async def test_capture_and_visual_provider_failures_stop_without_followup(self):
+    async def test_capture_and_visual_failures_consume_slot_and_reach_followup(self):
         for camera, vision, expected in (
             (Camera(fail=True), Vision(), (1, 0)),
             (Camera(), Vision(fail=True), (1, 1)),
@@ -227,7 +227,8 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
             app.set_goal("Stay aware")
             await app._request_initiative(self.stimulus())
             self.assertEqual((camera.captures, len(vision.calls)), expected)
-            self.assertEqual(len(backend.requests), 1)
+            self.assertEqual(len(backend.requests), 2)
+            self.assertIn("acquisition_1_status: rejected", backend.requests[1][1])
             self.assertEqual(app.attention.status().last_continuation_state, "not_run")
             self.assertEqual(app.attention.status().last_outcome_state, "not_run")
             await app.stop()
@@ -251,6 +252,30 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.attention.status().last_outcome_state, "not_run")
         await app.stop()
 
+    async def test_mixed_acquisitions_preserve_order_and_distinct_authority(self):
+        backend = SequenceCognition([
+            invoke("inspect_self", {"area": "storage"}),
+            invoke("observe_scene", {"focus": "desk area"}),
+            no_tool,
+        ])
+        camera, vision, inspector = Camera(), Vision(), Inspector()
+        app = self.initiative_app(
+            backend, camera, vision, inspector=inspector
+        )
+        await app.start(); goal = app.set_goal("Assess storage near desk")
+        memory = app.working_memory.snapshot()
+        await app._request_initiative(self.stimulus())
+        final = backend.requests[2][1]
+        first = final.index("acquisition_1_capability: inspect_self")
+        second = final.index("acquisition_2_capability: observe_scene")
+        self.assertLess(first, second)
+        self.assertIn("runtime-produced authoritative facts", final)
+        self.assertIn("model-generated visual interpretation", final)
+        self.assertIn("may be incomplete or uncertain", final)
+        self.assertIn(f"goal_id: G{goal.id}", final)
+        self.assertEqual(app.working_memory.snapshot(), memory)
+        await app.stop()
+
     async def test_direct_effect_and_inspection_paths_do_not_capture(self):
         for first, inspector_calls in (
             (invoke("orient_body", {"yaw_degrees": 5, "pitch_degrees": 0}), []),
@@ -268,7 +293,7 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(inspector.calls, inspector_calls)
             await app.stop()
 
-    async def test_post_visual_exposes_effects_only_and_rejects_acquisition(self):
+    async def test_post_visual_exposes_one_remaining_acquisition_and_one_call_budget(self):
         async def try_acquisitions(backend, executor):
             backend.requests[-1] += ()
             for name, arguments in (("inspect_self", {"area": "runtime"}),
@@ -285,10 +310,10 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         app.set_goal("Maintain")
         await app._request_initiative(self.stimulus())
-        self.assertNotIn("inspect_self", backend.requests[1][2])
-        self.assertNotIn("observe_scene", backend.requests[1][2])
+        self.assertIn("inspect_self", backend.requests[1][2])
+        self.assertIn("observe_scene", backend.requests[1][2])
         self.assertEqual([item["status"] for item in backend.results[-2:]],
-                         ["rejected", "rejected"])
+                         ["applied", "rejected"])
         self.assertEqual(camera.captures, 1)
         await app.stop()
 
@@ -355,7 +380,7 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("embodied_runtime.app", level="INFO") as logs:
             await app._request_initiative(self.stimulus())
         rendered = "\n".join(logs.output)
-        self.assertIn("[PERCEPTION] tool=address_operator status=applied", rendered)
+        self.assertIn("[ACQUISITION] tool=address_operator status=applied", rendered)
         self.assertNotIn("[INSPECTION] tool=address_operator", rendered)
         await app.stop()
 

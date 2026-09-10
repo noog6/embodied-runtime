@@ -394,7 +394,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((outcome.action, outcome.action_status),
                          ("schedule_followup", "applied"))
         self.assertEqual(len(backend.requests), 2)
-        self.assertNotIn("inspect_self", [tool.name for tool in backend.requests[1][2]])
+        self.assertIn("inspect_self", [tool.name for tool in backend.requests[1][2]])
         self.assertIs(app.temporal.pending.goal, goal)
         self.assertEqual(app.working_memory.snapshot(), memory)
         self.assertEqual(app.attention.status().last_inspection_status, "applied")
@@ -419,7 +419,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((outcome.action, outcome.action_status),
                          ("schedule_followup", "applied"))
         self.assertEqual(len(backend.requests), 2)
-        self.assertNotIn("observe_scene", [tool.name for tool in backend.requests[1][2]])
+        self.assertIn("observe_scene", [tool.name for tool in backend.requests[1][2]])
         self.assertIs(app.temporal.pending.goal, goal)
         self.assertEqual(app.working_memory.snapshot(), memory)
         await app.stop()
