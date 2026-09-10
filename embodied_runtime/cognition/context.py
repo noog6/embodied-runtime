@@ -8,6 +8,7 @@ from embodied_runtime.cognition.working_memory import (
     render_working_memory,
 )
 from embodied_runtime.cognition.goals import ActiveGoal, render_active_goal
+from embodied_runtime.temporal_context import TemporalContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +136,7 @@ class CognitionContext:
 
 def compose_cognition_instructions(
     context: CognitionContext,
+    temporal_context: TemporalContext,
     startup_prompt: str | None,
     working_memory: Sequence[WorkingMemoryTurn] = (),
     active_goal: ActiveGoal | None = None,
@@ -145,6 +147,7 @@ def compose_cognition_instructions(
         sections.append(f"Operator instructions\n---------------------\n{startup_prompt}")
     sections.extend((
         context.render(),
+        temporal_context.render(),
         render_active_goal(active_goal),
         render_working_memory(working_memory),
     ))

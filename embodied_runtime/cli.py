@@ -171,6 +171,7 @@ def parse_launch_arguments(
     args.camera = effective.camera
     args.cognition = effective.cognition
     args.vision = effective.vision
+    args.timezone = effective.timezone
     args.console = effective.mode == "console"
     args.diagnostics = effective.mode == "diagnostics"
     args.initiative = effective.initiative
@@ -364,6 +365,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         text_to_speech_provider=build_text_to_speech_provider(args),
         voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
         voice_wake_words=(args.voice_wake_words if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
+        timezone_name=args.timezone,
     )
     if args.diagnostics:
         try:

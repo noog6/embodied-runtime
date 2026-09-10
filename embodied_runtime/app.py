@@ -8,6 +8,8 @@ import json
 import logging
 import math
 import unicodedata
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.attention import (
@@ -64,6 +66,7 @@ from embodied_runtime.state import (
     BodyState, LifecycleState, PowerState, PresenceState, RuntimeState,
 )
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
+from embodied_runtime.temporal_context import TemporalContext
 from embodied_runtime.voice import (
     TextToSpeechProvider,
     VoiceInteraction,
@@ -278,9 +281,14 @@ class RobotApplication:
         text_to_speech_provider: TextToSpeechProvider | None = None,
         voice_policy: VoiceSessionPolicy = VoiceSessionPolicy(),
         voice_wake_words: list[str] | None = None,
+        timezone_name: str = "UTC",
+        wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.profile = profile
         self.hardware = hardware
+        self._timezone_name = timezone_name
+        self._timezone = ZoneInfo(timezone_name)
+        self._wall_clock = wall_clock
         self.options = options or ApplicationOptions()
         self.events = events or EventBus()
         self.body_backend = body_backend
@@ -347,6 +355,15 @@ class RobotApplication:
     @property
     def active_goal(self) -> ActiveGoal | None:
         return self._active_goal
+
+    def temporal_context(self) -> TemporalContext:
+        """Build fresh local wall-clock grounding for one cognition boundary."""
+        instant = self._wall_clock()
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            raise ValueError("wall clock must return an offset-aware datetime")
+        return TemporalContext(
+            instant.astimezone(self._timezone), self._timezone_name
+        )
 
     def set_goal(self, description: object) -> ActiveGoal:
         if self.state is not LifecycleState.RUNNING:
@@ -763,7 +780,8 @@ class RobotApplication:
         remaining = 2 - len(acquisitions)
         lines = [
             compose_cognition_instructions(
-                self.cognition_context(), self.options.startup_prompt,
+                self.cognition_context(), self.temporal_context(),
+                self.options.startup_prompt,
                 working_memory, self._active_goal,
             ),
             episode.render(),
@@ -785,7 +803,8 @@ class RobotApplication:
         if working_memory is None:
             working_memory = self.working_memory.snapshot()
         return compose_cognition_instructions(
-            self.cognition_context(), self.options.startup_prompt, working_memory,
+            self.cognition_context(), self.temporal_context(),
+            self.options.startup_prompt, working_memory,
             self._active_goal,
         )
 
@@ -794,7 +813,8 @@ class RobotApplication:
         expected_goal: ActiveGoal | None = None,
     ) -> str:
         context = compose_cognition_instructions(
-            self.cognition_context(), self.options.startup_prompt, working_memory,
+            self.cognition_context(), self.temporal_context(),
+            self.options.startup_prompt, working_memory,
             expected_goal if self._active_goal is expected_goal else None,
         )
         sequencing = (
@@ -993,7 +1013,8 @@ class RobotApplication:
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
-                self.cognition_context(), self.options.startup_prompt, working_memory,
+                self.cognition_context(), self.temporal_context(),
+                self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ), episode.render(), stimulus.render(actions_enabled=None), followup.render(),
         ))
@@ -1160,7 +1181,8 @@ class RobotApplication:
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
-                self.cognition_context(), self.options.startup_prompt, working_memory,
+                self.cognition_context(), self.temporal_context(),
+                self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ),
             episode.render(), stimulus.render(actions_enabled=None),
@@ -1264,7 +1286,8 @@ class RobotApplication:
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
-                self.cognition_context(), self.options.startup_prompt, working_memory,
+                self.cognition_context(), self.temporal_context(),
+                self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ),
             episode.render(), stimulus.render(actions_enabled=None),

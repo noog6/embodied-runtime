@@ -50,6 +50,7 @@ class ConfigurationTests(unittest.TestCase):
                 "voice_wake_words": ["mira", "mirror", "huh mirror"],
                 "voice_initial_timeout_seconds": 18,
                 "voice_followup_timeout_seconds": 12,
+                "timezone": "America/Toronto",
             }),
         )
 
@@ -65,6 +66,16 @@ class ConfigurationTests(unittest.TestCase):
                 **{**HISTORICAL_DEFAULTS.__dict__, "camera": "picamera2"}
             ),
         )
+
+    def test_timezone_valid_invalid_and_historical_default(self):
+        self.assertEqual(HISTORICAL_DEFAULTS.timezone, "UTC")
+        self.assertEqual(self.effective(
+            "[runtime]\ntimezone='America/Toronto'\n"
+        ).timezone, "America/Toronto")
+        with self.assertRaisesRegex(ConfigurationError, "unknown IANA timezone"):
+            load_runtime_config(self.write(
+                "[runtime]\ntimezone='Moon/SeaOfTranquility'\n"
+            ))
 
     def test_cli_scalars_and_modes_override_file(self):
         effective = self.effective(

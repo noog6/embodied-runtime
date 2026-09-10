@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from datetime import UTC, datetime
 
 from embodied_runtime.app import (
     COMPLETE_GOAL_TOOL, ORIENT_BODY_TOOL, INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,
@@ -54,7 +55,7 @@ class FakeCognition(TextCognitionBackend):
 
 class AttentionTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, backend=None, *, enabled=True, actions=False, closure=False,
-                 reflexes=(), body=None):
+                 reflexes=(), body=None, **kwargs):
         return RobotApplication(
             RobotProfile("test", "Test"), VirtualHardwareBackend(),
             ApplicationOptions(initiative_enabled=enabled,
@@ -62,6 +63,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
                                initiative_goal_closure_enabled=closure),
             platform_provider=Platform(), body_backend=body or VirtualBodyBackend(),
             cognition_backend=backend, reflexes=reflexes,
+            **kwargs,
         )
 
     async def test_body_event_follows_state_and_omits_noop_and_failure(self):
@@ -101,7 +103,11 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reflex_wakes_fresh_read_only_request_without_memory_mutation(self):
         backend = FakeCognition()
-        app = self.make_app(backend, reflexes=(PresenceCenteringReflex(),))
+        app = self.make_app(
+            backend, reflexes=(PresenceCenteringReflex(),),
+            timezone_name="America/Toronto",
+            wall_clock=lambda: datetime(2026, 9, 10, 22, 7, 42, tzinfo=UTC),
+        )
         await app.start()
         await app.set_body_orientation(yaw_degrees=35, pitch_degrees=-10)
         goal = app.set_goal("Keep body at 35/-10")
@@ -124,6 +130,9 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("previous_yaw_deg: 35.0", instructions)
         self.assertIn("previous_pitch_deg: -10.0", instructions)
         self.assertIn("source: reflex:presence_centering", instructions)
+        self.assertIn("Temporal context", instructions)
+        self.assertIn("local_datetime: 2026-09-10T18:07:42-04:00", instructions)
+        self.assertIn("timezone: America/Toronto", instructions)
         self.assertEqual(tools, (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,))
         self.assertIsNotNone(executor)
         self.assertIsNotNone(refresh)
