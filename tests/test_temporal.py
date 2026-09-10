@@ -163,6 +163,53 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
             CognitionToolCall("schedule_followup", arguments)
         )
 
+    async def test_temporal_situation_goal_age_and_followup_are_fresh(self):
+        app = self.make_app()
+        await app.start()
+        goal = app.set_goal("monitor charging")
+        self.timer.now = 160
+        await self.schedule(
+            app, '{"delay_seconds": 120, "purpose": "check charging voltage"}'
+        )
+        first = app.temporal_situation()
+        self.assertEqual((first.active_goal_id, first.active_goal_age_seconds),
+                         (goal.id, 60))
+        self.assertEqual((first.followup_state, first.followup_remaining_seconds,
+                          first.followup_purpose),
+                         ("pending", 120, "check charging voltage"))
+        self.timer.now = 165
+        second = app.temporal_situation()
+        self.assertEqual(second.active_goal_age_seconds, 65)
+        self.assertEqual(second.followup_remaining_seconds, 115)
+        app.resolve_goal("completed")
+        empty = app.temporal_situation()
+        self.assertIsNone(empty.active_goal_id)
+        self.assertEqual(empty.followup_state, "none")
+        self.timer.now = 200
+        replacement = app.set_goal("new goal")
+        self.timer.now = 207
+        self.assertEqual((app.temporal_situation().active_goal_id,
+                          app.temporal_situation().active_goal_age_seconds),
+                         (replacement.id, 7))
+        await app.stop()
+
+    async def test_temporal_situation_exposes_due_pending_followup(self):
+        events = HoldingEventBus()
+        app = self.make_app(events=events)
+        await app.start()
+        app.set_goal("monitor")
+        await self.schedule(app, '{"delay_seconds": 30, "purpose": "check \\"voltage\\""}')
+        await self.timer.advance()
+        situation = app.temporal_situation()
+        self.assertEqual((situation.followup_state,
+                          situation.followup_remaining_seconds),
+                         ("due_pending", 0))
+        rendered = situation.render()
+        self.assertIn('purpose: "check \\"voltage\\""', rendered)
+        self.assertIn("One follow-up is due now.", rendered)
+        self.assertEqual(len(events.temporal_events), 1)
+        await app.stop()
+
     async def test_exact_schema_and_projection_requirements(self):
         self.assertEqual(SCHEDULE_FOLLOWUP_TOOL.parameters, {
             "type": "object",

@@ -25,7 +25,7 @@ from embodied_runtime.events import EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
-from embodied_runtime.temporal_context import TemporalContext
+from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
 from tests.test_platform import snapshot
 
 
@@ -553,9 +553,14 @@ class CognitionContextTests(unittest.TestCase):
     def test_operator_prompt_is_preserved_and_separated(self):
         prompt = "  Keep this exactly.\nSecond line  "
         temporal = TemporalContext(datetime(2026, 9, 10, tzinfo=UTC), "UTC")
-        composed = compose_cognition_instructions(self.make_context(), temporal, prompt)
+        situation = TemporalSituation(None, None, "none", None, None, None, None, None)
+        composed = compose_cognition_instructions(
+            self.make_context(), temporal, situation, prompt
+        )
         self.assertIn(prompt, composed)
         self.assertLess(composed.index("Operator instructions"), composed.index(prompt))
         self.assertLess(composed.index(prompt), composed.index("Runtime context"))
         self.assertLess(composed.index("Runtime context"),
                         composed.index("Temporal context"))
+        self.assertLess(composed.index("Temporal context"),
+                        composed.index("Temporal situation"))

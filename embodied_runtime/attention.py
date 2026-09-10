@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace as dataclass_replace
 import logging
+from time import monotonic
 from typing import Literal
 
 from embodied_runtime.cognition.outcome import InitiativeAcquisitionOutcome
@@ -79,10 +80,12 @@ class AttentionEpisode:
 class AttentionEpisodeCoordinator:
     """Own the session-local episode namespace and minimal single-flight fence."""
 
-    def __init__(self) -> None:
+    def __init__(self, monotonic_clock: Callable[[], float] = monotonic) -> None:
         self._next_id = 1
         self._current: AttentionEpisode | None = None
         self._last: AttentionEpisode | None = None
+        self._last_completed_monotonic: float | None = None
+        self._monotonic = monotonic_clock
         self._operator_waiters = 0
         self._condition = asyncio.Condition()
 
@@ -93,6 +96,10 @@ class AttentionEpisodeCoordinator:
     @property
     def last(self) -> AttentionEpisode | None:
         return self._last
+
+    @property
+    def last_completed_monotonic(self) -> float | None:
+        return self._last_completed_monotonic
 
     @property
     def operator_waiting(self) -> bool:
@@ -135,6 +142,7 @@ class AttentionEpisodeCoordinator:
         closed = dataclass_replace(episode, state="closed", completion_reason=reason)
         self._current = None
         self._last = closed
+        self._last_completed_monotonic = self._monotonic()
         goal = "none" if episode.goal_id is None else f"G{episode.goal_id}"
         LOGGER.info("[ATTENTION] episode=E%s status=closed reason=%s goal=%s",
                     episode.id, reason, goal)

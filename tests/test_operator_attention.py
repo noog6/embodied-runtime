@@ -19,6 +19,54 @@ class Platform:
         return snapshot()
 
 
+class MutableClock:
+    def __init__(self, now=100):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class ContinuityBackend(TextCognitionBackend):
+    identifier = "continuity"
+
+    def __init__(self, app=None):
+        self.app = app
+        self.requests = []
+        self.current_episode_ids = []
+        self.started = asyncio.Event()
+        self.mode = "success"
+
+    async def respond(self, message, *, instructions=None, **kwargs):
+        self.requests.append((message, instructions))
+        self.current_episode_ids.append(self.app.episode_coordinator.current.id)
+        self.started.set()
+        if self.mode == "failure":
+            raise RuntimeError("provider failed")
+        if self.mode == "block":
+            await asyncio.Event().wait()
+        return "E1 semantic response"
+
+
+class AdvancingAcquisitionBackend(TextCognitionBackend):
+    identifier = "advancing-acquisition"
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.requests = []
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((instructions, tuple(tool.name for tool in tools)))
+        if len(self.requests) == 1:
+            await tool_executor(CognitionToolCall(
+                "inspect_self", '{"area": "runtime"}'
+            ))
+            self.clock.now = 165
+            return "acquired"
+        return "final"
+
+
 class ScriptedBackend(TextCognitionBackend):
     identifier = "scripted-operator-attention"
 
@@ -163,6 +211,85 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(episode.goal_id)
         self.assertEqual(episode.completion_reason, "handled")
         self.assertIn("id: G1", backend.requests[0][1])
+        self.assertEqual(len(app.working_memory.snapshot()), 1)
+        await app.stop()
+
+    async def test_previous_successful_operator_turn_and_episode_ground_e2(self):
+        clock = MutableClock()
+        backend = ContinuityBackend()
+        app = self.app(backend, monotonic_clock=clock)
+        backend.app = app
+        await app.start()
+        self.assertEqual(await app.request_cognition("E1 semantic request"),
+                         "E1 semantic response")
+        self.assertEqual(len(app.working_memory.snapshot()), 1)
+        clock.now = 138
+        await app.request_cognition("second")
+        instructions = backend.requests[1][1]
+        self.assertIn("Previous operator turn\n  state: available\n  age_s: 38",
+                      instructions)
+        self.assertIn("Previous completed episode\n  state: available\n  id: E1\n  age_s: 38",
+                      instructions)
+        self.assertIn('operator: "E1 semantic request"', instructions)
+        self.assertIn('assistant: "E1 semantic response"', instructions)
+        self.assertNotIn("Previous completed episode\n  state: available\n  id: E2",
+                         instructions)
+        self.assertEqual(backend.current_episode_ids, [1, 2])
+        temporal = instructions.split("\n\nActive goal", 1)[0].split(
+            "Temporal situation", 1)[1]
+        self.assertNotIn("E1 semantic request", temporal)
+        self.assertEqual(app.episode_coordinator.last.id, 2)
+        await app.stop()
+
+    async def test_failed_and_cancelled_turns_preserve_success_marker(self):
+        clock = MutableClock()
+        backend = ContinuityBackend()
+        app = self.app(backend, monotonic_clock=clock)
+        backend.app = app
+        await app.start()
+        await app.request_cognition("successful")
+        clock.now = 130
+        backend.mode = "failure"
+        with self.assertRaisesRegex(RuntimeError, "provider failed"):
+            await app.request_cognition("failed")
+        self.assertEqual(app.temporal_situation().last_operator_turn_age_seconds, 30)
+        self.assertEqual(app.episode_coordinator.last.completion_reason, "error")
+        clock.now = 150
+        backend.mode = "block"
+        backend.started.clear()
+        task = asyncio.create_task(app.request_cognition("cancelled"))
+        await backend.started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(app.temporal_situation().last_operator_turn_age_seconds, 50)
+        self.assertEqual(app.episode_coordinator.last.completion_reason, "cancelled")
+        self.assertEqual(len(app.working_memory.snapshot()), 1)
+        self.assertEqual(app.working_memory.snapshot()[0].operator_text, "successful")
+        await app.stop()
+
+    async def test_temporal_situation_refreshes_within_acquisition_episode(self):
+        clock = MutableClock()
+        backend = AdvancingAcquisitionBackend(clock)
+        app = self.app(backend, monotonic_clock=clock)
+        await app.start()
+        app.set_goal("monitor charging")
+        clock.now = 160
+        app.temporal.schedule(120, "check charging voltage", app.active_goal)
+        await app.request_cognition("inspect then answer")
+        self.assertEqual(len(backend.requests), 2)
+        first, second = backend.requests
+        for instructions in (first[0], second[0]):
+            self.assertIn("id: E1", instructions)
+            self.assertIn("Temporal context", instructions)
+            self.assertIn("Working memory\n  state: empty", instructions)
+        self.assertIn("age_s: 60", first[0])
+        self.assertIn("remaining_s: 120", first[0])
+        self.assertIn("age_s: 65", second[0])
+        self.assertIn("remaining_s: 115", second[0])
+        self.assertIn("acquisitions_remaining: 2", first[0])
+        self.assertIn("acquisitions_remaining: 1", second[0])
+        self.assertEqual(first[1].count("inspect_self"), 1)
         self.assertEqual(len(app.working_memory.snapshot()), 1)
         await app.stop()
 
