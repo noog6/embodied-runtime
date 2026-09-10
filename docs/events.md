@@ -52,6 +52,12 @@ is observable but cannot recursively trigger another initiative episode.
 
 ## Event projections for attention
 
+An event is a runtime occurrence that may or may not deserve deliberative attention.
+When existing policy accepts an eligible event, attention creates one short,
+runtime-owned bounded episode; ignored raw events do not create diagnostic episodes.
+The episode's concern is derived deterministically from this projection and cannot be
+rewritten by cognition.
+
 Attention may project one selected event into an immutable
 `SemanticObservation`. This is neither a replacement for the event nor state:
 it identifies the transition while fresh `RuntimeState` describes current

@@ -2,8 +2,9 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 import logging
+from typing import Literal
 
 from embodied_runtime.events import (
     BodyOrientationChanged, Event, EventBus, MemoryPressureCleared,
@@ -43,6 +44,46 @@ CONTINUATION_INITIATIVE_REQUEST = (
     "permissions, not obligations."
 )
 MAX_DIAGNOSTIC_RESPONSE_CHARS = 2000
+
+EpisodeState = Literal["created", "active", "closed"]
+EpisodeCompletionReason = Literal["handled", "no_action", "error", "cancelled", "stale_goal"]
+
+
+@dataclass(frozen=True, slots=True)
+class AttentionEpisode:
+    """One runtime-owned, bounded autonomous deliberation."""
+
+    id: int
+    trigger_kind: str
+    trigger_source: str
+    concern: str
+    goal_id: int | None
+    state: EpisodeState = "created"
+    completion_reason: EpisodeCompletionReason | None = None
+
+    def render(self) -> str:
+        goal = "none" if self.goal_id is None else f"G{self.goal_id}"
+        return "\n".join((
+            "Attention episode",
+            "These values are runtime-owned and fixed for this bounded episode.",
+            f"  id: E{self.id}",
+            f"  concern: {self.concern}",
+            f"  goal_id: {goal}",
+            "The episode ends after the currently authorized bounded execution path.",
+        ))
+
+
+def concern_for_stimulus(stimulus: "AttentionStimulus") -> str:
+    """Derive the episode's immutable concern without cognition."""
+    labels = {
+        "body_orientation_changed": "Assess reflex body-orientation transition against active goal",
+        "memory_pressure_raised": "Assess memory-pressure transition against active goal",
+        "memory_pressure_cleared": "Assess memory-pressure transition against active goal",
+        "thermal_warning_raised": "Assess thermal-warning transition against active goal",
+        "thermal_warning_cleared": "Assess thermal-warning transition against active goal",
+        "temporal_followup_due": "Re-evaluate due temporal follow-up against active goal",
+    }
+    return labels.get(stimulus.kind, f"Assess {stimulus.kind} transition against active goal")
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -215,6 +256,15 @@ class AttentionStatus:
     last_visual_state: str
     last_visual_focus: str | None
     last_visual_status: str | None
+    current_episode_id: int | None
+    current_episode_state: str | None
+    current_episode_concern: str | None
+    current_episode_goal_id: int | None
+    last_episode_id: int | None
+    last_episode_state: str | None
+    last_episode_concern: str | None
+    last_episode_goal_id: int | None
+    last_episode_completion_reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +282,7 @@ class GoalAttentionController:
                  is_running: Callable[[], bool], has_active_goal: Callable[[], bool],
                  current_goal: Callable[[], object | None],
                  claim_temporal_due: Callable[..., TemporalFollowupDue | None],
-                 run_initiative: Callable[[AttentionStimulus], Awaitable[InitiativeOutcome]]) -> None:
+                 run_initiative: Callable[[AttentionStimulus, AttentionEpisode], Awaitable[InitiativeOutcome]]) -> None:
         self.enabled = enabled
         self.platform_attention_enabled = platform_attention_enabled
         self._backend_available = backend_available
@@ -243,6 +293,9 @@ class GoalAttentionController:
         self._run_initiative = run_initiative
         self._subscriptions: list[Subscription[Event]] = []
         self._task: asyncio.Task[None] | None = None
+        self._next_episode_id = 1
+        self._current_episode: AttentionEpisode | None = None
+        self._last_episode: AttentionEpisode | None = None
         self._state = "idle" if enabled else "disabled"
         self._last_trigger: str | None = None
         self._last_source: str | None = None
@@ -305,7 +358,16 @@ class GoalAttentionController:
                                self._last_inspection_state, self._last_inspection_area,
                                self._last_inspection_status,
                                self._last_visual_state, self._last_visual_focus,
-                               self._last_visual_status)
+                               self._last_visual_status,
+                               self._current_episode.id if self._current_episode else None,
+                               self._current_episode.state if self._current_episode else None,
+                               self._current_episode.concern if self._current_episode else None,
+                               self._current_episode.goal_id if self._current_episode else None,
+                               self._last_episode.id if self._last_episode else None,
+                               self._last_episode.state if self._last_episode else None,
+                               self._last_episode.concern if self._last_episode else None,
+                               self._last_episode.goal_id if self._last_episode else None,
+                               self._last_episode.completion_reason if self._last_episode else None)
 
     def record_visual(self, *, state: str | None = None,
                       focus: str | None = None, status: str | None = None) -> None:
@@ -406,6 +468,17 @@ class GoalAttentionController:
                         observation.kind)
             return
         stimulus = AttentionStimulus(observation)
+        goal = self._current_goal()
+        goal_id = getattr(goal, "id", None)
+        if goal is None or goal_id is None:
+            return
+        episode = AttentionEpisode(
+            self._next_episode_id, stimulus.kind, stimulus.source,
+            concern_for_stimulus(stimulus), goal_id,
+        )
+        self._next_episode_id += 1
+        episode = dataclass_replace(episode, state="active")
+        self._current_episode = episode
         self._last_trigger = stimulus.kind
         self._last_source = stimulus.source
         self._last_response = None
@@ -425,10 +498,10 @@ class GoalAttentionController:
         self._last_visual_focus = None
         self._last_visual_status = None
         self._state = "in_flight"
-        LOGGER.info("[ATTENTION] event=%s source=%s decision=wake",
-                    stimulus.kind, stimulus.source)
+        LOGGER.info("[ATTENTION] episode=E%s status=started trigger=%s source=%s goal=G%s",
+                    episode.id, stimulus.kind, stimulus.source, goal_id)
         self._task = asyncio.create_task(
-            self._reflect(stimulus, required_goal=required_goal),
+            self._reflect(stimulus, episode, goal, required_goal=required_goal),
             name="initiative:goal_attention",
         )
         self._task.add_done_callback(self._attention_done)
@@ -451,25 +524,45 @@ class GoalAttentionController:
         await self._deliver_claimed_temporal(due)
 
     async def _reflect(
-        self, stimulus: AttentionStimulus, *, required_goal: object | None = None,
+        self, stimulus: AttentionStimulus, episode: AttentionEpisode, bound_goal: object,
+        *, required_goal: object | None = None,
     ) -> None:
         # Temporal acceptance and task execution are separate event-loop turns.
         # Recheck immediately before application cognition captures its episode goal.
-        if required_goal is not None and self._current_goal() is not required_goal:
+        if ((required_goal is not None and bound_goal is not required_goal)
+                or self._current_goal() is not bound_goal):
             LOGGER.info(
                 "[ATTENTION] event=%s decision=suppressed reason=goal_changed",
                 stimulus.kind,
             )
             self._state = "idle"
+            self._close_episode(episode, "stale_goal")
             return
         try:
-            outcome = await self._run_initiative(stimulus)
+            outcome = await self._run_initiative(stimulus, episode)
         except asyncio.CancelledError:
+            self._close_episode(episode, "cancelled")
             raise
         except Exception:
             self._state = "failed"
+            self._close_episode(episode, "error")
             return
         self._last_response = outcome.response[:MAX_DIAGNOSTIC_RESPONSE_CHARS]
         self._last_action = outcome.action
         self._last_action_status = outcome.action_status
         self._state = "completed"
+        if (self._current_goal() is not bound_goal
+                and self._last_goal_closure != "completed"):
+            self._close_episode(episode, "stale_goal")
+        else:
+            self._close_episode(episode, "handled" if outcome.action else "no_action")
+
+    def _close_episode(self, episode: AttentionEpisode,
+                       reason: EpisodeCompletionReason) -> None:
+        closed = dataclass_replace(episode, state="closed", completion_reason=reason)
+        if self._current_episode is episode:
+            self._current_episode = None
+        self._last_episode = closed
+        goal = "none" if episode.goal_id is None else f"G{episode.goal_id}"
+        LOGGER.info("[ATTENTION] episode=E%s status=closed reason=%s goal=%s",
+                    episode.id, reason, goal)

@@ -2,7 +2,8 @@ import asyncio
 import unittest
 
 from embodied_runtime.app import (
-    ORIENT_BODY_TOOL, INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL, ApplicationOptions, RobotApplication,
+    COMPLETE_GOAL_TOOL, ORIENT_BODY_TOOL, INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,
+    ApplicationOptions, RobotApplication,
 )
 from embodied_runtime.attention import ACTION_INITIATIVE_REQUEST, INITIATIVE_REQUEST
 from embodied_runtime.body.virtual import VirtualBodyBackend
@@ -52,11 +53,13 @@ class FakeCognition(TextCognitionBackend):
 
 
 class AttentionTests(unittest.IsolatedAsyncioTestCase):
-    def make_app(self, backend=None, *, enabled=True, actions=False, reflexes=(), body=None):
+    def make_app(self, backend=None, *, enabled=True, actions=False, closure=False,
+                 reflexes=(), body=None):
         return RobotApplication(
             RobotProfile("test", "Test"), VirtualHardwareBackend(),
             ApplicationOptions(initiative_enabled=enabled,
-                               initiative_actions_enabled=actions),
+                               initiative_actions_enabled=actions,
+                               initiative_goal_closure_enabled=closure),
             platform_provider=Platform(), body_backend=body or VirtualBodyBackend(),
             cognition_backend=backend, reflexes=reflexes,
         )
@@ -101,7 +104,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_app(backend, reflexes=(PresenceCenteringReflex(),))
         await app.start()
         await app.set_body_orientation(yaw_degrees=35, pitch_degrees=-10)
-        app.set_goal("Keep body at 35/-10")
+        goal = app.set_goal("Keep body at 35/-10")
         app.working_memory.append("prior operator", "prior response")
         memory = app.working_memory.snapshot()
         await app.observe_presence(present=True, source="test")
@@ -115,6 +118,9 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("description: \"Keep body at 35/-10\"", instructions)
         self.assertIn("prior operator", instructions)
         self.assertIn("Attention stimulus", instructions)
+        self.assertIn("Attention episode", instructions)
+        self.assertIn("id: E1", instructions)
+        self.assertIn("goal_id: G1", instructions)
         self.assertIn("previous_yaw_deg: 35.0", instructions)
         self.assertIn("previous_pitch_deg: -10.0", instructions)
         self.assertIn("source: reflex:presence_centering", instructions)
@@ -127,6 +133,102 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.attention.status().state, "completed")
         self.assertIsNone(app.attention.status().last_action)
         self.assertIsNone(app.attention.status().last_action_status)
+        status = app.attention.status()
+        self.assertIsNone(status.current_episode_id)
+        self.assertEqual(status.last_episode_id, 1)
+        self.assertEqual(status.last_episode_state, "closed")
+        self.assertEqual(status.last_episode_goal_id, goal.id)
+        self.assertEqual(status.last_episode_completion_reason, "no_action")
+        self.assertEqual(
+            status.last_episode_concern,
+            "Assess reflex body-orientation transition against active goal",
+        )
+        self.assertFalse(hasattr(app.attention, "_episodes"))
+        await app.stop()
+
+    async def test_episode_is_active_single_flight_and_ids_increase(self):
+        backend = FakeCognition(blocked=True)
+        app = self.make_app(backend)
+        await app.start()
+        goal = app.set_goal("watch")
+        await app.set_body_orientation(yaw_degrees=1, pitch_degrees=0,
+                                       source="reflex:first")
+        await backend.started.wait()
+        status = app.attention.status()
+        self.assertEqual((status.current_episode_id, status.current_episode_state,
+                          status.current_episode_goal_id), (1, "active", goal.id))
+        await app.set_body_orientation(yaw_degrees=2, pitch_degrees=0,
+                                       source="reflex:suppressed")
+        self.assertEqual(app.attention.status().current_episode_id, 1)
+        backend.release.set()
+        while app.attention.status().current_episode_id is not None:
+            await asyncio.sleep(0)
+        backend.started.clear()
+        await app.set_body_orientation(yaw_degrees=3, pitch_degrees=0,
+                                       source="reflex:second")
+        await backend.started.wait()
+        while app.attention.status().current_episode_id is not None:
+            await asyncio.sleep(0)
+        self.assertEqual(app.attention.status().last_episode_id, 2)
+        await app.stop()
+
+    async def test_changed_goal_does_not_rebind_in_flight_episode(self):
+        backend = FakeCognition(blocked=True, tool_call=CognitionToolCall(
+            "orient_body", '{"yaw_degrees": 20, "pitch_degrees": 0}'
+        ))
+        app = self.make_app(backend, actions=True)
+        await app.start()
+        first = app.set_goal("first")
+        await app.set_body_orientation(yaw_degrees=1, pitch_degrees=0,
+                                       source="reflex:test")
+        await backend.started.wait()
+        app.clear_goal()
+        second = app.set_goal("second")
+        backend.release.set()
+        while app.attention.status().current_episode_id is not None:
+            await asyncio.sleep(0)
+        status = app.attention.status()
+        self.assertEqual(status.last_episode_goal_id, first.id)
+        self.assertNotEqual(status.last_episode_goal_id, second.id)
+        self.assertEqual(status.last_episode_completion_reason, "stale_goal")
+        self.assertEqual(app.runtime_state.body, BodyState(1.0, 0.0))
+        await app.stop()
+
+    async def test_successful_goal_closure_is_handled_not_stale(self):
+        class CompletingCognition(FakeCognition):
+            async def respond(self, message, *, instructions=None, tools=(),
+                              tool_executor=None, refreshed_instructions=None):
+                self.requests.append((message, instructions, tools, tool_executor,
+                                      refreshed_instructions))
+                if len(self.requests) == 1:
+                    await tool_executor(CognitionToolCall(
+                        "orient_body", '{"yaw_degrees": 20, "pitch_degrees": 0}'
+                    ))
+                    return "effect applied"
+                self.assert_outcome_tools = tools
+                await tool_executor(CognitionToolCall("complete_goal", "{}"))
+                return "goal completed"
+
+        backend = CompletingCognition()
+        app = self.make_app(backend, actions=True, closure=True)
+        await app.start()
+        goal = app.set_goal("reach twenty degrees")
+        await app.set_body_orientation(yaw_degrees=1, pitch_degrees=0,
+                                       source="reflex:test")
+        while not backend.requests:
+            await asyncio.sleep(0)
+        while app.attention.status().current_episode_id is not None:
+            await asyncio.sleep(0)
+        status = app.attention.status()
+        self.assertIsNone(app.active_goal)
+        self.assertEqual(status.last_goal_closure, "completed")
+        self.assertEqual(status.last_episode_id, 1)
+        self.assertEqual(status.last_episode_goal_id, goal.id)
+        self.assertEqual(status.last_episode_state, "closed")
+        self.assertEqual(status.last_episode_completion_reason, "handled")
+        self.assertNotEqual(status.last_episode_completion_reason, "stale_goal")
+        self.assertEqual(backend.assert_outcome_tools, (COMPLETE_GOAL_TOOL,))
+        self.assertEqual(len(backend.requests), 2)
         await app.stop()
 
     async def test_action_projection_is_narrow_running_goal_nonphysical_only(self):
@@ -276,6 +378,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
         self.assertEqual(app.state, LifecycleState.RUNNING)
         self.assertEqual(app.attention.status().state, "failed")
+        self.assertEqual(app.attention.status().last_episode_completion_reason, "error")
         self.assertEqual(app.working_memory.snapshot(), memory)
         backend.error = None
         self.assertTrue(await app.request_cognition("operator"))
@@ -293,6 +396,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         task = app.attention._task
         await asyncio.wait_for(app.stop(), 1)
         self.assertTrue(task.cancelled())
+        self.assertEqual(app.attention.status().last_episode_completion_reason, "cancelled")
         self.assertEqual(app.events._subscriptions, [])
 
 

@@ -159,7 +159,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.app.set_goal("keep watching")
         self.assertEqual(self.console.execute("goal"), (
-            "Active goal\n  state:         active\n  description:   keep watching", False
+            "Active goal\n  state:         active\n  id:            G1\n  description:   keep watching", False
         ))
         self.assertEqual(self.console.execute("goal clear"), (
             "Active goal\n  cleared:       true", False
@@ -174,6 +174,15 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "Attention\n"
             "  enabled:       false\n"
             "  state:         disabled\n"
+            "  current_episode_id: none\n"
+            "  current_episode_state: none\n"
+            "  current_episode_concern: none\n"
+            "  current_episode_goal_id: none\n"
+            "  last_episode_id: none\n"
+            "  last_episode_state: none\n"
+            "  last_episode_concern: none\n"
+            "  last_episode_goal_id: none\n"
+            "  last_episode_completion_reason: none\n"
             "  last_trigger:  none\n"
             "  last_source:   none\n"
             "  last_action:   none\n"
