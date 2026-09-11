@@ -7,7 +7,8 @@ import unittest
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from embodied_runtime.app import ApplicationOptions, RobotApplication
+import embodied_runtime.app as app_module
+from embodied_runtime.app import REMEMBER_TOOL, ApplicationOptions, RobotApplication
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import (
     CognitionContext,
@@ -377,6 +378,58 @@ class FakeResponses:
 
 
 class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
+    def test_all_provider_tools_have_compatible_strict_object_schemas(self):
+        tool_definitions = (
+            value for value in vars(app_module).values()
+            if isinstance(value, app_module.CognitionToolDefinition)
+        )
+        for tool in tool_definitions:
+            with self.subTest(tool=tool.name):
+                provider_tool = OpenAIResponsesBackend._provider_tool(tool)
+                parameters = provider_tool["parameters"]
+                self.assertTrue(provider_tool["strict"])
+                self.assertIs(parameters["additionalProperties"], False)
+                self.assertEqual(
+                    set(parameters["required"]), set(parameters["properties"])
+                )
+
+        properties = REMEMBER_TOOL.parameters["properties"]
+        self.assertEqual(properties["related_entity"]["type"], ["string", "null"])
+        self.assertEqual(properties["related_role"]["type"], ["string", "null"])
+
+    async def test_remember_provider_request_uses_strict_nullable_schema(self):
+        responses = FakeResponses()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+
+        await backend.respond(
+            "remember this", tools=(REMEMBER_TOOL,),
+            tool_executor=lambda call: None,
+            refreshed_instructions=lambda: "fresh",
+        )
+
+        provider_tool = responses.calls[0]["tools"][0]
+        parameters = provider_tool["parameters"]
+        self.assertTrue(provider_tool["strict"])
+        self.assertIs(parameters["additionalProperties"], False)
+        self.assertEqual(set(parameters["required"]), set(parameters["properties"]))
+        self.assertEqual(
+            parameters["properties"]["related_entity"]["type"], ["string", "null"]
+        )
+        self.assertEqual(
+            parameters["properties"]["related_role"]["type"], ["string", "null"]
+        )
+
+    def test_provider_tool_rejects_incompatible_strict_schema(self):
+        invalid = app_module.CognitionToolDefinition(
+            name="invalid", description="invalid test tool",
+            parameters={
+                "type": "object", "properties": {"value": {"type": "string"}},
+                "required": [], "additionalProperties": False,
+            },
+        )
+        with self.assertRaisesRegex(CognitionError, "invalid"):
+            OpenAIResponsesBackend._provider_tool(invalid)
+
     async def test_request_shape_and_output_text(self):
         responses = FakeResponses()
         backend = OpenAIResponsesBackend(

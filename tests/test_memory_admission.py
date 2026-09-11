@@ -241,10 +241,8 @@ class AdmissionBackend(TextCognitionBackend):
         if self.sequence:
             self.episode_ids.append(self.app.episode_coordinator.current.id)
             name = self.sequence.pop(0)
-            args = {"query": "Gordon"} if name == "recall_memory" else {
-                key: value for key, value in asdict(proposal()).items()
-                if value is not None
-            }
+            args = ({"query": "Gordon"} if name == "recall_memory"
+                    else asdict(proposal()))
             self.results.append(await tool_executor(CognitionToolCall(name, json.dumps(args))))
             return "provisional"
         return "I will remember that."
@@ -307,6 +305,32 @@ class MemoryAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(json.loads(result.output)["status"], "rejected")
         self.assertEqual(store.list_memories_for_entity(gordon.id), ())
+        await app.stop()
+
+    async def test_tool_arguments_require_nullable_relationship_keys(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        store = SQLiteMemoryStore(Path(temporary.name) / "memory.sqlite3")
+        gordon = store.create_entity("object", "Gordon")
+        app, _ = self.make_app(store, [])
+        await app.start()
+        arguments = asdict(proposal())
+        self.assertIsNone(arguments["related_entity"])
+        self.assertIsNone(arguments["related_role"])
+        accepted = app._execute_memory_admission(
+            CognitionToolCall("remember", json.dumps(arguments)),
+            "Gordon's favorite snack is herring.", "voice",
+        )
+        self.assertEqual(json.loads(accepted.output)["status"], "applied")
+
+        arguments = asdict(proposal(predicate="favorite_color", value="blue",
+                                    evidence="Gordon's favorite color is blue"))
+        arguments.pop("related_role")
+        rejected = app._execute_memory_admission(
+            CognitionToolCall("remember", json.dumps(arguments)),
+            "Gordon's favorite color is blue.", "voice",
+        )
+        self.assertEqual(json.loads(rejected.output)["status"], "rejected")
+        self.assertEqual(len(store.list_memories_for_entity(gordon.id)), 1)
         await app.stop()
 
     async def test_store_failure_is_rejected_and_terminates_without_retry(self):
