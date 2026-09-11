@@ -229,10 +229,17 @@ REMEMBER_TOOL = CognitionToolDefinition(
             "predicate": {"type": "string", "minLength": 1, "maxLength": 64},
             "value": {"type": "string", "minLength": 1, "maxLength": 500},
             "evidence": {"type": "string", "minLength": 1, "maxLength": 1000},
-            "related_entity": {"type": "string", "minLength": 1, "maxLength": 256},
-            "related_role": {"type": "string", "minLength": 1, "maxLength": 64},
+            "related_entity": {
+                "type": ["string", "null"], "minLength": 1, "maxLength": 256,
+            },
+            "related_role": {
+                "type": ["string", "null"], "minLength": 1, "maxLength": 64,
+            },
         },
-        "required": ["subject", "kind", "predicate", "value", "evidence"],
+        "required": [
+            "subject", "kind", "predicate", "value", "evidence",
+            "related_entity", "related_role",
+        ],
         "additionalProperties": False,
     },
 )
@@ -1595,15 +1602,17 @@ class RobotApplication:
         try:
             if self.state is not LifecycleState.RUNNING or self._memory_admission is None:
                 raise RuntimeError("persistent memory admission is not available")
-            required = {"subject", "kind", "predicate", "value", "evidence"}
-            optional = {"related_entity", "related_role"}
+            required = {
+                "subject", "kind", "predicate", "value", "evidence",
+                "related_entity", "related_role",
+            }
             arguments = json.loads(call.arguments)
             if not isinstance(arguments, dict):
                 raise ValueError("arguments must be a JSON object")
-            if not required <= set(arguments) or not set(arguments) <= required | optional:
+            if set(arguments) != required:
                 raise ValueError(
-                    "subject, kind, predicate, value, and evidence are required; "
-                    "only related_entity and related_role are optional"
+                    "exactly subject, kind, predicate, value, evidence, "
+                    "related_entity, and related_role are required"
                 )
             proposal = MemoryAdmissionProposal(**arguments)
             result = self._memory_admission.admit(
