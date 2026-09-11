@@ -16,6 +16,7 @@ from embodied_runtime.interaction import (
     VOICE_DIALOGUE, MAX_OPERATOR_MESSAGE_CHARS, ConsoleOperatorMessageChannel,
     InteractionChannel, InteractionContext, InteractionInitiator,
     InteractionMode, OperatorMessage, OperatorMessageSink, runtime_notification,
+    render_dialogue_policy,
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.state import BodyState, LifecycleState
@@ -74,6 +75,28 @@ class InteractionIdentityTests(unittest.TestCase):
   mode: dialogue
   initiator: operator
   response_expected: true""")
+
+    def test_voice_dialogue_policy_covers_spoken_presentation(self):
+        policy = render_dialogue_policy(VOICE_DIALOGUE)
+        self.assertIn("Dialogue policy\n  medium: spoken", policy)
+        self.assertIn("natural speech", policy)
+        self.assertIn("Do not normally recite raw URLs", policy)
+        self.assertIn("Do not rely on Markdown-dependent or visual formatting", policy)
+        self.assertIn("explicitly requests", policy)
+        self.assertIn("provide it", policy)
+        self.assertIn("unless the runtime actually performed that action", policy)
+
+    def test_console_dialogue_policy_covers_text_presentation(self):
+        policy = render_dialogue_policy(CONSOLE_DIALOGUE)
+        self.assertIn("Dialogue policy\n  medium: text", policy)
+        self.assertIn("paragraphs and lists", policy)
+        self.assertIn("plain terminal", policy)
+        self.assertIn("exact URLs, paths, hashes, identifiers", policy)
+        self.assertIn("technical detail", policy)
+
+    def test_dialogue_policy_rejects_non_dialogue_context(self):
+        with self.assertRaises(ValueError):
+            render_dialogue_policy(CONSOLE_NOTIFICATION)
 
 
 class ConsoleChannelValidationTests(unittest.IsolatedAsyncioTestCase):

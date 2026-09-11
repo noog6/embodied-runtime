@@ -46,7 +46,8 @@ from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, InteractionChannel, InteractionContext,
     InteractionInitiator, InteractionMode, OperatorMessage,
-    OperatorMessageSink, VOICE_DIALOGUE, runtime_notification,
+    OperatorMessageSink, VOICE_DIALOGUE, render_dialogue_policy,
+    runtime_notification,
 )
 from embodied_runtime.memory import (
     MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
@@ -937,6 +938,7 @@ class RobotApplication:
         ]
         if interaction is not None:
             lines.append(interaction.render())
+            lines.append(render_dialogue_policy(interaction))
         lines.extend([
             episode.render(),
             "Operator episode policy",

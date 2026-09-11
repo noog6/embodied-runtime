@@ -11,7 +11,7 @@ from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.interaction import (
     CONSOLE_DIALOGUE, VOICE_DIALOGUE, InteractionChannel, InteractionContext,
-    InteractionInitiator, InteractionMode,
+    InteractionInitiator, InteractionMode, render_dialogue_policy,
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.observations import SemanticObservation
@@ -243,8 +243,16 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         grounding = CONSOLE_DIALOGUE.render()
         self.assertEqual(backend.requests[0][1].count("Interaction context"), 1)
         self.assertIn(grounding, backend.requests[0][1])
-        self.assertLess(backend.requests[0][1].index(grounding),
-                        backend.requests[0][1].index("Attention episode"))
+        instructions = backend.requests[0][1]
+        policy = render_dialogue_policy(CONSOLE_DIALOGUE)
+        self.assertEqual(instructions.count("Dialogue policy"), 1)
+        self.assertLess(instructions.index("Working memory"),
+                        instructions.index(grounding))
+        self.assertLess(instructions.index(grounding), instructions.index(policy))
+        self.assertLess(instructions.index(policy),
+                        instructions.index("Attention episode"))
+        self.assertLess(instructions.index("Attention episode"),
+                        instructions.index("Operator episode policy"))
         await app.stop()
 
     async def test_legacy_source_is_not_promoted_to_interaction_grounding(self):
@@ -254,6 +262,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.request_cognition("hello", source="console")
         self.assertEqual(app.episode_coordinator.last.trigger_source, "console")
         self.assertNotIn("Interaction context", backend.requests[0][1])
+        self.assertNotIn("Dialogue policy", backend.requests[0][1])
         await app.stop()
 
     async def test_semantically_valid_distinct_context_is_accepted_and_authoritative(self):
@@ -351,10 +360,14 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("acquisitions_remaining: 1", second[0])
         self.assertEqual(first[1].count("inspect_self"), 1)
         grounding = CONSOLE_DIALOGUE.render()
+        policy = render_dialogue_policy(CONSOLE_DIALOGUE)
         self.assertTrue(all(request[0].count(grounding) == 1
+                            for request in backend.requests))
+        self.assertTrue(all(request[0].count(policy) == 1
                             for request in backend.requests))
         self.assertEqual(len(backend.refreshed), 1)
         self.assertEqual(backend.refreshed[0].count(grounding), 1)
+        self.assertEqual(backend.refreshed[0].count(policy), 1)
         self.assertEqual(app.episode_coordinator.last.id, 1)
         self.assertEqual(len(app.working_memory.snapshot()), 1)
         await app.stop()
@@ -553,6 +566,18 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend.episodes, [(1, "voice"), (2, "voice")])
         self.assertTrue(all(text.count(VOICE_DIALOGUE.render()) == 1
                             for text in backend.instructions))
+        voice_policy = render_dialogue_policy(VOICE_DIALOGUE)
+        self.assertTrue(all(text.count(voice_policy) == 1
+                            for text in backend.instructions))
+        for instructions in backend.instructions:
+            self.assertLess(instructions.index("Working memory"),
+                            instructions.index(VOICE_DIALOGUE.render()))
+            self.assertLess(instructions.index(VOICE_DIALOGUE.render()),
+                            instructions.index(voice_policy))
+            self.assertLess(instructions.index(voice_policy),
+                            instructions.index("Attention episode"))
+            self.assertLess(instructions.index("Attention episode"),
+                            instructions.index("Operator episode policy"))
         self.assertEqual(tts.spoken, ["answer 1", "answer 2"])
         self.assertEqual(voice.listen_calls, 2)
         self.assertIn("Working memory\n  state: empty", backend.instructions[0])
@@ -568,6 +593,52 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.request_cognition("console", interaction=CONSOLE_DIALOGUE)
         await app.request_cognition("voice", interaction=VOICE_DIALOGUE)
         self.assertEqual(backend.requests[0][2], backend.requests[1][2])
+        await app.stop()
+
+    async def test_console_to_voice_keeps_shared_history_and_changes_current_policy(self):
+        backend = ScriptedBackend()
+        app = self.app(backend)
+        await app.start()
+        self.assertEqual(
+            await RuntimeConsole(app).execute_async(
+                "ask The project codename is Bluebird."
+            ),
+            ("Test: final answer", False),
+        )
+        await app.request_cognition("What was the codename?", interaction=VOICE_DIALOGUE)
+        voice_instructions = backend.requests[1][1]
+        self.assertIn('operator: "The project codename is Bluebird."', voice_instructions)
+        self.assertIn('assistant: "final answer"', voice_instructions)
+        self.assertIn(VOICE_DIALOGUE.render(), voice_instructions)
+        self.assertIn(render_dialogue_policy(VOICE_DIALOGUE), voice_instructions)
+        self.assertNotIn(render_dialogue_policy(CONSOLE_DIALOGUE), voice_instructions)
+        self.assertEqual([turn.operator_text for turn in app.working_memory.snapshot()], [
+            "The project codename is Bluebird.", "What was the codename?",
+        ])
+        self.assertEqual(app.episode_coordinator.last.id, 2)
+        await app.stop()
+
+    async def test_voice_to_console_keeps_shared_history_and_changes_current_policy(self):
+        backend = ScriptedBackend()
+        app = self.app(backend)
+        await app.start()
+        await app.request_cognition(
+            "Let's call the test object Bluebird.", interaction=VOICE_DIALOGUE
+        )
+        self.assertEqual(
+            await RuntimeConsole(app).execute_async(
+                "ask What did I just call the test object?"
+            ),
+            ("Test: final answer", False),
+        )
+        console_instructions = backend.requests[1][1]
+        self.assertIn('operator: "Let\'s call the test object Bluebird."',
+                      console_instructions)
+        self.assertIn('assistant: "final answer"', console_instructions)
+        self.assertIn(CONSOLE_DIALOGUE.render(), console_instructions)
+        self.assertIn(render_dialogue_policy(CONSOLE_DIALOGUE), console_instructions)
+        self.assertNotIn(render_dialogue_policy(VOICE_DIALOGUE), console_instructions)
+        self.assertEqual(len(app.working_memory.snapshot()), 2)
         await app.stop()
 
 
