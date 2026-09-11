@@ -46,7 +46,8 @@ from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, InteractionChannel, InteractionContext,
     InteractionInitiator, InteractionMode, OperatorMessage,
-    OperatorMessageSink, VOICE_DIALOGUE, render_dialogue_policy,
+    OperatorDeliveryDestination, OperatorDeliveryRouteCatalog,
+    OperatorMessageSink, VOICE_DIALOGUE, operator_delivery, render_dialogue_policy,
     render_notification_context, render_notification_policy,
     resolve_notification_route,
 )
@@ -117,6 +118,34 @@ ADDRESS_OPERATOR_TOOL = CognitionToolDefinition(
         "additionalProperties": False,
     },
 )
+
+
+def deliver_message_tool(
+    destinations: Sequence[OperatorDeliveryDestination],
+) -> CognitionToolDefinition:
+    """Build the operator-only effect from one captured authority set."""
+    return CognitionToolDefinition(
+        name="deliver_message",
+        description=(
+            "Use only when the operator explicitly requests or clearly authorizes "
+            "delivery to one offered runtime-authorized semantic destination. Available "
+            "destinations are permissions, not obligations. An applied result means the "
+            "configured route accepted the delivery, not that the operator read, saw, or "
+            "acknowledged it. Do not claim success until status=applied."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "destination": {
+                    "type": "string",
+                    "enum": [item.name for item in destinations],
+                },
+                "message": {"type": "string", "maxLength": MAX_OPERATOR_MESSAGE_CHARS},
+            },
+            "required": ["destination", "message"],
+            "additionalProperties": False,
+        },
+    )
 
 SET_GOAL_TOOL = CognitionToolDefinition(
     name="set_goal",
@@ -344,6 +373,7 @@ class RobotApplication:
         cognition_backend: TextCognitionBackend | None = None,
         working_memory: WorkingMemory | None = None,
         operator_message_sink: OperatorMessageSink | None = None,
+        operator_delivery_routes: OperatorDeliveryRouteCatalog | None = None,
         self_inspector: SelfInspector | None = None,
         visual_perception_backend: VisualPerceptionBackend | None = None,
         temporal_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -368,6 +398,9 @@ class RobotApplication:
         self._cognition_backend = cognition_backend
         self._active_operator_cognition_task: asyncio.Task[object] | None = None
         self._operator_message_sink = operator_message_sink
+        self._operator_delivery_routes = (
+            operator_delivery_routes or OperatorDeliveryRouteCatalog()
+        )
         self._self_inspector = self_inspector or HostSelfInspector()
         self._visual_perception_backend = visual_perception_backend
         self.working_memory = (
@@ -792,7 +825,10 @@ class RobotApplication:
                 acquired = False
                 capability_consumed = False
                 grounded_goal = self._active_goal
-                tools = self._operator_episode_tools(len(acquisitions))
+                delivery_destinations = self._operator_delivery_routes.destinations
+                tools = self._operator_episode_tools(
+                    len(acquisitions), delivery_destinations
+                )
 
                 async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
                     nonlocal acquired, capability_consumed
@@ -846,7 +882,12 @@ class RobotApplication:
                             episode.id, number, call.name, status,
                         )
                     else:
-                        if call.name == REMEMBER_TOOL.name:
+                        if call.name == "deliver_message":
+                            result = await self._execute_deliver_message(
+                                call, tools, delivery_destinations,
+                                episode.trigger_source,
+                            )
+                        elif call.name == REMEMBER_TOOL.name:
                             result = self._execute_memory_admission(
                                 call, message, episode.trigger_source
                             )
@@ -861,12 +902,14 @@ class RobotApplication:
                 response = await backend.respond(
                     message,
                     instructions=self._operator_episode_instructions(
-                        episode, message, prior_memory, acquisitions, interaction
+                        episode, message, prior_memory, acquisitions, interaction,
+                        delivery_destinations,
                     ),
                     tools=tools,
                     tool_executor=execute_tool if tools else None,
                     refreshed_instructions=lambda: self._operator_episode_instructions(
-                        episode, message, prior_memory, acquisitions, interaction
+                        episode, message, prior_memory, acquisitions, interaction,
+                        delivery_destinations,
                     ),
                 )
                 LOGGER.info(
@@ -920,8 +963,14 @@ class RobotApplication:
         finally:
             OPERATOR_SOURCE.reset(token)
 
-    def _operator_episode_tools(self, acquisitions_used: int) -> tuple[CognitionToolDefinition, ...]:
+    def _operator_episode_tools(
+        self, acquisitions_used: int,
+        delivery_destinations: Sequence[OperatorDeliveryDestination] | None = None,
+    ) -> tuple[CognitionToolDefinition, ...]:
+        destinations = tuple(delivery_destinations or ())
         tools = self.cognition_tools()
+        if destinations:
+            tools = (*tools, deliver_message_tool(destinations))
         if acquisitions_used >= 2:
             return tuple(tool for tool in tools
                          if tool.name not in self._acquisition_tool_names())
@@ -931,6 +980,7 @@ class RobotApplication:
         self, episode: AttentionEpisode, message: str, working_memory,
         acquisitions: list[InitiativeAcquisitionOutcome],
         interaction: InteractionContext | None,
+        delivery_destinations: Sequence[OperatorDeliveryDestination] = (),
     ) -> str:
         remaining = 2 - len(acquisitions)
         lines = [
@@ -943,6 +993,22 @@ class RobotApplication:
         if interaction is not None:
             lines.append(interaction.render())
             lines.append(render_dialogue_policy(interaction))
+        if delivery_destinations:
+            lines.append("\n".join((
+                "Available operator delivery destinations",
+                *(f"  {item.name}: {item.description}"
+                  for item in delivery_destinations),
+            )))
+            lines.append("\n".join((
+                "Operator delivery policy",
+                "These available effects are destinations to which the operator may explicitly request content be delivered.",
+                "Use deliver_message only when the current request explicitly requests or clearly authorizes delivery.",
+                "The destination is semantic and runtime-owned; do not invent account, recipient, transport, or credential identifiers.",
+                "Write a self-contained message suitable for its destination; the console is plain text and has no assumed Markdown rendering.",
+                "Delivery is separate from the current dialogue response and does not change that response's medium.",
+                "Do not claim success until the runtime tool result reports status=applied.",
+                "Applied means the configured destination accepted the message, not that a human read, saw, or acknowledged it.",
+            )))
         lines.extend([
             episode.render(),
             "Operator episode policy",
@@ -2057,6 +2123,60 @@ class RobotApplication:
         LOGGER.info("[%s] tool=%s status=applied", log_prefix, call.name)
         return CognitionToolResult(json.dumps({
             "status": "applied", "recipient": "operator", "message": message,
+        }, sort_keys=True))
+
+    async def _execute_deliver_message(
+        self, call: CognitionToolCall,
+        available: tuple[CognitionToolDefinition, ...],
+        authorized: Sequence[OperatorDeliveryDestination],
+        source: str,
+    ) -> CognitionToolResult:
+        """Apply one operator-authorized delivery through the current route."""
+        try:
+            tool = next((item for item in available if item.name == call.name), None)
+            if tool is None:
+                raise RuntimeError("tool is not available")
+            arguments = self._tool_arguments(call, {"destination", "message"})
+            destination = arguments["destination"]
+            value = arguments["message"]
+            if type(destination) is not str:
+                raise ValueError("destination must be a string")
+            projected = {item.name: item for item in authorized}
+            if destination not in projected:
+                raise ValueError("destination is not authorized for this operator stage")
+            if type(value) is not str:
+                raise ValueError("message must be a string")
+            message = value.strip()
+            if not message:
+                raise ValueError("message must be non-empty")
+            if len(message) > MAX_OPERATOR_MESSAGE_CHARS:
+                raise ValueError(
+                    f"message must be at most {MAX_OPERATOR_MESSAGE_CHARS} characters"
+                )
+            if any(
+                unicodedata.category(character) == "Cc" and character not in "\n\t"
+                for character in message
+            ):
+                raise ValueError("message contains unsupported control characters")
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("operator delivery requires a running application")
+            route = self._operator_delivery_routes.resolve(destination)
+            if route is None:
+                raise RuntimeError("delivery destination is no longer available")
+            captured = projected[destination]
+            if (route.destination.channel != captured.channel or
+                    route.sink.channel != route.destination.channel):
+                raise RuntimeError("delivery destination is no longer compatible")
+            interaction = operator_delivery(route.destination.channel)
+            await route.sink.deliver(OperatorMessage(message, source, interaction))
+        except Exception as error:
+            return self._rejected_tool(call.name, str(error))
+        LOGGER.info(
+            "[INTERACTION] destination=%s source=%s chars=%s status=delivered",
+            destination, source, len(message),
+        )
+        return CognitionToolResult(json.dumps({
+            "status": "applied", "destination": destination,
         }, sort_keys=True))
 
     async def _execute_orient_body(

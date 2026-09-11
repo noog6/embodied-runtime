@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -17,6 +18,7 @@ class InteractionChannel(StrEnum):
 class InteractionMode(StrEnum):
     DIALOGUE = "dialogue"
     NOTIFICATION = "notification"
+    DELIVERY = "delivery"
     ADMINISTRATIVE = "administrative"
 
 
@@ -127,6 +129,16 @@ def runtime_notification(channel: InteractionChannel) -> InteractionContext:
     )
 
 
+def operator_delivery(channel: InteractionChannel) -> InteractionContext:
+    """Construct an operator-authorized, non-dialogue delivery identity."""
+    return InteractionContext(
+        channel=channel,
+        mode=InteractionMode.DELIVERY,
+        initiator=InteractionInitiator.OPERATOR,
+        response_expected=False,
+    )
+
+
 def resolve_notification_route(
     channel: InteractionChannel,
 ) -> InteractionContext | None:
@@ -150,6 +162,7 @@ VOICE_DIALOGUE = InteractionContext(
     InteractionInitiator.OPERATOR, True,
 )
 CONSOLE_NOTIFICATION = runtime_notification(InteractionChannel.CONSOLE)
+CONSOLE_DELIVERY = operator_delivery(InteractionChannel.CONSOLE)
 CONSOLE_ADMINISTRATIVE = InteractionContext(
     InteractionChannel.CONSOLE, InteractionMode.ADMINISTRATIVE,
     InteractionInitiator.OPERATOR, False,
@@ -178,6 +191,37 @@ class OperatorMessageSink(ABC):
         """Accept or deliver *message*, raising when delivery fails."""
 
 
+@dataclass(frozen=True, slots=True)
+class OperatorDeliveryDestination:
+    """Model-visible semantic identity of one runtime-owned delivery route."""
+
+    name: str
+    channel: InteractionChannel
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorDeliveryRoute:
+    """Application-owned binding; the sink remains hidden from cognition."""
+
+    destination: OperatorDeliveryDestination
+    sink: OperatorMessageSink
+
+
+class OperatorDeliveryRouteCatalog:
+    """Small exact-name catalog of currently authorized operator routes."""
+
+    def __init__(self, routes: Sequence[OperatorDeliveryRoute] = ()) -> None:
+        self._routes = {route.destination.name: route for route in routes}
+
+    @property
+    def destinations(self) -> tuple[OperatorDeliveryDestination, ...]:
+        return tuple(route.destination for _, route in sorted(self._routes.items()))
+
+    def resolve(self, name: str) -> OperatorDeliveryRoute | None:
+        return self._routes.get(name)
+
+
 class ConsoleOperatorMessageChannel(OperatorMessageSink):
     """Transient queue joining runtime delivery to the local console."""
 
@@ -190,13 +234,20 @@ class ConsoleOperatorMessageChannel(OperatorMessageSink):
 
     async def deliver(self, message: OperatorMessage) -> None:
         interaction = message.interaction
-        if not (
+        notification = (
             interaction.channel == self.channel
             and interaction.mode == InteractionMode.NOTIFICATION
             and interaction.initiator == InteractionInitiator.RUNTIME
             and interaction.response_expected is False
-        ):
-            raise ValueError("console channel accepts only runtime notifications")
+        )
+        delivery = (
+            interaction.channel == self.channel
+            and interaction.mode == InteractionMode.DELIVERY
+            and interaction.initiator == InteractionInitiator.OPERATOR
+            and interaction.response_expected is False
+        )
+        if not (notification or delivery):
+            raise ValueError("console channel accepts only valid notifications or deliveries")
         await self._messages.put(message)
 
     async def receive(self) -> OperatorMessage:

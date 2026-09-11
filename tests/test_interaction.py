@@ -4,7 +4,7 @@ import json
 import unittest
 
 from embodied_runtime.app import (
-    ADDRESS_OPERATOR_TOOL, INSPECT_SELF_TOOL, ORIENT_BODY_TOOL, SCHEDULE_FOLLOWUP_TOOL, ApplicationOptions, RobotApplication,
+    ADDRESS_OPERATOR_TOOL, INSPECT_SELF_TOOL, ORIENT_BODY_TOOL, SCHEDULE_FOLLOWUP_TOOL, ApplicationOptions, RobotApplication, deliver_message_tool,
 )
 from embodied_runtime.attention import ACTION_INITIATIVE_REQUEST, AttentionStimulus
 from embodied_runtime.body.virtual import VirtualBodyBackend
@@ -12,10 +12,12 @@ from embodied_runtime.cognition import CognitionError, CognitionToolCall, TextCo
 from embodied_runtime.console import RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.interaction import (
-    CONSOLE_ADMINISTRATIVE, CONSOLE_DIALOGUE, CONSOLE_NOTIFICATION,
+    CONSOLE_ADMINISTRATIVE, CONSOLE_DELIVERY, CONSOLE_DIALOGUE, CONSOLE_NOTIFICATION,
     VOICE_DIALOGUE, MAX_OPERATOR_MESSAGE_CHARS, ConsoleOperatorMessageChannel,
     InteractionChannel, InteractionContext, InteractionInitiator,
-    InteractionMode, OperatorMessage, OperatorMessageSink, runtime_notification,
+    InteractionMode, OperatorDeliveryDestination, OperatorDeliveryRoute,
+    OperatorDeliveryRouteCatalog, OperatorMessage, OperatorMessageSink,
+    operator_delivery, runtime_notification,
     render_dialogue_policy, render_notification_context,
     render_notification_policy, resolve_notification_route,
 )
@@ -64,6 +66,25 @@ class InteractionIdentityTests(unittest.TestCase):
             runtime_notification(InteractionChannel.CONSOLE),
             CONSOLE_NOTIFICATION,
         )
+
+    def test_operator_delivery_has_distinct_canonical_semantics(self):
+        self.assertEqual(operator_delivery(InteractionChannel.CONSOLE), InteractionContext(
+            InteractionChannel.CONSOLE, InteractionMode.DELIVERY,
+            InteractionInitiator.OPERATOR, False,
+        ))
+        for other in (CONSOLE_DIALOGUE, CONSOLE_NOTIFICATION, CONSOLE_ADMINISTRATIVE):
+            self.assertNotEqual(CONSOLE_DELIVERY, other)
+
+    def test_delivery_catalog_exposes_only_semantic_destination_metadata(self):
+        sink = RecordingSink()
+        destination = OperatorDeliveryDestination(
+            "console", InteractionChannel.CONSOLE, "local plain-text console"
+        )
+        empty = OperatorDeliveryRouteCatalog()
+        catalog = OperatorDeliveryRouteCatalog((OperatorDeliveryRoute(destination, sink),))
+        self.assertEqual(empty.destinations, ())
+        self.assertEqual(tuple(item.name for item in catalog.destinations), ("console",))
+        self.assertEqual(catalog.destinations[0].description, "local plain-text console")
 
     def test_notification_route_policy_allows_console_and_rejects_voice(self):
         route = resolve_notification_route(InteractionChannel.CONSOLE)
@@ -146,6 +167,12 @@ class ConsoleChannelValidationTests(unittest.IsolatedAsyncioTestCase):
         await channel.deliver(message)
         self.assertIs(await channel.receive(), message)
 
+    async def test_accepts_valid_operator_delivery(self):
+        channel = ConsoleOperatorMessageChannel()
+        message = OperatorMessage("hello", "voice", CONSOLE_DELIVERY)
+        await channel.deliver(message)
+        self.assertIs(await channel.receive(), message)
+
     async def test_rejects_non_notification_semantics_without_enqueueing(self):
         invalid = (
             CONSOLE_DIALOGUE,
@@ -157,6 +184,12 @@ class ConsoleChannelValidationTests(unittest.IsolatedAsyncioTestCase):
                 InteractionInitiator.RUNTIME,
                 True,
             ),
+            InteractionContext(InteractionChannel.CONSOLE, InteractionMode.DELIVERY,
+                               InteractionInitiator.RUNTIME, False),
+            InteractionContext(InteractionChannel.CONSOLE, InteractionMode.DELIVERY,
+                               InteractionInitiator.OPERATOR, True),
+            InteractionContext(InteractionChannel.CONSOLE, InteractionMode.NOTIFICATION,
+                               InteractionInitiator.OPERATOR, False),
         )
         channel = ConsoleOperatorMessageChannel()
         for interaction in invalid:
@@ -208,6 +241,152 @@ class ScriptedBackend(TextCognitionBackend):
         if self.fail_after:
             raise CognitionError("continuation failed")
         return "done"
+
+
+class OperatorDeliveryBackend(TextCognitionBackend):
+    identifier = "operator-delivery"
+
+    def __init__(self, destination="console", replace=None, call=True):
+        self.destination = destination
+        self.replace = replace
+        self.call = call
+        self.requests = []
+        self.result = None
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((instructions, tools))
+        if self.replace is not None:
+            self.replace()
+        if self.call:
+            self.result = json.loads((await tool_executor(CognitionToolCall(
+                "deliver_message", json.dumps({
+                    "destination": self.destination,
+                    "message": "Ideas:\n1. One\n2. Two\n3. Three",
+                })
+            ))).output)
+        return "Sent it to the console."
+
+
+class OperatorDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def make_app(self, backend, catalog):
+        return RobotApplication(
+            RobotProfile("test", "Test Robot"), VirtualHardwareBackend(),
+            platform_provider=Platform(), cognition_backend=backend,
+            operator_delivery_routes=catalog,
+        )
+
+    @staticmethod
+    def catalog(sink):
+        return OperatorDeliveryRouteCatalog((OperatorDeliveryRoute(
+            OperatorDeliveryDestination(
+                "console", InteractionChannel.CONSOLE, "local plain-text console"
+            ), sink,
+        ),))
+
+    async def test_voice_to_console_is_one_dialogue_turn_and_one_delivery(self):
+        sink = RecordingSink()
+        backend = OperatorDeliveryBackend()
+        app = self.make_app(backend, self.catalog(sink))
+        await app.start()
+        before = len(app.working_memory)
+        response = await app.request_cognition(
+            "Send a list of those ideas to the console.", interaction=VOICE_DIALOGUE
+        )
+        instructions, tools = backend.requests[0]
+        delivery = next(tool for tool in tools if tool.name == "deliver_message")
+        self.assertEqual(delivery.parameters["required"], ["destination", "message"])
+        self.assertEqual(delivery.parameters["properties"]["destination"]["enum"],
+                         ["console"])
+        self.assertEqual(set(delivery.parameters["properties"]),
+                         {"destination", "message"})
+        forbidden = ("recipient_id", "user_id", "channel_id", "webhook",
+                     "credentials", "account", "phone", "transport")
+        self.assertFalse(any(word in json.dumps(delivery.parameters).lower()
+                             for word in forbidden))
+        self.assertEqual(instructions.count("Dialogue policy\n  medium: spoken"), 1)
+        self.assertEqual(instructions.count(
+            "Available operator delivery destinations"), 1)
+        self.assertEqual(instructions.count("Operator delivery policy"), 1)
+        self.assertNotIn("Notification policy", instructions)
+        self.assertIn(VOICE_DIALOGUE.render(), instructions)
+        self.assertEqual(response, "Sent it to the console.")
+        self.assertEqual(backend.result,
+                         {"status": "applied", "destination": "console"})
+        self.assertEqual(len(sink.messages), 1)
+        self.assertEqual(sink.messages[0].source, "voice")
+        self.assertEqual(sink.messages[0].interaction, CONSOLE_DELIVERY)
+        self.assertEqual(len(app.working_memory), before + 1)
+        self.assertIsNone(app.episode_coordinator.current)
+        await app.stop()
+
+    async def test_console_to_console_and_no_implicit_delivery(self):
+        sink = RecordingSink()
+        backend = OperatorDeliveryBackend()
+        app = self.make_app(backend, self.catalog(sink))
+        await app.start()
+        await app.request_cognition("Deliver this.", interaction=CONSOLE_DIALOGUE)
+        self.assertEqual(sink.messages[0].source, "console")
+        self.assertEqual(sink.messages[0].interaction, CONSOLE_DELIVERY)
+        await app.stop()
+
+        sink = RecordingSink()
+        backend = OperatorDeliveryBackend(call=False)
+        app = self.make_app(backend, self.catalog(sink))
+        await app.start()
+        await app.request_cognition("Ordinary question.", interaction=VOICE_DIALOGUE)
+        self.assertEqual(sink.messages, [])
+        self.assertEqual(len(app.working_memory), 1)
+        await app.stop()
+
+    async def test_unauthorized_disappeared_and_replaced_routes(self):
+        for destination in ("remote", "discord"):
+            sink = RecordingSink()
+            backend = OperatorDeliveryBackend(destination)
+            app = self.make_app(backend, self.catalog(sink))
+            await app.start()
+            await app.request_cognition("Deliver.", interaction=VOICE_DIALOGUE)
+            self.assertEqual(backend.result["status"], "rejected")
+            self.assertEqual(sink.messages, [])
+            self.assertEqual(len(app.working_memory), 1)
+            await app.stop()
+
+        stale = RecordingSink()
+        catalog = self.catalog(stale)
+        backend = OperatorDeliveryBackend(replace=lambda: catalog._routes.clear())
+        app = self.make_app(backend, catalog)
+        await app.start()
+        await app.request_cognition("Deliver.", interaction=VOICE_DIALOGUE)
+        self.assertEqual(backend.result["status"], "rejected")
+        self.assertEqual(stale.messages, [])
+        await app.stop()
+
+        stale, current = RecordingSink(), RecordingSink()
+        catalog = self.catalog(stale)
+        replacement = self.catalog(current)._routes["console"]
+        backend = OperatorDeliveryBackend(
+            replace=lambda: catalog._routes.__setitem__("console", replacement)
+        )
+        app = self.make_app(backend, catalog)
+        await app.start()
+        await app.request_cognition("Deliver.", interaction=VOICE_DIALOGUE)
+        self.assertEqual(backend.result["status"], "applied")
+        self.assertEqual(stale.messages, [])
+        self.assertEqual(len(current.messages), 1)
+        await app.stop()
+
+    async def test_absent_routes_omit_tool_and_autonomous_tools_never_include_it(self):
+        backend = OperatorDeliveryBackend(call=False)
+        app = self.make_app(backend, OperatorDeliveryRouteCatalog())
+        await app.start()
+        await app.request_cognition("Hello.", interaction=CONSOLE_DIALOGUE)
+        self.assertNotIn("deliver_message",
+                         [tool.name for tool in backend.requests[0][1]])
+        self.assertNotIn("deliver_message", [tool.name for tool in app.initiative_tools()])
+        self.assertNotIn("deliver_message", [tool.name for tool in app.effect_tools()])
+        self.assertNotIn("deliver_message",
+                         [tool.name for tool in app.continuation_tools("orient_body")])
+        await app.stop()
 
 
 class MessageClosureBackend(TextCognitionBackend):

@@ -1,11 +1,21 @@
 # Interaction identity
 
-Phase 20.5 keeps explicit operator dialogue interaction context authoritative and
-makes outbound notification route eligibility and selection an explicit runtime
-policy without changing runtime authority.
+Phase 20.6 adds operator-directed cross-channel text delivery while keeping the
+current dialogue and autonomous notifications separate.
+
+> **The interaction channel describes where the current conversation is happening.
+> A delivery destination describes where the operator explicitly asked content
+> to be sent.**
+
+> **The channel carrying the conversation does not constrain where an explicitly
+> requested authorized delivery must go.**
+
+> **The operator may choose among runtime-authorized semantic destinations. The
+> runtime owns the actual transport, recipient, account identifiers, credentials,
+> and route.**
 
 > **The model may decide whether to use an offered communication effect. The
-> runtime decides where that effect is allowed to go.**
+> runtime decides where that autonomous notification is allowed to go.**
 
 > **A channel being available for dialogue does not automatically make it
 > available for autonomous notification.**
@@ -31,20 +41,52 @@ request-scoped cognition grounding.
 | console | dialogue | operator | yes |
 | voice | dialogue | operator | yes |
 | console | notification | runtime | no |
+| console | delivery | operator | no |
 | console | administrative | operator | no cognition response |
 
-One transport can carry multiple interaction modes.
+Dialogue is the current conversational exchange. Notification is a
+runtime-originated autonomous outbound communication. Delivery is
+operator-authorized outbound content sent to an explicitly selected semantic
+destination. One transport can carry multiple interaction modes.
 
 The current eligibility matrix is deliberately small:
 
-| Channel | Dialogue | Administrative | Autonomous notification |
-| --- | --- | --- | --- |
-| console | yes | yes | yes |
-| voice | yes | — | no |
+| Channel | Operator dialogue | Administrative | Autonomous notification | Operator-directed delivery |
+| --- | --- | --- | --- | --- |
+| console | yes | yes | yes | yes |
+| voice | yes | — | no | no |
 
 Console is the only current autonomous notification route. Voice remains a
 fully supported operator-dialogue channel, but is not an autonomous notification
-route and cannot be made one merely by configuring a sink object.
+route or outbound delivery destination. This phase adds no unsolicited TTS.
+
+The production delivery catalog contains only the semantic destination
+`console`, described as the `local plain-text console`. When that route exists,
+operator dialogue cognition receives `deliver_message(destination, message)`
+with a runtime-generated enum containing only the catalog's authorized names.
+With no route, the tool and its separate **Available operator delivery
+destinations** grounding are absent. Availability is permission, not obligation;
+cognition, rather than lexical intent parsing, interprets the request.
+
+Each operator cognition stage uses the same captured semantic authority set for
+its tool enum and grounding. Execution validates the captured name and then
+re-resolves the current route. Removal or channel incompatibility rejects without
+fallback; a compatible replacement under the same semantic name receives the
+message. Sink objects and any future adapter's recipient, account, credentials,
+and transport configuration remain runtime-owned and invisible to cognition.
+
+A voice request may deliver standalone plain text to console while the current
+interaction remains voice dialogue and its final response remains spoken. The
+outbound identity is console/operator/delivery/no-response and preserves
+`source="voice"`; console requests preserve `source="console"`. Delivery consumes
+the existing single non-acquisition operator effect opportunity and creates no
+second attention episode or WorkingMemory turn.
+
+An applied result means only that the configured route accepted the message, not
+that a person read, saw, acknowledged, or ultimately received it.
+`address_operator` remains the autonomous message-only notification effect with
+runtime route selection and `source="initiative"`; `deliver_message` is not
+projected into autonomous, continuation, or outcome cognition.
 
 Cognition authority and delivery semantics are separate concerns.
 
