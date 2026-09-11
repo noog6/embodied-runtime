@@ -44,7 +44,8 @@ from embodied_runtime.events import (
 )
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
-    MAX_OPERATOR_MESSAGE_CHARS, InteractionContext, OperatorMessage,
+    MAX_OPERATOR_MESSAGE_CHARS, InteractionChannel, InteractionContext,
+    InteractionInitiator, InteractionMode, OperatorMessage,
     OperatorMessageSink, VOICE_DIALOGUE, runtime_notification,
 )
 from embodied_runtime.memory import (
@@ -731,6 +732,18 @@ class RobotApplication:
             raise RuntimeError("No cognition backend is configured")
         if not message or not message.strip():
             raise ValueError("Cognition message must be non-empty")
+        if interaction is not None and not (
+            interaction.channel in (
+                InteractionChannel.CONSOLE, InteractionChannel.VOICE
+            )
+            and interaction.mode == InteractionMode.DIALOGUE
+            and interaction.initiator == InteractionInitiator.OPERATOR
+            and interaction.response_expected is True
+        ):
+            raise ValueError(
+                "Explicit operator interaction must be supported operator dialogue "
+                "with a response expected"
+            )
         backend = self._cognition_backend
         trigger_source = (
             interaction.channel.value if interaction is not None
@@ -843,12 +856,12 @@ class RobotApplication:
                 response = await backend.respond(
                     message,
                     instructions=self._operator_episode_instructions(
-                        episode, message, prior_memory, acquisitions
+                        episode, message, prior_memory, acquisitions, interaction
                     ),
                     tools=tools,
                     tool_executor=execute_tool if tools else None,
                     refreshed_instructions=lambda: self._operator_episode_instructions(
-                        episode, message, prior_memory, acquisitions
+                        episode, message, prior_memory, acquisitions, interaction
                     ),
                 )
                 LOGGER.info(
@@ -912,6 +925,7 @@ class RobotApplication:
     def _operator_episode_instructions(
         self, episode: AttentionEpisode, message: str, working_memory,
         acquisitions: list[InitiativeAcquisitionOutcome],
+        interaction: InteractionContext | None,
     ) -> str:
         remaining = 2 - len(acquisitions)
         lines = [
@@ -920,13 +934,28 @@ class RobotApplication:
                 self.options.startup_prompt,
                 working_memory, self._active_goal,
             ),
+        ]
+        if interaction is not None:
+            lines.append(interaction.render())
+        lines.extend([
             episode.render(),
             "Operator episode policy",
+        ])
+        if interaction is not None:
+            lines.append(
+                "This context is authoritative for the current communication "
+                "setting. It describes this exchange and does not change capability "
+                "permissions or attention budgets. response_expected means this "
+                "interaction expects a direct response from the assistant to the initiating "
+                "operator communication; it does not mean the operator is required "
+                "to reply afterward."
+            )
+        lines.extend([
             "The original operator request is the current request; do not copy it into episode identity.",
             f"  acquisitions_used: {len(acquisitions)}",
             f"  acquisitions_remaining: {remaining}",
             "At most one offered capability may be requested in this cognition stage.",
-        ]
+        ])
         if self._memory_recall is not None:
             lines.append(
                 "Persistent memory is not automatically in context. recall_memory is a "

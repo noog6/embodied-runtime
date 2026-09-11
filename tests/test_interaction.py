@@ -63,6 +63,18 @@ class InteractionIdentityTests(unittest.TestCase):
             CONSOLE_NOTIFICATION,
         )
 
+    def test_dialogue_context_rendering_is_deterministic(self):
+        self.assertEqual(CONSOLE_DIALOGUE.render(), """Interaction context
+  channel: console
+  mode: dialogue
+  initiator: operator
+  response_expected: true""")
+        self.assertEqual(VOICE_DIALOGUE.render(), """Interaction context
+  channel: voice
+  mode: dialogue
+  initiator: operator
+  response_expected: true""")
+
 
 class ConsoleChannelValidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_accepts_valid_console_notification(self):
@@ -172,6 +184,32 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             "required": ["message"], "additionalProperties": False,
         })
         self.assertNotIn("source", ADDRESS_OPERATOR_TOOL.parameters["properties"])
+        await app.stop()
+
+    async def test_invalid_explicit_operator_contexts_are_rejected_before_effects(self):
+        backend = ScriptedBackend()
+        app = self.make_app(backend)
+        await app.start()
+        before = app.working_memory.snapshot()
+        invalid = (
+            CONSOLE_NOTIFICATION,
+            CONSOLE_ADMINISTRATIVE,
+            InteractionContext(
+                InteractionChannel.VOICE, InteractionMode.DIALOGUE,
+                InteractionInitiator.RUNTIME, True,
+            ),
+            InteractionContext(
+                InteractionChannel.VOICE, InteractionMode.DIALOGUE,
+                InteractionInitiator.OPERATOR, False,
+            ),
+        )
+        for interaction in invalid:
+            with self.subTest(interaction=interaction), self.assertRaises(ValueError):
+                await app.request_cognition("hello", interaction=interaction)
+        self.assertEqual(backend.requests, [])
+        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.last)
+        self.assertEqual(app.working_memory.snapshot(), before)
         await app.stop()
 
     async def test_delivery_normalizes_and_does_not_mutate_state_or_memory(self):

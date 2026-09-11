@@ -34,6 +34,16 @@ class InteractionContext:
     initiator: InteractionInitiator
     response_expected: bool
 
+    def render(self) -> str:
+        """Render bounded, provider-neutral grounding for this interaction."""
+        return "\n".join((
+            "Interaction context",
+            f"  channel: {self.channel.value}",
+            f"  mode: {self.mode.value}",
+            f"  initiator: {self.initiator.value}",
+            f"  response_expected: {str(self.response_expected).lower()}",
+        ))
+
 
 def runtime_notification(channel: InteractionChannel) -> InteractionContext:
     """Construct the runtime notification identity for a delivery channel."""
