@@ -49,10 +49,17 @@ class VoiceFileConfig:
 
 
 @dataclass(frozen=True)
+class MemoryFileConfig:
+    enabled: bool = False
+    database_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeFileConfiguration:
     runtime: RuntimeFileConfig = RuntimeFileConfig()
     initiative: InitiativeFileConfig = InitiativeFileConfig()
     voice: VoiceFileConfig = VoiceFileConfig()
+    memory: MemoryFileConfig = MemoryFileConfig()
 
 
 @dataclass(frozen=True)
@@ -84,6 +91,8 @@ class LaunchConfiguration:
     voice_elevenlabs_tts_speed: float
     voice_initial_timeout_seconds: float
     voice_followup_timeout_seconds: float
+    memory_enabled: bool
+    memory_database_path: Path | None
 
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
@@ -100,6 +109,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     voice_elevenlabs_tts_speed=1.0,
     voice_initial_timeout_seconds=18.0,
     voice_followup_timeout_seconds=10.0,
+    memory_enabled=False, memory_database_path=None,
 )
 
 _RUNTIME_KEYS = {
@@ -115,6 +125,7 @@ _VOICE_KEYS = {
     "openai_tts_voice",
     "elevenlabs_tts_model", "elevenlabs_tts_voice_id", "elevenlabs_tts_speed",
 }
+_MEMORY_KEYS = {"enabled", "database_path"}
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
     "runtime.camera": {"none", "picamera2"},
@@ -138,13 +149,31 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "initiative", "voice"})
+    _reject_unknown(data, {"runtime", "initiative", "voice", "memory"})
     runtime = _table(data, "runtime")
     initiative = _table(data, "initiative")
     voice = _table(data, "voice")
+    memory = _table(data, "memory")
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
+    _reject_unknown(memory, _MEMORY_KEYS, "memory")
+
+    if "enabled" in memory and not isinstance(memory["enabled"], bool):
+        raise ConfigurationError("memory.enabled must be boolean")
+    if "database_path" in memory and not isinstance(memory["database_path"], str):
+        raise ConfigurationError("memory.database_path must be a string")
+    memory_enabled = memory.get("enabled", False)
+    configured_path = memory.get("database_path")
+    if memory_enabled and (configured_path is None or not configured_path.strip()):
+        raise ConfigurationError(
+            "memory.database_path must be a non-empty string when memory is enabled"
+        )
+    database_path = None
+    if configured_path is not None and configured_path.strip():
+        database_path = Path(configured_path).expanduser()
+        if not database_path.is_absolute():
+            database_path = (path.parent / database_path).resolve()
 
     for key, value in runtime.items():
         name = f"runtime.{key}"
@@ -215,7 +244,8 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
             raise ConfigurationError(f"voice.{key} must be a positive number")
 
     return RuntimeFileConfiguration(
-        RuntimeFileConfig(**runtime), InitiativeFileConfig(**initiative), VoiceFileConfig(**voice)
+        RuntimeFileConfig(**runtime), InitiativeFileConfig(**initiative),
+        VoiceFileConfig(**voice), MemoryFileConfig(memory_enabled, database_path)
     )
 
 
@@ -227,6 +257,7 @@ def resolve_launch_configuration(
     runtime = file_config.runtime
     initiative = file_config.initiative
     voice = file_config.voice
+    memory = file_config.memory
 
     def scalar(name: str, configured: object, historical: object) -> object:
         explicit = getattr(cli_values, name, None)
@@ -288,6 +319,8 @@ def resolve_launch_configuration(
         ),
         voice_initial_timeout_seconds=(voice.initial_timeout_seconds if voice.initial_timeout_seconds is not None else 18.0),
         voice_followup_timeout_seconds=(voice.followup_timeout_seconds if voice.followup_timeout_seconds is not None else 10.0),
+        memory_enabled=memory.enabled,
+        memory_database_path=memory.database_path if memory.enabled else None,
     )
 
 

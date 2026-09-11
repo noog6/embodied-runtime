@@ -29,7 +29,7 @@ automatic fallback when ElevenLabs credentials or service are unavailable.
 
 ## Schema
 
-Only these three tables and keys are accepted:
+Only these four tables and keys are accepted:
 
 ```toml
 [runtime]
@@ -56,6 +56,10 @@ wake_words = ["mira", "mirror"]
 tts = "espeak"
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
+
+[memory]
+enabled = true
+database_path = "../data/mira-memory.sqlite3"
 ```
 
 `hardware`, `camera`, and `cognition` accept the same values as their existing
@@ -174,3 +178,11 @@ python main.py \
   --voice \
   --console
 ```
+# Persistent memory
+
+The optional `[memory]` table accepts `enabled` (boolean) and `database_path`
+(string). Persistent memory is disabled when the table is absent or when
+`enabled = false`. Enabling it requires a non-empty path. Relative paths are
+resolved from the directory containing the TOML file, and the runtime creates
+the database's parent directory only when enabled. See
+[`persistent-memory.md`](persistent-memory.md) for lifecycle and console use.

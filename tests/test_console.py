@@ -12,6 +12,7 @@ from embodied_runtime.cli import build_parser, build_platform_monitor_policy
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
+from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from tests.test_platform import snapshot
@@ -120,6 +121,14 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  voice                          Start one bounded voice session\n"
             "  memory                         Show working-memory metadata\n"
             "  memory clear                   Clear session working memory\n"
+            "  memory persistent              Show persistent-memory state\n"
+            "  memory entity add <type> <name> Create a durable entity\n"
+            "  memory entity find <name>       Exact entity lookup alias\n"
+            "  memory alias add <ENTn> <alias> Add a durable entity alias\n"
+            "  memory find <name>              Exact entity and memory lookup\n"
+            "  memory add <kind> <summary> ... Create a durable text memory\n"
+            "  memory show <MEMn>              Show one durable memory\n"
+            "  memory list <ENTn>              List an entity's memories\n"
             "  goal                           Show current active goal\n"
             "  goal clear                     Clear current active goal\n"
             "  attention                      Show initiative attention state\n"
@@ -149,6 +158,70 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertIs(self.app.runtime_state, state)
         self.assertEqual(self.app.working_memory.snapshot(), ())
+
+    def test_persistent_commands_are_safe_when_unconfigured(self):
+        self.assertIn("unconfigured", self.console.execute("memory persistent")[0])
+        self.assertEqual(self.console.execute('memory find "Gordon"')[0],
+                         "Persistent memory is unconfigured.")
+
+    async def test_persistent_console_round_trip_across_two_applications(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "memory.sqlite3"
+            first_app = RobotApplication(
+                RobotProfile("restart", "Restart"), VirtualHardwareBackend(),
+                platform_provider=CountingProvider([self.first]),
+                persistent_memory_store=SQLiteMemoryStore(database),
+            )
+            await first_app.start()
+            first = RuntimeConsole(first_app)
+            self.assertIn("ENT1", first.execute('memory entity add person "Nick"')[0])
+            self.assertIn("ENT2", first.execute('memory entity add object "Gordon"')[0])
+            first.execute('memory alias add ENT2 "stuffed seal"')
+            first.execute('memory alias add ENT2 "plush seal"')
+            fact = first.execute(
+                'memory add fact "Nick prefers vi." --link ENT1:subject '
+                '--predicate preferred_editor --value vi --source-kind operator_statement '
+                '--source-label Nick'
+            )[0]
+            relationship = first.execute(
+                'memory add relationship "Gordon is Nick\'s white stuffed seal." '
+                '--link ENT2:subject --link ENT1:owner --source-kind operator_statement '
+                '--source-label Nick'
+            )[0]
+            self.assertIn("MEM1", fact)
+            self.assertIn("MEM2", relationship)
+            self.assertIn("ENT2", first.execute('memory find "stuffed seal"')[0])
+            await first_app.stop()
+            with self.assertRaises(Exception):
+                first_app.persistent_memory.get_entity(1)
+
+            second_app = RobotApplication(
+                RobotProfile("restart", "Restart"), VirtualHardwareBackend(),
+                platform_provider=CountingProvider([self.first]),
+                persistent_memory_store=SQLiteMemoryStore(database),
+            )
+            await second_app.start()
+            second = RuntimeConsole(second_app)
+            gordon = second.execute('memory find "Gordon"')[0]
+            alias = second.execute('memory find "PLUSH   SEAL"')[0]
+            nick = second.execute('memory find "Nick"')[0]
+            self.assertIn("ENT2", gordon)
+            self.assertIn("MEM2 relationship", gordon)
+            self.assertIn("ENT2", alias)
+            self.assertIn("ENT1", nick)
+            self.assertIn("MEM1 fact", nick)
+            shown = second.execute("memory show MEM1")[0]
+            self.assertIn("preferred_editor", shown)
+            self.assertIn("operator_statement", shown)
+            self.assertIn("ENT1  subject", shown)
+            self.assertIn("Nick prefers vi.", second.execute("memory list ENT1")[0])
+            self.assertEqual(second.execute('memory find "Gordan"')[0],
+                             "No exact persistent-memory entity match.")
+            for invalid in ("memory show MEM0", "memory list E2",
+                            'memory add fact "x" --link BAD',
+                            'memory add fact "x" --confidence 20'):
+                self.assertIn("failed", second.execute(invalid)[0].lower())
+            await second_app.stop()
 
     def test_goal_show_and_clear_preserve_state_and_memory(self):
         state = self.app.runtime_state

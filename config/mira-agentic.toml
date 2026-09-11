@@ -27,3 +27,7 @@ actions = true
 messages = true
 continuation = true
 goal_closure = true
+
+[memory]
+enabled = true
+database_path = "../data/mira-memory.sqlite3"

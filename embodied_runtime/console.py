@@ -5,6 +5,7 @@ from collections.abc import Callable
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import sys
 import time
@@ -14,6 +15,7 @@ from embodied_runtime.app import RobotApplication
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.platform import PlatformSnapshot
 from embodied_runtime.interaction import ConsoleOperatorMessageChannel
+from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
 
 
@@ -75,6 +77,8 @@ class RuntimeConsole:
             return self._presence(), False
         if vocabulary == ["memory"]:
             return self._memory(), False
+        if vocabulary and vocabulary[0] == "memory" and vocabulary != ["memory", "clear"]:
+            return self._persistent_memory_command(words), False
         if vocabulary == ["goal"]:
             return self._goal(), False
         if vocabulary == ["attention"]:
@@ -193,6 +197,14 @@ class RuntimeConsole:
                 "  voice                          Start one bounded voice session",
                 "  memory                         Show working-memory metadata",
                 "  memory clear                   Clear session working memory",
+                "  memory persistent              Show persistent-memory state",
+                "  memory entity add <type> <name> Create a durable entity",
+                "  memory entity find <name>       Exact entity lookup alias",
+                "  memory alias add <ENTn> <alias> Add a durable entity alias",
+                "  memory find <name>              Exact entity and memory lookup",
+                "  memory add <kind> <summary> ... Create a durable text memory",
+                "  memory show <MEMn>              Show one durable memory",
+                "  memory list <ENTn>              List an entity's memories",
                 "  goal                           Show current active goal",
                 "  goal clear                     Clear current active goal",
                 "  attention                      Show initiative attention state",
@@ -212,6 +224,140 @@ class RuntimeConsole:
             f"  capacity:      {memory.capacity}",
             f"  text_limit:    {memory.text_limit}",
         ))
+
+    def _persistent_memory_command(self, words: list[str]) -> str:
+        store = self._application.persistent_memory
+        if len(words) == 2 and words[1].lower() == "persistent":
+            return "Persistent memory\n  state:         " + (
+                "unconfigured" if store is None else "ready\n  backend:       sqlite"
+            )
+        if store is None:
+            return "Persistent memory is unconfigured."
+        command = [word.lower() for word in words]
+        try:
+            if command[:3] == ["memory", "entity", "add"]:
+                if len(words) != 5:
+                    return "Usage: memory entity add <entity_type> <canonical_name>."
+                entity = store.create_entity(words[3], words[4])
+                return "\n".join(("Created entity", f"  id:            {entity.identity}",
+                                  f"  type:          {entity.entity_type}",
+                                  f"  name:          {entity.canonical_name}"))
+            if command[:3] == ["memory", "entity", "find"]:
+                if len(words) != 4:
+                    return "Usage: memory entity find <name>."
+                return self._find_persistent(words[3])
+            if command[:3] == ["memory", "alias", "add"]:
+                if len(words) != 5:
+                    return "Usage: memory alias add <ENTn> <alias>."
+                entity_id = self._identity(words[3], "ENT")
+                alias = store.add_entity_alias(entity_id, words[4])
+                return "\n".join(("Added entity alias", f"  entity:        ENT{alias.entity_id}",
+                                  f"  alias:         {alias.alias}"))
+            if command[:2] == ["memory", "find"]:
+                if len(words) != 3:
+                    return "Usage: memory find <name>."
+                return self._find_persistent(words[2])
+            if command[:2] == ["memory", "show"]:
+                if len(words) != 3:
+                    return "Usage: memory show <MEMn>."
+                item = store.get_memory(self._identity(words[2], "MEM"))
+                return "Persistent memory not found." if item is None else self._format_memory(item, True)
+            if command[:2] == ["memory", "list"]:
+                if len(words) != 3:
+                    return "Usage: memory list <ENTn>."
+                entity_id = self._identity(words[2], "ENT")
+                if store.get_entity(entity_id) is None:
+                    return f"Persistent-memory entity ENT{entity_id} not found."
+                memories = store.list_memories_for_entity(entity_id)
+                lines = [f"Memories for ENT{entity_id}"]
+                lines.extend(self._format_memory(item, False) for item in memories)
+                if not memories:
+                    lines.append("  none")
+                return "\n".join(lines)
+            if command[:2] == ["memory", "add"]:
+                return self._add_persistent_memory(words)
+        except (ValueError, TypeError, RuntimeError) as error:
+            return f"Persistent-memory command failed: {error}."
+        return "Unknown persistent-memory command. Type 'help' for commands."
+
+    @staticmethod
+    def _identity(value: str, prefix: str) -> int:
+        match = re.fullmatch(prefix + r"([1-9]\d*)", value, re.IGNORECASE)
+        if match is None:
+            raise ValueError(f"invalid {prefix} identity: {value}")
+        return int(match.group(1))
+
+    def _find_persistent(self, name: str) -> str:
+        store = self._application.persistent_memory
+        assert store is not None
+        entities = store.find_entities_exact(name)
+        if not entities:
+            return "No exact persistent-memory entity match."
+        groups = []
+        for entity in entities:
+            lines = [entity.identity, f"  type:          {entity.entity_type}",
+                     f"  name:          {entity.canonical_name}"]
+            for item in store.list_memories_for_entity(entity.id):
+                lines.extend((f"  {item.record.identity} {item.record.kind}",
+                              f"    {item.record.summary}"))
+            groups.append("\n".join(lines))
+        return "\n\n".join(groups)
+
+    def _add_persistent_memory(self, words: list[str]) -> str:
+        if len(words) < 4 or not words[2] or not words[3]:
+            return "Usage: memory add <kind> <summary> [options]."
+        values = {"predicate": None, "value": None, "source-kind": None,
+                  "source-label": None, "confidence": None}
+        links = []
+        index = 4
+        while index < len(words):
+            option = words[index]
+            if option not in {"--link", "--predicate", "--value", "--source-kind",
+                              "--source-label", "--confidence"} or index + 1 >= len(words):
+                raise ValueError(f"invalid or incomplete memory option: {option}")
+            value = words[index + 1]
+            if option == "--link":
+                identity, separator, role = value.partition(":")
+                if not separator or not role:
+                    raise ValueError(f"invalid entity link: {value}")
+                links.append(NewMemoryLink(self._identity(identity, "ENT"), role))
+            else:
+                values[option[2:]] = value
+            index += 2
+        confidence = None if values["confidence"] is None else float(values["confidence"])
+        store = self._application.persistent_memory
+        assert store is not None
+        item = store.create_memory(
+            words[2], words[3], links=links,
+            payloads=(NewMemoryPayload("text", "text/plain", inline_text=words[3]),),
+            predicate=values["predicate"], value_text=values["value"],
+            source_kind=values["source-kind"], source_label=values["source-label"],
+            confidence=confidence,
+        )
+        return "Created memory\n" + self._format_memory(item, True)
+
+    @staticmethod
+    def _format_memory(item: StoredMemory, detailed: bool) -> str:
+        record = item.record
+        if not detailed:
+            return f"  {record.identity} {record.kind}\n    {record.summary}"
+        lines = [record.identity, f"  kind:          {record.kind}",
+                 f"  status:        {record.status}", f"  summary:       {record.summary}"]
+        for label, value in (("predicate", record.predicate), ("value", record.value_text),
+                             ("source_kind", record.source_kind),
+                             ("source_label", record.source_label),
+                             ("confidence", record.confidence), ("created_at", record.created_at.isoformat())):
+            if value is not None:
+                lines.append(f"  {label + ':':15} {value}")
+        lines.append("Links")
+        lines.extend(f"  ENT{link.entity_id}  {link.role}" for link in item.links)
+        lines.append("Payloads")
+        for payload in item.payloads:
+            lines.extend((f"  id:            {payload.id}",
+                          f"  kind:          {payload.payload_kind}",
+                          f"  media_type:    {payload.media_type}",
+                          f"  text:          {payload.inline_text}"))
+        return "\n".join(lines)
 
     def _goal(self) -> str:
         goal = self._application.active_goal
