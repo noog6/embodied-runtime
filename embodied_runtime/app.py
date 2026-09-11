@@ -253,7 +253,10 @@ SCHEDULE_FOLLOWUP_TOOL = CognitionToolDefinition(
     description=(
         "Create the runtime's one session-local, one-shot relative follow-up. "
         "It is bound to the current active goal and creates fresh attention when due; "
-        "it does not reserve future authority. This is a semantic effect."
+        "it does not reserve future authority. Requesting this effect is not proof "
+        "of scheduling: only a runtime result with status applied confirms the "
+        "commitment; a rejected result must not be described as scheduled. This is "
+        "a semantic effect."
     ),
     parameters={
         "type": "object",
@@ -1681,6 +1684,13 @@ class RobotApplication:
         ):
             tools.append(ORIENT_BODY_TOOL)
         tools.append(SET_GOAL_TOOL if self._active_goal is None else RESOLVE_GOAL_TOOL)
+        if (
+            self.state is LifecycleState.RUNNING
+            and self.options.initiative_enabled
+            and self._active_goal is not None
+            and self.temporal.pending is None
+        ):
+            tools.append(SCHEDULE_FOLLOWUP_TOOL)
         tools.append(INSPECT_SELF_TOOL)
         if self.visual_perception_available():
             tools.append(OBSERVE_SCENE_TOOL)
@@ -1752,6 +1762,11 @@ class RobotApplication:
             return self._execute_set_goal(call)
         if call.name == RESOLVE_GOAL_TOOL.name:
             return self._execute_resolve_goal(call, expected_goal=expected_goal)
+        if call.name == SCHEDULE_FOLLOWUP_TOOL.name:
+            return self._execute_schedule_followup(
+                call, available=self.cognition_tools(), log_prefix="COGNITION",
+                expected_goal=expected_goal,
+            )
         if call.name == INSPECT_SELF_TOOL.name:
             result, _ = self._execute_self_inspection(call)
             return result
@@ -1946,6 +1961,7 @@ class RobotApplication:
         self, call: CognitionToolCall, *,
         available: tuple[CognitionToolDefinition, ...] | None = None,
         log_prefix: str = "INITIATIVE",
+        expected_goal: ActiveGoal | None = None,
     ) -> CognitionToolResult:
         projected = self.initiative_tools() if available is None else available
         try:
@@ -1974,6 +1990,8 @@ class RobotApplication:
             goal = self._active_goal
             if goal is None:
                 raise RuntimeError("no active goal exists")
+            if expected_goal is not None and goal is not expected_goal:
+                raise RuntimeError("expected active goal is no longer current")
             self.temporal.schedule(delay, purpose, goal)
         except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
             return self._rejected_tool(call.name, str(error), log_prefix=log_prefix)

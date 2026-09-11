@@ -80,13 +80,16 @@ class ScriptedBackend(TextCognitionBackend):
     def __init__(self, calls=()):
         self.calls = list(calls)
         self.requests = []
+        self.results = []
 
     async def respond(self, message, *, instructions=None, tools=(),
                       tool_executor=None, refreshed_instructions=None):
         self.requests.append((message, instructions, tuple(tool.name for tool in tools)))
         if self.calls:
             name, arguments = self.calls.pop(0)
-            await tool_executor(CognitionToolCall(name, json.dumps(arguments)))
+            self.results.append(await tool_executor(
+                CognitionToolCall(name, json.dumps(arguments))
+            ))
             return "provisional"
         return "final answer"
 
@@ -219,6 +222,116 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(episode.completion_reason, "handled")
         self.assertIn("id: G1", backend.requests[0][1])
         self.assertEqual(len(app.working_memory.snapshot()), 1)
+        await app.stop()
+
+    async def test_operator_schedule_projection_prerequisites(self):
+        backend = ScriptedBackend()
+        disabled = self.app(backend)
+        await disabled.start()
+        disabled.set_goal("goal")
+        self.assertNotIn("schedule_followup", [t.name for t in disabled.cognition_tools()])
+        await disabled.stop()
+
+        app = self.app(backend, initiative=True)
+        await app.start()
+        self.assertNotIn("schedule_followup", [t.name for t in app.cognition_tools()])
+        goal = app.set_goal("goal")
+        names = [t.name for t in app.cognition_tools()]
+        self.assertIn("schedule_followup", names)
+        for preserved in ("resolve_goal", "inspect_self"):
+            self.assertIn(preserved, names)
+        app.temporal.schedule(30, "later", goal)
+        self.assertNotIn("schedule_followup", [t.name for t in app.cognition_tools()])
+        await app.stop()
+
+    async def test_future_goal_then_explicit_operator_followup_two_turn_regression(self):
+        description = "In about 30 seconds, re-check the battery voltage."
+        purpose = "Re-check the battery voltage for the active goal."
+        backend = ScriptedBackend((("set_goal", {"description": description}),))
+        app = self.app(backend, initiative=True)
+        await app.start()
+
+        await app.request_cognition(f"Set an active goal: {description}")
+        goal = app.active_goal
+        self.assertIsNotNone(goal)
+        self.assertIsNone(app.temporal.pending)
+
+        backend.calls.append(("schedule_followup", {
+            "delay_seconds": 30, "purpose": purpose,
+        }))
+        await app.request_cognition(
+            "Schedule a follow-up for 30 seconds from now to re-check the battery "
+            "voltage for the active goal."
+        )
+        self.assertEqual(len(backend.requests), 2)
+        second = backend.requests[1]
+        self.assertIn(description, second[1])
+        self.assertIn("Follow-up\n  state: none", second[1])
+        self.assertIn("No temporal follow-up is currently scheduled.", second[1])
+        self.assertIn("schedule_followup", second[2])
+        result = json.loads(backend.results[1].output)
+        self.assertEqual(result, {
+            "status": "applied", "delay_seconds": 30, "purpose": purpose,
+        })
+        pending = app.temporal.pending
+        self.assertEqual(app.temporal.status().state, "pending")
+        self.assertEqual(pending.delay_seconds, 30)
+        self.assertIs(pending.goal, goal)
+        current = app.temporal_situation().render()
+        self.assertIn("Follow-up\n  state: pending", current)
+        self.assertNotIn("No temporal follow-up is currently scheduled.", current)
+        await app.stop()
+
+    async def test_existing_followup_remains_authoritative_for_operator_turn(self):
+        backend = ScriptedBackend((("schedule_followup", {
+            "delay_seconds": 45, "purpose": "replacement must not be created",
+        }),))
+        app = self.app(backend, initiative=True)
+        await app.start()
+        goal = app.set_goal("monitor battery")
+        existing = app.temporal.schedule(30, "existing check", goal)
+
+        await app.request_cognition("schedule another follow-up")
+        self.assertNotIn("schedule_followup", backend.requests[0][2])
+        result = json.loads(backend.results[0].output)
+        self.assertEqual(result["status"], "rejected")
+        self.assertIs(app.temporal.pending, existing)
+        rendered = app.temporal_situation().render()
+        self.assertIn("Follow-up\n  state: pending", rendered)
+        self.assertIn('purpose: "existing check"', rendered)
+        self.assertNotIn("No temporal follow-up is currently scheduled.", rendered)
+        await app.stop()
+
+    async def test_operator_schedule_rejects_replacement_goal_race(self):
+        class GoalRaceBackend(TextCognitionBackend):
+            identifier = "goal-race"
+
+            def __init__(self):
+                self.app = None
+                self.result = None
+
+            async def respond(self, message, *, tool_executor=None, **kwargs):
+                self.app.resolve_goal("cancelled")
+                replacement = self.app.set_goal("replacement")
+                self.replacement = replacement
+                self.result = await tool_executor(CognitionToolCall(
+                    "schedule_followup",
+                    '{"delay_seconds":30,"purpose":"must remain with G1"}',
+                ))
+                return "rejected"
+
+        backend = GoalRaceBackend()
+        app = self.app(backend, initiative=True)
+        backend.app = app
+        await app.start()
+        original = app.set_goal("original")
+        await app.request_cognition("schedule a follow-up")
+        result = json.loads(backend.result.output)
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("expected active goal", result["error"])
+        self.assertIsNone(app.temporal.pending)
+        self.assertIs(app.active_goal, backend.replacement)
+        self.assertIsNot(app.active_goal, original)
         await app.stop()
 
     async def test_console_context_survives_through_operator_execution(self):

@@ -77,6 +77,12 @@ class TemporalSituation:
             "The following temporal relationships are reconstructed from runtime-owned",
             "monotonic state. They describe recency and pending commitments, not physical",
             "reality or conversation meaning.",
+            "Active-goal wording may describe desired future timing, but it does not "
+            "create a temporal commitment.",
+            "Only Follow-up state pending or due_pending means a temporal follow-up "
+            "actually exists.",
+            "Do not claim a follow-up is scheduled from goal wording, WorkingMemory, "
+            "or prior assistant text.",
             "",
             "Active goal timing",
         ]
@@ -120,8 +126,10 @@ class TemporalSituation:
             else:
                 lines.append("One follow-up is pending in "
                              f"{format_duration(_age(self.followup_remaining_seconds))}.")
-        if self.active_goal_id is None and self.followup_state == "none":
-            lines.append("No active goal or temporal follow-up is currently pending.")
+        if self.followup_state == "none":
+            lines.append("No temporal follow-up is currently scheduled.")
+        if self.active_goal_id is None:
+            lines.append("No active goal is currently in progress.")
         if self.last_operator_turn_age_seconds is not None:
             lines.append("The previous operator turn completed "
                          f"{format_duration(_age(self.last_operator_turn_age_seconds))} ago.")
