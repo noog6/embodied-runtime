@@ -44,7 +44,8 @@ from embodied_runtime.events import (
 )
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
-    MAX_OPERATOR_MESSAGE_CHARS, OperatorMessage, OperatorMessageSink,
+    MAX_OPERATOR_MESSAGE_CHARS, InteractionContext, OperatorMessage,
+    OperatorMessageSink, VOICE_DIALOGUE, runtime_notification,
 )
 from embodied_runtime.memory import (
     MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
@@ -379,7 +380,9 @@ class RobotApplication:
         self.voice = VoiceInteraction(
             voice_provider,
             text_to_speech_provider,
-            lambda text: self.handle_operator_utterance(text, source="voice"),
+            lambda text: self.handle_operator_utterance(
+                text, interaction=VOICE_DIALOGUE
+            ),
             voice_policy,
             wake_words=voice_wake_words,
         )
@@ -717,7 +720,10 @@ class RobotApplication:
         )
         return frame
 
-    async def request_cognition(self, message: str, *, source: str | None = None) -> str:
+    async def request_cognition(
+        self, message: str, *, interaction: InteractionContext | None = None,
+        source: str | None = None,
+    ) -> str:
         """Run one finite operator attention episode."""
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Cognition requires a running application")
@@ -726,8 +732,12 @@ class RobotApplication:
         if not message or not message.strip():
             raise ValueError("Cognition message must be non-empty")
         backend = self._cognition_backend
+        trigger_source = (
+            interaction.channel.value if interaction is not None
+            else source or OPERATOR_SOURCE.get()
+        )
         episode = await self.episode_coordinator.start_operator(
-            source or OPERATOR_SOURCE.get(), OPERATOR_EPISODE_CONCERN
+            trigger_source, OPERATOR_EPISODE_CONCERN
         )
         if self.state is not LifecycleState.RUNNING:
             await self._finish_operator_episode(episode, "cancelled")
@@ -738,16 +748,18 @@ class RobotApplication:
             raise RuntimeError("Cognition requires an application task")
         self._active_operator_cognition_task = task
         try:
-            return await self._run_operator_episode(message, backend, episode)
+            return await self._run_operator_episode(
+                message, backend, episode, interaction
+            )
         finally:
             if self._active_operator_cognition_task is task:
                 self._active_operator_cognition_task = None
 
     async def _run_operator_episode(
         self, message: str, backend: TextCognitionBackend,
-        episode: AttentionEpisode,
+        episode: AttentionEpisode, interaction: InteractionContext | None,
     ) -> str:
-        """Execute the already-acquired finite operator episode."""
+        """Execute an episode while retaining its interaction-layer identity."""
         prior_memory = self.working_memory.snapshot()
         tool_outcomes: list[WorkingMemoryToolOutcome] = []
         acquisitions: list[InitiativeAcquisitionOutcome] = []
@@ -879,12 +891,14 @@ class RobotApplication:
             await self.attention.release_temporal_due()
 
     async def handle_operator_utterance(
-        self, message: str, *, source: str = "operator"
+        self, message: str, *, interaction: InteractionContext | None = None,
+        source: str = "operator",
     ) -> str:
         """Route one typed or spoken operator utterance through cognition."""
-        token = OPERATOR_SOURCE.set(source)
+        resolved_source = interaction.channel.value if interaction else source
+        token = OPERATOR_SOURCE.set(resolved_source)
         try:
-            return await self.request_cognition(message)
+            return await self.request_cognition(message, interaction=interaction)
         finally:
             OPERATOR_SOURCE.reset(token)
 
@@ -1924,7 +1938,8 @@ class RobotApplication:
             sink = self._operator_message_sink
             if sink is None:
                 raise RuntimeError("no operator message channel is configured")
-            await sink.deliver(OperatorMessage(message, "initiative"))
+            interaction = runtime_notification(sink.channel)
+            await sink.deliver(OperatorMessage(message, "initiative", interaction))
         except Exception as error:
             LOGGER.info(
                 "[INTERACTION] recipient=operator source=initiative status=rejected"

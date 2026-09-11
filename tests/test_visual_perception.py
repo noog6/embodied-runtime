@@ -12,7 +12,7 @@ from embodied_runtime.attention import (
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import CognitionError, CognitionToolCall
 from embodied_runtime.inspection import SelfInspectionFact, SelfInspectionResult
-from embodied_runtime.interaction import OperatorMessageSink
+from embodied_runtime.interaction import InteractionChannel, OperatorMessageSink
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.events import BodyOrientationChanged
 from embodied_runtime.perception import (
@@ -106,6 +106,10 @@ async def no_tool(backend, executor):
 
 
 class Sink(OperatorMessageSink):
+    @property
+    def channel(self):
+        return InteractionChannel.CONSOLE
+
     def __init__(self):
         self.messages = []
 

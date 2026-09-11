@@ -14,7 +14,10 @@ from typing import TextIO
 from embodied_runtime.app import RobotApplication
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.platform import PlatformSnapshot
-from embodied_runtime.interaction import ConsoleOperatorMessageChannel
+from embodied_runtime.interaction import (
+    CONSOLE_ADMINISTRATIVE, CONSOLE_DIALOGUE, ConsoleOperatorMessageChannel,
+    InteractionContext,
+)
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
 
@@ -46,6 +49,11 @@ class RuntimeConsole:
     @property
     def operator_message_prefix(self) -> str:
         return self._application.profile.name
+
+    @property
+    def administrative_interaction(self) -> InteractionContext:
+        """Classify local commands that do not enter cognition."""
+        return CONSOLE_ADMINISTRATIVE
 
     def execute(self, command: str) -> tuple[str, bool]:
         """Return report text and whether the session should terminate."""
@@ -119,7 +127,7 @@ class RuntimeConsole:
                 return "Usage: ask <message>.", False
             try:
                 response = await self._application.handle_operator_utterance(
-                    message, source="console"
+                    message, interaction=CONSOLE_DIALOGUE
                 )
             except (CognitionError, RuntimeError, ValueError) as error:
                 return f"Cognition request failed: {error}.", False

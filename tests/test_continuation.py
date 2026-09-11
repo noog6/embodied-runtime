@@ -10,7 +10,7 @@ from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import CognitionError, CognitionToolCall, TextCognitionBackend
 from embodied_runtime.events import ThermalWarningRaised
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
-from embodied_runtime.interaction import OperatorMessageSink
+from embodied_runtime.interaction import InteractionChannel, OperatorMessageSink
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.state import BodyState, LifecycleState
 from tests.test_platform import snapshot
@@ -22,6 +22,10 @@ class Platform:
 
 
 class Sink(OperatorMessageSink):
+    @property
+    def channel(self):
+        return InteractionChannel.CONSOLE
+
     def __init__(self):
         self.messages = []
 
