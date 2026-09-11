@@ -47,7 +47,7 @@ from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, InteractionChannel, InteractionContext,
     InteractionInitiator, InteractionMode, OperatorMessage,
     OperatorMessageSink, VOICE_DIALOGUE, render_dialogue_policy,
-    runtime_notification,
+    render_notification_context, render_notification_policy, runtime_notification,
 )
 from embodied_runtime.memory import (
     MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
@@ -992,6 +992,8 @@ class RobotApplication:
     def _attention_instructions(
         self, stimulus: AttentionStimulus, episode: AttentionEpisode, working_memory, *, capabilities_available: bool,
         expected_goal: ActiveGoal | None = None,
+        tools: tuple[CognitionToolDefinition, ...] = (),
+        notification_interaction: InteractionContext | None = None,
     ) -> str:
         context = compose_cognition_instructions(
             self.cognition_context(), self.temporal_context(), self.temporal_situation(),
@@ -1016,8 +1018,11 @@ class RobotApplication:
             "most one capability in this request."
             if capabilities_available else ""
         )
+        sections = self._notification_sections(tools, notification_interaction)
+        notification = "" if not sections else "\n\n" + "\n\n".join(sections)
         return (
-            f"{context}\n\n{episode.render()}\n\n{stimulus.render(actions_enabled=capabilities_available)}"
+            f"{context}{notification}\n\n{episode.render()}\n\n"
+            f"{stimulus.render(actions_enabled=capabilities_available)}"
             f"{inspection_guidance}{sequencing}"
         )
 
@@ -1041,10 +1046,17 @@ class RobotApplication:
         if expected_goal is None or expected_goal.id != episode.goal_id:
             raise RuntimeError("attention episode's bound goal is no longer current")
         tools = self.initiative_tools()
+        sink = self._operator_message_sink
+        notification_interaction = (
+            runtime_notification(sink.channel)
+            if sink is not None and any(tool.name == ADDRESS_OPERATOR_TOOL.name for tool in tools)
+            else None
+        )
         capabilities_available = bool(tools)
         instructions = self._attention_instructions(
             stimulus, episode, prior_memory, capabilities_available=capabilities_available,
             expected_goal=expected_goal,
+            tools=tools, notification_interaction=notification_interaction,
         )
         action: str | None = None
         action_status: str | None = None
@@ -1096,7 +1108,9 @@ class RobotApplication:
                         log_prefix="INITIATIVE",
                     )
                 else:
-                    result = await self._execute_initiative_tool(call)
+                    result = await self._execute_initiative_tool(
+                        call, notification_interaction=notification_interaction
+                    )
             try:
                 result_status = json.loads(result.output).get("status", "rejected")
             except (json.JSONDecodeError, AttributeError):
@@ -1133,6 +1147,7 @@ class RobotApplication:
                     lambda: self._attention_instructions(
                         stimulus, episode, prior_memory, capabilities_available=True,
                         expected_goal=expected_goal,
+                        tools=tools, notification_interaction=notification_interaction,
                     )
                 ) if tools else None,
             )
@@ -1155,6 +1170,7 @@ class RobotApplication:
                 and self._active_goal is expected_goal):
             followup_completed, followup_effect = await self._request_acquisition_followup(
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
+                notification_interaction,
             )
             continuation_completed = followup_completed
             if followup_effect is not None:
@@ -1173,6 +1189,7 @@ class RobotApplication:
             continuation_completed, continuation_effect = await self._request_continuation(
                 stimulus, episode, expected_goal, prior_memory, effects[0],
                 tuple(acquisitions),
+                notification_interaction,
             )
             if continuation_effect is not None:
                 effects.append(continuation_effect)
@@ -1199,19 +1216,33 @@ class RobotApplication:
         self, followup: AcquisitionFollowupStimulus,
         stimulus: AttentionStimulus, episode: AttentionEpisode,
         expected_goal: ActiveGoal, working_memory,
+        tools: tuple[CognitionToolDefinition, ...] = (),
+        notification_interaction: InteractionContext | None = None,
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
                 self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
-            ), episode.render(), stimulus.render(actions_enabled=None), followup.render(),
+            ), *self._notification_sections(tools, notification_interaction),
+            episode.render(), stimulus.render(actions_enabled=None), followup.render(),
         ))
+
+    @staticmethod
+    def _notification_sections(tools, interaction):
+        """Describe notification delivery only where its effect is projected."""
+        if interaction is None or not any(
+            tool.name == ADDRESS_OPERATOR_TOOL.name for tool in tools
+        ):
+            return ()
+        return (render_notification_context(interaction),
+                render_notification_policy(interaction))
 
     async def _request_acquisition_followup(
         self, stimulus: AttentionStimulus, episode: AttentionEpisode,
         expected_goal: ActiveGoal, prior_memory,
         acquisitions: list[InitiativeAcquisitionOutcome],
+        notification_interaction: InteractionContext | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
@@ -1262,7 +1293,8 @@ class RobotApplication:
             else:
                 action = call.name
                 result = await self._execute_initiative_tool(
-                    call, available=available, log_prefix=log_prefix
+                    call, available=available, log_prefix=log_prefix,
+                    notification_interaction=notification_interaction,
                 )
             result_text = result.output
             try:
@@ -1288,10 +1320,12 @@ class RobotApplication:
             await backend.respond(
                 ACQUISITION_FOLLOWUP_REQUEST,
                 instructions=self._acquisition_followup_instructions(
-                    followup, stimulus, episode, expected_goal, prior_memory
+                    followup, stimulus, episode, expected_goal, prior_memory,
+                    tools, notification_interaction,
                 ), tools=tools, tool_executor=execute_tool if tools else None,
                 refreshed_instructions=lambda: self._acquisition_followup_instructions(
-                    followup, stimulus, episode, expected_goal, prior_memory
+                    followup, stimulus, episode, expected_goal, prior_memory,
+                    tools, notification_interaction,
                 ),
             )
         except asyncio.CancelledError:
@@ -1302,7 +1336,8 @@ class RobotApplication:
             ))
         if second_acquisition is not None and self._active_goal is expected_goal:
             final_completed, final_effect = await self._request_final_effect_decision(
-                stimulus, episode, expected_goal, prior_memory, acquisitions
+                stimulus, episode, expected_goal, prior_memory, acquisitions,
+                notification_interaction,
             )
             return final_completed, final_effect
         return True, (None if action is None else InitiativeEffectOutcome(
@@ -1313,6 +1348,7 @@ class RobotApplication:
         self, stimulus: AttentionStimulus, episode: AttentionEpisode,
         expected_goal: ActiveGoal, prior_memory,
         acquisitions: list[InitiativeAcquisitionOutcome],
+        notification_interaction: InteractionContext | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
@@ -1336,7 +1372,8 @@ class RobotApplication:
             else:
                 action = call.name
                 result = await self._execute_initiative_tool(
-                    call, available=available, log_prefix="ACQUISITION"
+                    call, available=available, log_prefix="ACQUISITION",
+                    notification_interaction=notification_interaction,
                 )
             result_text = result.output
             try:
@@ -1351,10 +1388,12 @@ class RobotApplication:
             await backend.respond(
                 ACQUISITION_FOLLOWUP_REQUEST,
                 instructions=self._acquisition_followup_instructions(
-                    followup, stimulus, episode, expected_goal, prior_memory
+                    followup, stimulus, episode, expected_goal, prior_memory,
+                    tools, notification_interaction,
                 ), tools=tools, tool_executor=execute_tool if tools else None,
                 refreshed_instructions=(lambda: self._acquisition_followup_instructions(
-                    followup, stimulus, episode, expected_goal, prior_memory
+                    followup, stimulus, episode, expected_goal, prior_memory,
+                    tools, notification_interaction,
                 )) if tools else None,
             )
         except asyncio.CancelledError:
@@ -1371,6 +1410,8 @@ class RobotApplication:
         self, continuation: InitiativeContinuationStimulus,
         stimulus: AttentionStimulus, episode: AttentionEpisode,
         expected_goal: ActiveGoal, working_memory,
+        tools: tuple[CognitionToolDefinition, ...] = (),
+        notification_interaction: InteractionContext | None = None,
     ) -> str:
         return "\n\n".join((
             compose_cognition_instructions(
@@ -1378,6 +1419,7 @@ class RobotApplication:
                 self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ),
+            *self._notification_sections(tools, notification_interaction),
             episode.render(), stimulus.render(actions_enabled=None),
             continuation.render(),
         ))
@@ -1387,6 +1429,7 @@ class RobotApplication:
         expected_goal: ActiveGoal, prior_memory,
         first_effect: InitiativeEffectOutcome,
         acquisitions: tuple[InitiativeAcquisitionOutcome, ...] = (),
+        notification_interaction: InteractionContext | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
@@ -1426,7 +1469,8 @@ class RobotApplication:
                 )
             else:
                 result = await self._execute_initiative_tool(
-                    call, available=available, log_prefix="CONTINUATION"
+                    call, available=available, log_prefix="CONTINUATION",
+                    notification_interaction=notification_interaction,
                 )
             result_text = result.output
             try:
@@ -1444,12 +1488,14 @@ class RobotApplication:
             response = await backend.respond(
                 CONTINUATION_INITIATIVE_REQUEST,
                 instructions=self._continuation_instructions(
-                    continuation, stimulus, episode, expected_goal, prior_memory
+                    continuation, stimulus, episode, expected_goal, prior_memory,
+                    tools, notification_interaction,
                 ),
                 tools=tools,
                 tool_executor=execute_tool,
                 refreshed_instructions=lambda: self._continuation_instructions(
-                    continuation, stimulus, episode, expected_goal, prior_memory
+                    continuation, stimulus, episode, expected_goal, prior_memory,
+                    tools, notification_interaction,
                 ),
             )
         except asyncio.CancelledError:
@@ -1873,6 +1919,7 @@ class RobotApplication:
         self, call: CognitionToolCall, *,
         available: tuple[CognitionToolDefinition, ...] | None = None,
         log_prefix: str = "INITIATIVE",
+        notification_interaction: InteractionContext | None = None,
     ) -> CognitionToolResult:
         projected = self.initiative_tools() if available is None else available
         if call.name == ORIENT_BODY_TOOL.name:
@@ -1882,7 +1929,8 @@ class RobotApplication:
             )
         if call.name == ADDRESS_OPERATOR_TOOL.name:
             return await self._execute_address_operator(
-                call, available=projected, log_prefix=log_prefix
+                call, available=projected, log_prefix=log_prefix,
+                notification_interaction=notification_interaction,
             )
         if call.name == SCHEDULE_FOLLOWUP_TOOL.name:
             return self._execute_schedule_followup(
@@ -1942,6 +1990,7 @@ class RobotApplication:
         self, call: CognitionToolCall, *,
         available: tuple[CognitionToolDefinition, ...] | None = None,
         log_prefix: str = "INITIATIVE",
+        notification_interaction: InteractionContext | None = None,
     ) -> CognitionToolResult:
         projected = self.initiative_tools() if available is None else available
         if ADDRESS_OPERATOR_TOOL not in projected:
@@ -1969,7 +2018,9 @@ class RobotApplication:
             sink = self._operator_message_sink
             if sink is None:
                 raise RuntimeError("no operator message channel is configured")
-            interaction = runtime_notification(sink.channel)
+            interaction = notification_interaction or runtime_notification(sink.channel)
+            if interaction.channel != sink.channel:
+                raise RuntimeError("operator message channel changed during cognition")
             await sink.deliver(OperatorMessage(message, "initiative", interaction))
         except Exception as error:
             LOGGER.info(

@@ -16,7 +16,8 @@ from embodied_runtime.interaction import (
     VOICE_DIALOGUE, MAX_OPERATOR_MESSAGE_CHARS, ConsoleOperatorMessageChannel,
     InteractionChannel, InteractionContext, InteractionInitiator,
     InteractionMode, OperatorMessage, OperatorMessageSink, runtime_notification,
-    render_dialogue_policy,
+    render_dialogue_policy, render_notification_context,
+    render_notification_policy,
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.state import BodyState, LifecycleState
@@ -98,6 +99,30 @@ class InteractionIdentityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             render_dialogue_policy(CONSOLE_NOTIFICATION)
 
+    def test_console_notification_grounding_is_deterministic_and_bounded(self):
+        self.assertEqual(render_notification_context(CONSOLE_NOTIFICATION),
+                         """Available operator notification
+  channel: console
+  mode: notification
+  initiator: runtime
+  response_expected: false""")
+        policy = render_notification_policy(CONSOLE_NOTIFICATION)
+        for expected in (
+            "Notification policy\n  medium: text", "asynchronously", "self-contained",
+            "does not itself open or extend a conversation", "No direct reply is expected",
+            "open-ended conversational question", "request for genuine operator action",
+            "saw, read, or acknowledged", "local plain-text terminal",
+            "do not assume a Markdown renderer",
+        ):
+            self.assertIn(expected, policy)
+
+    def test_notification_grounding_rejects_non_notification_contexts(self):
+        for interaction in (CONSOLE_DIALOGUE, CONSOLE_ADMINISTRATIVE):
+            with self.subTest(interaction=interaction), self.assertRaises(ValueError):
+                render_notification_context(interaction)
+            with self.subTest(interaction=interaction), self.assertRaises(ValueError):
+                render_notification_policy(interaction)
+
 
 class ConsoleChannelValidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_accepts_valid_console_notification(self):
@@ -177,6 +202,25 @@ class MessageClosureBackend(TextCognitionBackend):
         return "done"
 
 
+class AcquisitionThenNotificationBackend(TextCognitionBackend):
+    identifier = "acquisition-then-notification"
+
+    def __init__(self):
+        self.requests = []
+        self.refreshed = []
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((instructions, tuple(tool.name for tool in tools)))
+        if refreshed_instructions is not None:
+            self.refreshed.append(refreshed_instructions())
+        call = (CognitionToolCall("inspect_self", '{"area":"runtime"}')
+                if len(self.requests) == 1 else
+                CognitionToolCall("address_operator", '{"message":"Inspection complete."}'))
+        await tool_executor(call)
+        return "done"
+
+
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, backend=None, sink=None, *, actions=False, messages=True,
                  body=None):
@@ -249,6 +293,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             AttentionStimulus("body_orientation_changed", "reflex:test", 1, 0, 0, 0)
         )
         self.assertEqual(backend.requests[0][0], ACTION_INITIATIVE_REQUEST)
+        instructions = backend.requests[0][1]
+        self.assertEqual(instructions.count("Available operator notification"), 1)
+        self.assertEqual(instructions.count("Notification policy"), 1)
         self.assertEqual([tool.name for tool in backend.requests[0][2]],
                          ["inspect_self", "schedule_followup", "address_operator"])
         self.assertEqual((sink.messages[0].text, sink.messages[0].source),
@@ -263,6 +310,60 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(app.active_goal, goal)
         self.assertIs(app.runtime_state, state)
         self.assertEqual(app.working_memory.snapshot(), memory)
+        await app.stop()
+
+    async def test_notification_grounding_follows_projected_tool_availability(self):
+        for sink, messages in ((RecordingSink(), False), (None, True)):
+            with self.subTest(sink=sink, messages=messages):
+                backend = ScriptedBackend()
+                app = self.make_app(backend, sink, messages=messages)
+                await app.start()
+                app.set_goal("goal")
+                tools_before = tuple(tool.name for tool in app.initiative_tools())
+                await app._request_initiative(AttentionStimulus(
+                    "body_orientation_changed", "reflex:test", 1, 0, 0, 0
+                ))
+                instructions = backend.requests[0][1]
+                self.assertNotIn("Available operator notification", instructions)
+                self.assertNotIn("Notification policy", instructions)
+                self.assertNotIn("address_operator", tools_before)
+                self.assertEqual(tuple(tool.name for tool in backend.requests[0][2]),
+                                 tools_before)
+                await app.stop()
+
+    async def test_notification_identity_is_stable_across_acquisition_stages(self):
+        sink = RecordingSink()
+        backend = AcquisitionThenNotificationBackend()
+        app = self.make_app(backend, sink)
+        await app.start()
+        app.set_goal("inspect then notify")
+        tools_before = tuple(tool.name for tool in app.initiative_tools())
+
+        await app._request_initiative(AttentionStimulus(
+            "body_orientation_changed", "reflex:test", 1, 0, 0, 0
+        ))
+
+        self.assertEqual(len(backend.requests), 2)
+        self.assertEqual(len(backend.refreshed), 2)
+        for instructions in (
+            backend.requests[0][0], backend.refreshed[0],
+            backend.requests[1][0], backend.refreshed[1],
+        ):
+            self.assertEqual(instructions.count("Available operator notification"), 1)
+            self.assertEqual(instructions.count("Notification policy"), 1)
+            self.assertIn("channel: console", instructions)
+            self.assertIn("mode: notification", instructions)
+            self.assertIn("initiator: runtime", instructions)
+            self.assertIn("response_expected: false", instructions)
+            self.assertIn("id: E0", instructions)
+        self.assertEqual(backend.requests[0][1], tools_before)
+        self.assertEqual(backend.requests[1][1], (
+            "inspect_self", "schedule_followup", "address_operator",
+        ))
+        self.assertEqual(len(sink.messages), 1)
+        self.assertEqual(sink.messages[0].interaction, CONSOLE_NOTIFICATION)
+        self.assertEqual(sink.messages[0].source, "initiative")
+        self.assertEqual(len(app.working_memory), 0)
         await app.stop()
 
     async def test_invalid_messages_and_channel_failure_are_rejected(self):

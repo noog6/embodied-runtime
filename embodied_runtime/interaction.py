@@ -78,6 +78,45 @@ def render_dialogue_policy(interaction: InteractionContext) -> str:
     raise ValueError(f"unsupported operator dialogue channel: {interaction.channel}")
 
 
+def _require_console_notification(interaction: InteractionContext) -> None:
+    if not (
+        interaction.channel == InteractionChannel.CONSOLE
+        and interaction.mode == InteractionMode.NOTIFICATION
+        and interaction.initiator == InteractionInitiator.RUNTIME
+        and interaction.response_expected is False
+    ):
+        raise ValueError("notification grounding requires a console runtime notification")
+
+
+def render_notification_context(interaction: InteractionContext) -> str:
+    """Render the destination of an available outbound notification effect."""
+    _require_console_notification(interaction)
+    return "\n".join((
+        "Available operator notification",
+        f"  channel: {interaction.channel.value}",
+        f"  mode: {interaction.mode.value}",
+        f"  initiator: {interaction.initiator.value}",
+        f"  response_expected: {str(interaction.response_expected).lower()}",
+    ))
+
+
+def render_notification_policy(interaction: InteractionContext) -> str:
+    """Render bounded composition guidance for a console notification."""
+    _require_console_notification(interaction)
+    return "\n".join((
+        "Notification policy",
+        "  medium: text",
+        "The message will be delivered asynchronously as a runtime-originated notification in a local plain-text terminal.",
+        "It is self-contained, is not an operator dialogue response, and does not itself open or extend a conversation or reserve cognition waiting for a reply.",
+        "No direct reply is expected as part of this notification, but the operator may respond later in a new operator cognition episode.",
+        "Make the message stand on its own, with enough context to explain why it matters; prefer concise useful information over narration of internal reasoning.",
+        "Do not append a casual or open-ended conversational question merely to continue conversation, or imply that the runtime is waiting for an answer.",
+        "A direct request for genuine operator action, such as asking the operator to connect power, is permitted when the situation calls for it.",
+        "Do not claim delivery to another channel, or claim the operator saw, read, or acknowledged the message, or that a reply was received, without runtime evidence.",
+        "Compose plain terminal text and do not assume a Markdown renderer.",
+    ))
+
+
 def runtime_notification(channel: InteractionChannel) -> InteractionContext:
     """Construct the runtime notification identity for a delivery channel."""
     return InteractionContext(
