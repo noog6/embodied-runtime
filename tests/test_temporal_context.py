@@ -80,7 +80,9 @@ class TemporalSituationTests(unittest.TestCase):
         situation = TemporalSituation(None, None, "none", None, None, None, None, None)
         rendered = situation.render()
         self.assertEqual(rendered.count("  state: none"), 4)
-        self.assertIn("No active goal or temporal follow-up is currently pending.", rendered)
+        self.assertIn("No temporal follow-up is currently scheduled.", rendered)
+        self.assertIn("No active goal is currently in progress.", rendered)
+        self.assertIn("Only Follow-up state pending or due_pending", rendered)
         with self.assertRaises(FrozenInstanceError):
             situation.followup_state = "pending"
 
@@ -91,7 +93,24 @@ class TemporalSituationTests(unittest.TestCase):
         self.assertIn("  id: G4\n  age_s: 742", rendered)
         self.assertIn('purpose: "check \\"battery\\" voltage"', rendered)
         self.assertIn("One follow-up is pending in about 3 minutes.", rendered)
+        self.assertNotIn("No temporal follow-up is currently scheduled.", rendered)
         self.assertIn("  id: E12\n  age_s: 38", rendered)
+
+    def test_active_goal_does_not_imply_a_followup(self):
+        rendered = TemporalSituation(
+            1, 30, "none", None, None, None, None, None
+        ).render()
+        self.assertIn("Active goal timing\n  state: active\n  id: G1", rendered)
+        self.assertIn("Follow-up\n  state: none", rendered)
+        self.assertIn("No temporal follow-up is currently scheduled.", rendered)
+
+    def test_due_pending_is_due_now(self):
+        rendered = TemporalSituation(
+            1, 30, "due_pending", 0, "check battery", None, None, None
+        ).render()
+        self.assertIn("Follow-up\n  state: due_pending", rendered)
+        self.assertIn("One follow-up is due now.", rendered)
+        self.assertNotIn("No temporal follow-up is currently scheduled.", rendered)
 
     def test_duration_buckets_are_deterministic_and_clamped(self):
         cases = {

@@ -1,5 +1,15 @@
 # Bounded temporal follow-up
 
+> **Future intent is not a temporal commitment. A temporal commitment exists
+> only when authoritative runtime temporal state says it exists.**
+
+> **Natural-language timing inside an active goal does not schedule anything.**
+
+Goal wording, WorkingMemory, and prior assistant text can describe future intent,
+but none proves a timer exists. Only authoritative `pending` or `due_pending`
+state, or a successful runtime-produced `schedule_followup` result, confirms a
+commitment. A rejected request must not be described as scheduled.
+
 The runtime provides one provider-neutral semantic effect:
 
 ```text
@@ -31,6 +41,34 @@ and no pending follow-up. It captures the exact current `ActiveGoal` object.
 Clearing, resolving, or completing that goal cancels the task. Shutdown also
 cancels and awaits it. At due time, RUNNING state and exact object identity are
 checked again; stale work is discarded without an event.
+
+## Explicit operator scheduling
+
+Operator cognition is offered `schedule_followup` only while the application is
+RUNNING, initiative is enabled, an exact active goal exists, and no follow-up is
+already pending. The effect uses the same executor and
+`TemporalFollowupController` as autonomous cognition. Execution rejects the
+request if the goal object grounded for that operator cognition stage is no
+longer the exact current object; a replacement goal is never silently bound.
+
+The bounded workflow may intentionally require two turns:
+
+```text
+operator turn 1:
+  establish active goal
+
+operator turn 2:
+  explicitly request one schedule_followup effect
+```
+
+Operator cognition still permits at most two read-only acquisitions followed by
+at most one non-acquisition semantic effect. Setting a goal and scheduling a
+follow-up therefore cannot occur as two effects in one episode. The applied tool
+result confirms scheduling, and freshly reconstructed `TemporalSituation` is
+authoritative afterward.
+
+The commitment remains single, one-shot, and session-local. This workflow adds
+no replacement, rescheduling, or recurrence.
 
 The due event carries that same goal reference only as an internal identity
 fence. Attention checks it again when consuming the event, closing the race in
