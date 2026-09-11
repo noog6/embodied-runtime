@@ -47,7 +47,8 @@ from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, InteractionChannel, InteractionContext,
     InteractionInitiator, InteractionMode, OperatorMessage,
     OperatorMessageSink, VOICE_DIALOGUE, render_dialogue_policy,
-    render_notification_context, render_notification_policy, runtime_notification,
+    render_notification_context, render_notification_policy,
+    resolve_notification_route,
 )
 from embodied_runtime.memory import (
     MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
@@ -1048,7 +1049,7 @@ class RobotApplication:
         tools = self.initiative_tools()
         sink = self._operator_message_sink
         notification_interaction = (
-            runtime_notification(sink.channel)
+            resolve_notification_route(sink.channel)
             if sink is not None and any(tool.name == ADDRESS_OPERATOR_TOOL.name for tool in tools)
             else None
         )
@@ -1653,8 +1654,9 @@ class RobotApplication:
         if (self.options.initiative_actions_enabled and body is not None and
                 not body.is_physical and "orientation" in body.capabilities):
             tools.append(ORIENT_BODY_TOOL)
-        if (self.options.initiative_messages_enabled and
-                self._operator_message_sink is not None):
+        sink = self._operator_message_sink
+        if (self.options.initiative_messages_enabled and sink is not None and
+                resolve_notification_route(sink.channel) is not None):
             tools.append(ADDRESS_OPERATOR_TOOL)
         return tuple(tools)
 
@@ -2018,8 +2020,11 @@ class RobotApplication:
             sink = self._operator_message_sink
             if sink is None:
                 raise RuntimeError("no operator message channel is configured")
-            interaction = notification_interaction or runtime_notification(sink.channel)
-            if interaction.channel != sink.channel:
+            current_route = resolve_notification_route(sink.channel)
+            if current_route is None:
+                raise RuntimeError("operator message channel is not an eligible notification route")
+            interaction = notification_interaction or current_route
+            if interaction != current_route:
                 raise RuntimeError("operator message channel changed during cognition")
             await sink.deliver(OperatorMessage(message, "initiative", interaction))
         except Exception as error:
