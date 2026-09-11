@@ -96,6 +96,17 @@ class OpenAIResponsesBackend:
 
     @staticmethod
     def _provider_tool(tool: CognitionToolDefinition) -> dict[str, Any]:
+        properties = tool.parameters.get("properties")
+        required = tool.parameters.get("required")
+        if (
+            not isinstance(properties, dict)
+            or not isinstance(required, list)
+            or set(properties) != set(required)
+            or tool.parameters.get("additionalProperties") is not False
+        ):
+            raise CognitionError(
+                f"Strict cognition tool schema is incompatible: {tool.name}"
+            )
         return {
             "type": "function",
             "name": tool.name,

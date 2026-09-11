@@ -243,7 +243,6 @@ class AdmissionBackend(TextCognitionBackend):
             name = self.sequence.pop(0)
             args = {"query": "Gordon"} if name == "recall_memory" else {
                 key: value for key, value in asdict(proposal()).items()
-                if value is not None
             }
             self.results.append(await tool_executor(CognitionToolCall(name, json.dumps(args))))
             return "provisional"
@@ -301,6 +300,22 @@ class MemoryAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         arguments = asdict(proposal())
         arguments["summary"] = "Gordon likes herring and is allergic to tuna."
+        result = app._execute_memory_admission(
+            CognitionToolCall("remember", json.dumps(arguments)),
+            "Gordon's favorite snack is herring.", "voice",
+        )
+        self.assertEqual(json.loads(result.output)["status"], "rejected")
+        self.assertEqual(store.list_memories_for_entity(gordon.id), ())
+        await app.stop()
+
+    async def test_remember_requires_nullable_relationship_arguments(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        store = SQLiteMemoryStore(Path(temporary.name) / "memory.sqlite3")
+        gordon = store.create_entity("object", "Gordon")
+        app, _ = self.make_app(store, [])
+        await app.start()
+        arguments = asdict(proposal())
+        arguments.pop("related_role")
         result = app._execute_memory_admission(
             CognitionToolCall("remember", json.dumps(arguments)),
             "Gordon's favorite snack is herring.", "voice",
