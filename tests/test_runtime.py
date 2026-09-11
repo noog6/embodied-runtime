@@ -24,6 +24,17 @@ class FakePlatformProvider:
         return next(self.snapshots)
 
 
+class CountingMemoryStore:
+    def __init__(self, close_error: Exception | None = None):
+        self.close_calls = 0
+        self.close_error = close_error
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
 class VirtualHardwareTests(unittest.TestCase):
     def test_lifecycle(self) -> None:
         hardware = VirtualHardwareBackend()
@@ -128,6 +139,36 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 await self.application.start()
         self.assertEqual(self.application.state, LifecycleState.STOPPED)
         self.assertFalse(self.events.is_running)
+
+    async def test_startup_failure_closes_memory_once_and_preserves_error(self) -> None:
+        memory = CountingMemoryStore(RuntimeError("memory close failed"))
+        application = RobotApplication(
+            RobotProfile("test", "Test Robot"), self.hardware,
+            events=self.events, platform_provider=self.platform_provider,
+            persistent_memory_store=memory,
+        )
+        with patch.object(
+            self.hardware, "start", side_effect=RuntimeError("hardware failed")
+        ), self.assertLogs("embodied_runtime.app", level="ERROR"):
+            with self.assertRaisesRegex(RuntimeError, "hardware failed"):
+                await application.start()
+        self.assertEqual(application.state, LifecycleState.STOPPED)
+        self.assertFalse(self.events.is_running)
+        self.assertEqual(memory.close_calls, 1)
+        await application.stop()
+        self.assertEqual(memory.close_calls, 1)
+
+    async def test_successful_shutdown_closes_memory_once(self) -> None:
+        memory = CountingMemoryStore()
+        application = RobotApplication(
+            RobotProfile("test", "Test Robot"), self.hardware,
+            events=self.events, platform_provider=self.platform_provider,
+            persistent_memory_store=memory,
+        )
+        await application.start()
+        await application.stop()
+        await application.stop()
+        self.assertEqual(memory.close_calls, 1)
 
     async def test_diagnostics_summary_omits_prompt_contents(self) -> None:
         with self.assertLogs("embodied_runtime.app", level="INFO") as logs:

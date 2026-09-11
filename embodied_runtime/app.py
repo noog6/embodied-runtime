@@ -46,6 +46,7 @@ from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, OperatorMessage, OperatorMessageSink,
 )
+from embodied_runtime.memory import PersistentMemoryStore
 from embodied_runtime.inspection import (
     HostSelfInspector, SELF_INSPECTION_AREAS, SelfInspectionFact,
     SelfInspectionResult, SelfInspector,
@@ -284,6 +285,7 @@ class RobotApplication:
         voice_wake_words: list[str] | None = None,
         timezone_name: str = "UTC",
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        persistent_memory_store: PersistentMemoryStore | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -302,6 +304,8 @@ class RobotApplication:
         self.working_memory = (
             working_memory if working_memory is not None else WorkingMemory()
         )
+        self.persistent_memory = persistent_memory_store
+        self._persistent_memory_closed = False
         self.voice = VoiceInteraction(
             voice_provider,
             text_to_speech_provider,
@@ -526,6 +530,10 @@ class RobotApplication:
                 await self.events.stop()
             except BaseException:
                 LOGGER.exception("[EVENT] cleanup_failed")
+            try:
+                self._close_persistent_memory()
+            except BaseException:
+                LOGGER.exception("[MEMORY] cleanup_failed")
             raise
         self._set_lifecycle(LifecycleState.RUNNING)
         try:
@@ -594,10 +602,22 @@ class RobotApplication:
             self._set_lifecycle(LifecycleState.STOPPED)
             self._stop_requested.set()
             await self.events.stop()
-            LOGGER.info("[APP] stopped")
-        finally:
-            if failure is not None:
-                raise failure
+        except BaseException as error:
+            failure = failure or error
+        try:
+            self._close_persistent_memory()
+        except BaseException as error:
+            failure = failure or error
+        LOGGER.info("[APP] stopped")
+        if failure is not None:
+            raise failure
+
+    def _close_persistent_memory(self) -> None:
+        """Make the application's single best-effort ownership close attempt."""
+        if self.persistent_memory is None or self._persistent_memory_closed:
+            return
+        self._persistent_memory_closed = True
+        self.persistent_memory.close()
 
     async def run(self) -> None:
         await self.start()

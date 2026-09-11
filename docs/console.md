@@ -119,3 +119,11 @@ episode with source `console`. Administrative commands remain direct runtime
 operations. `attention` separates shared current/last episode lifecycle fields
 (including trigger and source) from the last autonomous-initiative diagnostics;
 it never displays the operator utterance as an episode concern.
+# Memory commands
+
+`memory` and `memory clear` continue to inspect and clear bounded, volatile
+working memory. Durable operator administration uses `memory persistent`,
+`memory entity add`, `memory entity find`, `memory alias add`, `memory find`,
+`memory add`, `memory show`, and `memory list`. Durable lookup is exact after
+case/Unicode/whitespace normalization; it is not fuzzy or semantic. Full syntax
+is documented in [`persistent-memory.md`](persistent-memory.md).

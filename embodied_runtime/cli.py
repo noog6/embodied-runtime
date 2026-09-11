@@ -28,6 +28,7 @@ from embodied_runtime.hardware.fusion_hat import (
 )
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
+from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.interaction import ConsoleOperatorMessageChannel
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.reflexes import PresenceCenteringReflex
@@ -192,6 +193,8 @@ def parse_launch_arguments(
     args.elevenlabs_tts_speed = effective.voice_elevenlabs_tts_speed
     args.voice_initial_timeout_seconds = effective.voice_initial_timeout_seconds
     args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
+    args.memory_enabled = effective.memory_enabled
+    args.memory_database_path = effective.memory_database_path
     return parser, args, effective
 
 
@@ -240,6 +243,16 @@ def build_visual_perception_backend(
     if args.vision == "openai-responses":
         return OpenAIResponsesVisualPerceptionBackend()
     return None
+
+
+def build_persistent_memory_store(
+    args: argparse.Namespace,
+) -> SQLiteMemoryStore | None:
+    """Construct the optional durable store at the launch composition boundary."""
+    if not args.memory_enabled:
+        return None
+    args.memory_database_path.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteMemoryStore(args.memory_database_path)
 
 
 def build_platform_monitor_policy(
@@ -346,6 +359,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     cognition = build_cognition_backend(args)
     vision = build_visual_perception_backend(args)
     message_channel = ConsoleOperatorMessageChannel() if args.console else None
+    persistent_memory = build_persistent_memory_store(args)
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
                                               initiative_enabled=args.initiative,
@@ -366,6 +380,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
         voice_wake_words=(args.voice_wake_words if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
         timezone_name=args.timezone,
+        persistent_memory_store=persistent_memory,
     )
     if args.diagnostics:
         try:

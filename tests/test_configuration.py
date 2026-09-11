@@ -1,9 +1,13 @@
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from embodied_runtime.cli import main, parse_launch_arguments
+from embodied_runtime.cli import (
+    build_persistent_memory_store, main, parse_launch_arguments,
+)
+from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.config import (
     ConfigurationError, HISTORICAL_DEFAULTS, load_runtime_config,
 )
@@ -51,6 +55,8 @@ class ConfigurationTests(unittest.TestCase):
                 "voice_initial_timeout_seconds": 18,
                 "voice_followup_timeout_seconds": 12,
                 "timezone": "America/Toronto",
+                "memory_enabled": True,
+                "memory_database_path": Path("data/mira-memory.sqlite3").resolve(),
             }),
         )
 
@@ -170,11 +176,54 @@ class ConfigurationTests(unittest.TestCase):
             ("[runtime]\nmode=7\n", "runtime.mode must be a string"),
             ("[voice]\nenabled='yes'\n", "voice.enabled must be boolean"),
             ("[voice]\ninitial_timeout_seconds=0\n", "voice.initial_timeout_seconds must be a positive number"),
+            ("[memory]\nenabled='yes'\n", "memory.enabled must be boolean"),
+            ("[memory]\ndatabase_path=4\n", "memory.database_path must be a string"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                 ConfigurationError, message
             ):
                 load_runtime_config(self.write(contents))
+
+    def test_memory_configuration_is_disabled_by_default_and_resolves_paths(self):
+        self.assertFalse(self.effective("").memory_enabled)
+        path = self.write("[memory]\nenabled=true\ndatabase_path='db/memory.sqlite3'\n")
+        effective = parse_launch_arguments(["--config", str(path)])[2]
+        self.assertTrue(effective.memory_enabled)
+        self.assertEqual(effective.memory_database_path, path.parent / "db/memory.sqlite3")
+        absolute = self.effective(
+            "[memory]\nenabled=true\ndatabase_path='/tmp/absolute-memory.sqlite3'\n"
+        )
+        self.assertEqual(absolute.memory_database_path, Path("/tmp/absolute-memory.sqlite3"))
+
+    def test_enabled_memory_requires_nonempty_path_and_rejects_unknown_keys(self):
+        for contents in ("[memory]\nenabled=true\n", "[memory]\nenabled=true\ndatabase_path='  '\n"):
+            with self.assertRaisesRegex(ConfigurationError, "non-empty string"):
+                load_runtime_config(self.write(contents))
+        with self.assertRaisesRegex(ConfigurationError, "memory.backend"):
+            load_runtime_config(self.write("[memory]\nbackend='sqlite'\n"))
+
+    def test_persistent_memory_composition_disabled_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "missing" / "memory.sqlite3"
+            store = build_persistent_memory_store(SimpleNamespace(
+                memory_enabled=False, memory_database_path=database,
+            ))
+            self.assertIsNone(store)
+            self.assertFalse(database.parent.exists())
+            self.assertFalse(database.exists())
+
+    def test_persistent_memory_composition_enabled_creates_store_and_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "missing" / "memory.sqlite3"
+            store = build_persistent_memory_store(SimpleNamespace(
+                memory_enabled=True, memory_database_path=database,
+            ))
+            self.assertIsInstance(store, SQLiteMemoryStore)
+            self.assertTrue(database.parent.is_dir())
+            self.assertTrue(database.is_file())
+            entity = store.create_entity("object", "test")
+            self.assertEqual(entity.identity, "ENT1")
+            store.close()
 
     def test_voice_is_opt_in_with_small_bounded_timeout_config(self):
         effective = self.effective(
