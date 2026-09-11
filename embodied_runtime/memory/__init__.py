@@ -12,6 +12,7 @@ from .model import (
 )
 from .sqlite_store import SQLiteMemoryStore
 from .store import PersistentMemoryStore
+from .admission import MemoryAdmission, MemoryAdmissionProposal, MemoryAdmissionResult
 from .recall import (
     MAX_RECALL_ENTITIES, MAX_RECALL_MEMORIES_PER_ENTITY, MAX_RECALL_OUTPUT_CHARS,
     MAX_RECALL_QUERY_CHARS, MemoryRecallProjector, MemoryRecallResult,
@@ -23,6 +24,9 @@ __all__ = [
     "EntityRecord",
     "MemoryEntityLink",
     "MemoryPayload",
+    "MemoryAdmission",
+    "MemoryAdmissionProposal",
+    "MemoryAdmissionResult",
     "MemoryRecord",
     "NewMemoryLink",
     "NewMemoryPayload",

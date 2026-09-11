@@ -1,5 +1,51 @@
 # Persistent memory
 
+Working memory is volatile recent conversational context. Persistent memory is
+durable, explicitly accepted knowledge. Cognition can access the latter only
+through bounded capabilities: `recall_memory` is a deliberate read-only
+acquisition, while `remember` is an operator-grounded durable semantic effect.
+
+## Operator-grounded admission
+
+Admission is selective and opt-in during an ordinary operator episode. The
+model may propose at most one durable fact, preference, or simple relationship;
+the runtime admits it only when a short evidence span is present in the current
+operator utterance and the structured value occurs in that evidence. Comparison
+uses NFKC normalization, whitespace collapsing, and case folding, and rejects
+control characters. Recalled memory, working memory, assistant conclusions,
+sensor interpretation, and startup instructions are not admission evidence.
+
+Subjects must already exist and resolve to exactly one entity by canonical name
+or alias, and the submitted subject query must occur in the evidence clause. A
+relationship may add one related entity, also resolved exactly; its query must
+occur in evidence and equal the structured value. Cognition-created predicates
+and related roles are NFKC-normalized, token-validated, and case-folded at the
+admission boundary so capitalization cannot create distinct machine keys.
+Conversational cognition cannot create entities or aliases: learning a fact
+about a known thing is deliberately separate from deciding that a new durable
+thing exists. Entity administration remains a supervised console operation.
+There is no fuzzy, semantic, typo-correcting, lexical, embedding, or vector
+fallback.
+
+Every accepted write receives a runtime-owned `operator_statement` source,
+active status, normal store creation time, and exactly one inline `text/plain`
+payload. Both the durable summary and payload are the normalized display form
+of the verbatim evidence clause, never model-authored prose. The subject link
+always has role `subject`; cognition may name
+only the optional related link role. Identical kind/predicate/value/direct-link
+sets are successful no-op duplicates. A fact or preference with the same
+predicate but a different value is conservatively rejected. Admission never
+updates, deletes, supersedes, adjusts confidence, or reconciles existing memory.
+The durable evidence text and entity/value anchors are operator-grounded.
+Predicate and related-role fields are model-proposed structured metadata over
+that evidence; the evidence remains the authoritative durable source.
+
+`remember` is not available to autonomous attention, initiatives, goals,
+temporal follow-ups, or background monitors. Nothing mines transcripts or runs
+post-turn extraction: without an explicit `remember` call no durable write is
+attempted. Future work may separately define supervised conversational entity
+admission and supersession semantics.
+
 Working memory is volatile, bounded conversational context for the current
 runtime session and may disappear on restart. Persistent memory is durable,
 searchable knowledge with stable identities that survives process and host
@@ -97,7 +143,7 @@ after a full application stop and a new application opens the same file.
 The existing `memory` and `memory clear` commands still inspect and clear only
 volatile `WorkingMemory`.
 
-## Bounded cognition recall
+## Bounded cognition recall and admission
 
 Phase 18.3 exposes configured persistent memory through one read-only cognition
 tool, `recall_memory(query: string)`. Recall is a deliberate Phase 16
@@ -123,19 +169,24 @@ remembered knowledge; current sensor claims require fresh perception.
 
 ```text
 WorkingMemory
-    recent volatile interaction context
+    volatile recent context
 
 PersistentMemory
-    durable historical knowledge
+    durable accepted knowledge
 
 recall_memory
-    bounded deliberate acquisition of relevant persistent knowledge
+    bounded deliberate read acquisition
+
+remember
+    bounded operator-grounded durable write effect
 ```
 
-Only explicit console commands admit durable records. Recall cannot create,
-update, duplicate, or delete entities or memories, and there is no cognition
-memory-writing tool or automatic admission. This phase adds no fuzzy,
-substring, full-text, semantic, embedding, or vector retrieval; ranking by a
-model; object-file retrieval; compaction; archival; supersession; contradiction
-policy; background recall; or new attention trigger or budget. Schema version
-1 and its lifecycle remain unchanged.
+Explicit console commands remain the administrative admission path. Operator
+cognition may additionally request one bounded `remember` effect under the
+admission rules above. Recall and admission cannot create entities, and neither
+capability can update or delete existing memories. There is no automatic or
+autonomous admission. This phase adds no fuzzy, full-text, semantic, embedding,
+or vector behavior; ranking by a model; object-file retrieval; compaction;
+archival; supersession; contradiction reconciliation; background learning; or
+new attention trigger or budget. Schema version 1 and its lifecycle remain
+unchanged.
