@@ -29,7 +29,11 @@ from embodied_runtime.hardware.fusion_hat import (
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.memory import SQLiteMemoryStore
-from embodied_runtime.interaction import ConsoleOperatorMessageChannel
+from embodied_runtime.interaction import (
+    ConsoleOperatorMessageChannel, InteractionChannel,
+    OperatorDeliveryDestination, OperatorDeliveryRoute,
+    OperatorDeliveryRouteCatalog,
+)
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.reflexes import PresenceCenteringReflex
 from embodied_runtime.platform import PlatformMonitorPolicy, PlatformSnapshot
@@ -359,6 +363,12 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     cognition = build_cognition_backend(args)
     vision = build_visual_perception_backend(args)
     message_channel = ConsoleOperatorMessageChannel() if args.console else None
+    delivery_routes = OperatorDeliveryRouteCatalog((OperatorDeliveryRoute(
+        OperatorDeliveryDestination(
+            "console", InteractionChannel.CONSOLE, "local plain-text console"
+        ),
+        message_channel,
+    ),)) if message_channel is not None else OperatorDeliveryRouteCatalog()
     persistent_memory = build_persistent_memory_store(args)
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
@@ -374,6 +384,7 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         cognition_backend=cognition,
         visual_perception_backend=vision,
         operator_message_sink=message_channel,
+        operator_delivery_routes=delivery_routes,
         platform_monitor_policy=build_platform_monitor_policy(args),
         voice_provider=(FusionHatVoiceProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
         text_to_speech_provider=build_text_to_speech_provider(args),

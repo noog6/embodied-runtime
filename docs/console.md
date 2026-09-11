@@ -19,7 +19,12 @@ closure requires initiative only and still runs only after an actual semantic
 effect, never after read-only acquisition alone.
 
 The console concurrently waits for selector-based input and a transient outbound
-message queue. It renders an accepted message immediately as `Mira: ...`, cancels
+message queue. The queue accepts runtime-originated notifications and
+operator-directed deliveries requested through the current console or another
+dialogue channel. Both are non-dialogue deliveries and create no pending console
+reply, cognition episode, or extra WorkingMemory turn. There is no new `send` or
+`deliver` command: delivery is requested through normal `ask ...` or voice
+cognition. It renders an accepted message immediately as `Mira: ...`, cancels
 the losing wait, and redraws the prompt. This uses no stdin executor, polling, or
 sleep loop. EOF, quit, cancellation, and shutdown clean pending waits. Questions
 are delivered once and create no pending reply. Messages are not a console
