@@ -9,7 +9,10 @@ from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import CognitionToolCall, TextCognitionBackend
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
-from embodied_runtime.interaction import CONSOLE_DIALOGUE, VOICE_DIALOGUE
+from embodied_runtime.interaction import (
+    CONSOLE_DIALOGUE, VOICE_DIALOGUE, InteractionChannel, InteractionContext,
+    InteractionInitiator, InteractionMode,
+)
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.observations import SemanticObservation
 from embodied_runtime.voice import VoiceSessionPolicy
@@ -56,6 +59,7 @@ class AdvancingAcquisitionBackend(TextCognitionBackend):
     def __init__(self, clock):
         self.clock = clock
         self.requests = []
+        self.refreshed = []
 
     async def respond(self, message, *, instructions=None, tools=(),
                       tool_executor=None, refreshed_instructions=None):
@@ -64,6 +68,7 @@ class AdvancingAcquisitionBackend(TextCognitionBackend):
             await tool_executor(CognitionToolCall(
                 "inspect_self", '{"area": "runtime"}'
             ))
+            self.refreshed.append(refreshed_instructions())
             self.clock.now = 165
             return "acquired"
         return "final"
@@ -235,6 +240,36 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, [CONSOLE_DIALOGUE])
         self.assertIs(seen[0], CONSOLE_DIALOGUE)
         self.assertEqual(app.episode_coordinator.last.trigger_source, "console")
+        grounding = CONSOLE_DIALOGUE.render()
+        self.assertEqual(backend.requests[0][1].count("Interaction context"), 1)
+        self.assertIn(grounding, backend.requests[0][1])
+        self.assertLess(backend.requests[0][1].index(grounding),
+                        backend.requests[0][1].index("Attention episode"))
+        await app.stop()
+
+    async def test_legacy_source_is_not_promoted_to_interaction_grounding(self):
+        backend = ScriptedBackend()
+        app = self.app(backend)
+        await app.start()
+        await app.request_cognition("hello", source="console")
+        self.assertEqual(app.episode_coordinator.last.trigger_source, "console")
+        self.assertNotIn("Interaction context", backend.requests[0][1])
+        await app.stop()
+
+    async def test_semantically_valid_distinct_context_is_accepted_and_authoritative(self):
+        backend = ScriptedBackend()
+        app = self.app(backend)
+        await app.start()
+        interaction = InteractionContext(
+            InteractionChannel.CONSOLE, InteractionMode.DIALOGUE,
+            InteractionInitiator.OPERATOR, True,
+        )
+        self.assertIsNot(interaction, CONSOLE_DIALOGUE)
+        await app.request_cognition(
+            "hello", interaction=interaction, source="voice"
+        )
+        self.assertIn(interaction.render(), backend.requests[0][1])
+        self.assertEqual(app.episode_coordinator.last.trigger_source, "console")
         await app.stop()
 
     async def test_previous_successful_operator_turn_and_episode_ground_e2(self):
@@ -299,7 +334,9 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         app.set_goal("monitor charging")
         clock.now = 160
         app.temporal.schedule(120, "check charging voltage", app.active_goal)
-        await app.request_cognition("inspect then answer")
+        await app.request_cognition(
+            "inspect then answer", interaction=CONSOLE_DIALOGUE
+        )
         self.assertEqual(len(backend.requests), 2)
         first, second = backend.requests
         for instructions in (first[0], second[0]):
@@ -313,6 +350,12 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("acquisitions_remaining: 2", first[0])
         self.assertIn("acquisitions_remaining: 1", second[0])
         self.assertEqual(first[1].count("inspect_self"), 1)
+        grounding = CONSOLE_DIALOGUE.render()
+        self.assertTrue(all(request[0].count(grounding) == 1
+                            for request in backend.requests))
+        self.assertEqual(len(backend.refreshed), 1)
+        self.assertEqual(backend.refreshed[0].count(grounding), 1)
+        self.assertEqual(app.episode_coordinator.last.id, 1)
         self.assertEqual(len(app.working_memory.snapshot()), 1)
         await app.stop()
 
@@ -508,12 +551,23 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, [VOICE_DIALOGUE, VOICE_DIALOGUE])
         self.assertTrue(all(context is VOICE_DIALOGUE for context in seen))
         self.assertEqual(backend.episodes, [(1, "voice"), (2, "voice")])
+        self.assertTrue(all(text.count(VOICE_DIALOGUE.render()) == 1
+                            for text in backend.instructions))
         self.assertEqual(tts.spoken, ["answer 1", "answer 2"])
         self.assertEqual(voice.listen_calls, 2)
         self.assertIn("Working memory\n  state: empty", backend.instructions[0])
         self.assertIn('operator: "first"', backend.instructions[1])
         self.assertEqual(len(app.working_memory.snapshot()), 2)
         self.assertIsNone(app.episode_coordinator.current)
+        await app.stop()
+
+    async def test_dialogue_channel_does_not_change_operator_tool_authority(self):
+        backend = ScriptedBackend()
+        app = self.app(backend)
+        await app.start()
+        await app.request_cognition("console", interaction=CONSOLE_DIALOGUE)
+        await app.request_cognition("voice", interaction=VOICE_DIALOGUE)
+        self.assertEqual(backend.requests[0][2], backend.requests[1][2])
         await app.stop()
 
 
