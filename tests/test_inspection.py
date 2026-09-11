@@ -15,7 +15,7 @@ from embodied_runtime.cognition import CognitionError, CognitionToolCall, TextCo
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.events import BodyOrientationChanged
 from embodied_runtime.inspection import HostSelfInspector, SelfInspectionFact, SelfInspectionResult
-from embodied_runtime.interaction import OperatorMessageSink
+from embodied_runtime.interaction import InteractionChannel, OperatorMessageSink
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.state import LifecycleState
 from tests.test_platform import snapshot
@@ -36,6 +36,10 @@ class FakeInspector:
 
 
 class RecordingSink(OperatorMessageSink):
+    @property
+    def channel(self):
+        return InteractionChannel.CONSOLE
+
     def __init__(self):
         self.messages = []
 

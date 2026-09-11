@@ -255,15 +255,22 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
     async def test_ask_uses_raw_payload_and_displays_response(self):
         calls = []
 
-        async def request(message):
-            calls.append(message)
+        async def request(message, *, interaction=None):
+            calls.append((message, interaction))
             return "cognition online"
 
         self.app.request_cognition = request  # type: ignore[method-assign]
         report, stop = await self.console.execute_async("ask What's  happening today?")
-        self.assertEqual(calls, ["What's  happening today?"])
+        from embodied_runtime.interaction import CONSOLE_DIALOGUE
+        self.assertEqual(calls, [("What's  happening today?", CONSOLE_DIALOGUE)])
         self.assertEqual(report, "Test Robot: cognition online")
         self.assertFalse(stop)
+
+    def test_local_commands_have_administrative_interaction_identity(self):
+        from embodied_runtime.interaction import CONSOLE_ADMINISTRATIVE
+        self.assertEqual(
+            self.console.administrative_interaction, CONSOLE_ADMINISTRATIVE
+        )
 
     async def test_ask_errors_are_nonfatal_and_session_remains_usable(self):
         self.assertEqual(
@@ -273,7 +280,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             RuntimeError("No cognition backend is configured"),
             CognitionError("provider unavailable"),
         ):
-            async def fail(_message, error=error):
+            async def fail(_message, *, interaction=None, error=error):
                 raise error
 
             self.app.request_cognition = fail  # type: ignore[method-assign]

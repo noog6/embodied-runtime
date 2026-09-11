@@ -11,7 +11,7 @@ from embodied_runtime.cognition import CognitionToolCall, TextCognitionBackend
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.events import EventBus, TemporalFollowupDue
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
-from embodied_runtime.interaction import OperatorMessage
+from embodied_runtime.interaction import InteractionChannel, OperatorMessage
 from embodied_runtime.observations import (
     SemanticObservation, observation_from_temporal_followup,
 )
@@ -61,6 +61,8 @@ class FakeTimer:
 
 class Sink:
     def __init__(self): self.messages = []
+    @property
+    def channel(self): return InteractionChannel.CONSOLE
     async def deliver(self, message: OperatorMessage): self.messages.append(message)
 
 

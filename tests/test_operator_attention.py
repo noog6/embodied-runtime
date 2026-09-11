@@ -7,7 +7,9 @@ from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.attention import AttentionEpisodeCoordinator
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import CognitionToolCall, TextCognitionBackend
+from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
+from embodied_runtime.interaction import CONSOLE_DIALOGUE, VOICE_DIALOGUE
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.observations import SemanticObservation
 from embodied_runtime.voice import VoiceSessionPolicy
@@ -212,6 +214,27 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(episode.completion_reason, "handled")
         self.assertIn("id: G1", backend.requests[0][1])
         self.assertEqual(len(app.working_memory.snapshot()), 1)
+        await app.stop()
+
+    async def test_console_context_survives_through_operator_execution(self):
+        backend = ScriptedBackend()
+        app = self.app(backend)
+        await app.start()
+        seen = []
+        run_episode = app._run_operator_episode
+
+        async def record(message, selected_backend, episode, interaction):
+            seen.append(interaction)
+            return await run_episode(
+                message, selected_backend, episode, interaction
+            )
+
+        app._run_operator_episode = record
+        report, stop = await RuntimeConsole(app).execute_async("ask hello")
+        self.assertEqual((report, stop), ("Test: final answer", False))
+        self.assertEqual(seen, [CONSOLE_DIALOGUE])
+        self.assertIs(seen[0], CONSOLE_DIALOGUE)
+        self.assertEqual(app.episode_coordinator.last.trigger_source, "console")
         await app.stop()
 
     async def test_previous_successful_operator_turn_and_episode_ground_e2(self):
@@ -470,8 +493,20 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         app = self.app(backend, voice=voice, tts=tts)
         backend.app = tts.app = app
         await app.start()
+        seen = []
+        run_episode = app._run_operator_episode
+
+        async def record(message, selected_backend, episode, interaction):
+            seen.append(interaction)
+            return await run_episode(
+                message, selected_backend, episode, interaction
+            )
+
+        app._run_operator_episode = record
         self.assertEqual(await app.voice.start(source="console"),
                          "Voice session closed.")
+        self.assertEqual(seen, [VOICE_DIALOGUE, VOICE_DIALOGUE])
+        self.assertTrue(all(context is VOICE_DIALOGUE for context in seen))
         self.assertEqual(backend.episodes, [(1, "voice"), (2, "voice")])
         self.assertEqual(tts.spoken, ["answer 1", "answer 2"])
         self.assertEqual(voice.listen_calls, 2)

@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import FrozenInstanceError
 import json
 import unittest
 
@@ -11,8 +12,10 @@ from embodied_runtime.cognition import CognitionError, CognitionToolCall, TextCo
 from embodied_runtime.console import RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.interaction import (
-    MAX_OPERATOR_MESSAGE_CHARS, ConsoleOperatorMessageChannel, OperatorMessage,
-    OperatorMessageSink,
+    CONSOLE_ADMINISTRATIVE, CONSOLE_DIALOGUE, CONSOLE_NOTIFICATION,
+    VOICE_DIALOGUE, MAX_OPERATOR_MESSAGE_CHARS, ConsoleOperatorMessageChannel,
+    InteractionChannel, InteractionContext, InteractionInitiator,
+    InteractionMode, OperatorMessage, OperatorMessageSink, runtime_notification,
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.state import BodyState, LifecycleState
@@ -24,7 +27,76 @@ class Platform:
         return snapshot()
 
 
+class InteractionIdentityTests(unittest.TestCase):
+    def test_context_is_immutable(self):
+        with self.assertRaises(FrozenInstanceError):
+            CONSOLE_DIALOGUE.response_expected = False
+
+    def test_canonical_contexts(self):
+        self.assertEqual(CONSOLE_DIALOGUE, InteractionContext(
+            InteractionChannel.CONSOLE, InteractionMode.DIALOGUE,
+            InteractionInitiator.OPERATOR, True,
+        ))
+        self.assertEqual(VOICE_DIALOGUE, InteractionContext(
+            InteractionChannel.VOICE, InteractionMode.DIALOGUE,
+            InteractionInitiator.OPERATOR, True,
+        ))
+        self.assertEqual(CONSOLE_NOTIFICATION, InteractionContext(
+            InteractionChannel.CONSOLE, InteractionMode.NOTIFICATION,
+            InteractionInitiator.RUNTIME, False,
+        ))
+        self.assertEqual(CONSOLE_ADMINISTRATIVE, InteractionContext(
+            InteractionChannel.CONSOLE, InteractionMode.ADMINISTRATIVE,
+            InteractionInitiator.OPERATOR, False,
+        ))
+
+    def test_console_sink_and_message_keep_channel_separate_from_provenance(self):
+        sink = ConsoleOperatorMessageChannel()
+        message = OperatorMessage("hello", "initiative", CONSOLE_NOTIFICATION)
+        self.assertEqual(sink.channel, InteractionChannel.CONSOLE)
+        self.assertEqual(message.source, "initiative")
+        self.assertEqual(message.interaction, CONSOLE_NOTIFICATION)
+
+    def test_runtime_notification_constructs_canonical_semantics(self):
+        self.assertEqual(
+            runtime_notification(InteractionChannel.CONSOLE),
+            CONSOLE_NOTIFICATION,
+        )
+
+
+class ConsoleChannelValidationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_accepts_valid_console_notification(self):
+        channel = ConsoleOperatorMessageChannel()
+        message = OperatorMessage("hello", "initiative", CONSOLE_NOTIFICATION)
+        await channel.deliver(message)
+        self.assertIs(await channel.receive(), message)
+
+    async def test_rejects_non_notification_semantics_without_enqueueing(self):
+        invalid = (
+            CONSOLE_DIALOGUE,
+            CONSOLE_ADMINISTRATIVE,
+            runtime_notification(InteractionChannel.VOICE),
+            InteractionContext(
+                InteractionChannel.CONSOLE,
+                InteractionMode.NOTIFICATION,
+                InteractionInitiator.RUNTIME,
+                True,
+            ),
+        )
+        channel = ConsoleOperatorMessageChannel()
+        for interaction in invalid:
+            with self.assertRaises(ValueError):
+                await channel.deliver(OperatorMessage(
+                    "hello", "initiative", interaction
+                ))
+        self.assertTrue(channel._messages.empty())
+
+
 class RecordingSink(OperatorMessageSink):
+    @property
+    def channel(self):
+        return InteractionChannel.CONSOLE
+
     def __init__(self, fail=False):
         self.messages = []
         self.fail = fail
@@ -120,6 +192,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                          ["inspect_self", "schedule_followup", "address_operator"])
         self.assertEqual((sink.messages[0].text, sink.messages[0].source),
                          ("I noticed the reflex.", "initiative"))
+        self.assertEqual(sink.messages[0].interaction, CONSOLE_NOTIFICATION)
         self.assertEqual(backend.results[0], {
             "message": "I noticed the reflex.", "recipient": "operator",
             "status": "applied",
@@ -313,7 +386,9 @@ class ConsoleDeliveryTests(unittest.IsolatedAsyncioTestCase):
             run_console_session(RuntimeConsole(app), terminal, channel)
         )
         await terminal.waiting.wait()
-        await channel.deliver(OperatorMessage("Hello.", "initiative"))
+        await channel.deliver(OperatorMessage(
+            "Hello.", "initiative", CONSOLE_NOTIFICATION
+        ))
         while "Mira: Hello." not in terminal.output:
             await asyncio.sleep(0)
         terminal.release.set()
