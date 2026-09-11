@@ -297,8 +297,8 @@ class AcquisitionFollowupStimulus:
             ))
         else:
             lines.extend((
-                "Both acquisition opportunities are consumed. No further self-inspection "
-                "or scene observation is available.",
+                "Both acquisition opportunities are consumed. No further read-only "
+                "acquisition is available.",
                 "Request at most one available semantic effect, or do nothing.",
             ))
         return "\n".join(lines)

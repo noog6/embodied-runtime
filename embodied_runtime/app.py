@@ -46,7 +46,9 @@ from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, OperatorMessage, OperatorMessageSink,
 )
-from embodied_runtime.memory import PersistentMemoryStore
+from embodied_runtime.memory import (
+    MAX_RECALL_QUERY_CHARS, MemoryRecallProjector, PersistentMemoryStore,
+)
 from embodied_runtime.inspection import (
     HostSelfInspector, SELF_INSPECTION_AREAS, SelfInspectionFact,
     SelfInspectionResult, SelfInspector,
@@ -182,6 +184,26 @@ OBSERVE_SCENE_TOOL = CognitionToolDefinition(
     },
 )
 
+RECALL_MEMORY_TOOL = CognitionToolDefinition(
+    name="recall_memory",
+    description=(
+        "Recall durable long-term memories associated with one exact known entity name "
+        "or alias when remembered knowledge may help the current concern. Persistent "
+        "memory is available only through this deliberate lookup. Supply a concise name "
+        "or alias, not the whole question. Results are historical stored knowledge, not "
+        "current sensor evidence; no match and ambiguous matches are legitimate and "
+        "must not be silently collapsed."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"query": {
+            "type": "string", "minLength": 1, "maxLength": MAX_RECALL_QUERY_CHARS,
+        }},
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+)
+
 SCHEDULE_FOLLOWUP_TOOL = CognitionToolDefinition(
     name="schedule_followup",
     description=(
@@ -305,6 +327,10 @@ class RobotApplication:
             working_memory if working_memory is not None else WorkingMemory()
         )
         self.persistent_memory = persistent_memory_store
+        self._memory_recall = (
+            MemoryRecallProjector(persistent_memory_store)
+            if persistent_memory_store is not None else None
+        )
         self._persistent_memory_closed = False
         self.voice = VoiceInteraction(
             voice_provider,
@@ -709,7 +735,7 @@ class RobotApplication:
                             WorkingMemoryToolOutcome(call.name, result.output)
                         )
                         return result
-                    if call.name in (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name):
+                    if call.name in self._acquisition_tool_names():
                         number = len(acquisitions) + 1
                         LOGGER.info(
                             "[ATTENTION] episode=E%s acquisition=%s/2 tool=%s status=requested",
@@ -724,9 +750,12 @@ class RobotApplication:
                         elif call.name == INSPECT_SELF_TOOL.name:
                             result, inspection = self._execute_self_inspection(call)
                             perception = None
-                        else:
+                        elif call.name == OBSERVE_SCENE_TOOL.name:
                             result, perception = await self._execute_visual_perception(call)
                             inspection = None
+                        else:
+                            result = self._execute_memory_recall(call)
+                            inspection = perception = None
                         acquisition_requests[acquisition_key] = result
                         try:
                             status = json.loads(result.output).get("status", "rejected")
@@ -813,9 +842,8 @@ class RobotApplication:
     def _operator_episode_tools(self, acquisitions_used: int) -> tuple[CognitionToolDefinition, ...]:
         tools = self.cognition_tools()
         if acquisitions_used >= 2:
-            return tuple(tool for tool in tools if tool.name not in (
-                INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name
-            ))
+            return tuple(tool for tool in tools
+                         if tool.name not in self._acquisition_tool_names())
         return tools
 
     def _operator_episode_instructions(
@@ -836,6 +864,12 @@ class RobotApplication:
             f"  acquisitions_remaining: {remaining}",
             "At most one offered capability may be requested in this cognition stage.",
         ]
+        if self._memory_recall is not None:
+            lines.append(
+                "Persistent memory is not automatically in context. recall_memory is a "
+                "deliberate exact-name acquisition; its evidence is historical and may be "
+                "stale, and ambiguous matches must remain explicit."
+            )
         if acquisitions:
             lines.append("Ordered acquisition evidence:")
             for index, acquisition in enumerate(acquisitions, 1):
@@ -871,8 +905,8 @@ class RobotApplication:
             else ""
         )
         inspection_guidance = (
-            "\n\nRead-only inspect_self and observe_scene capabilities may be available "
-            "for bounded missing information. This episode permits at most two acquisition "
+            "\n\nRead-only acquisition capabilities offered in this request may be used for "
+            "bounded missing information. This episode permits at most two acquisition "
             "attempts across separate cognition requests. Use one only when materially "
             "relevant to the active goal; do not acquire information merely because "
             "a capability exists, retry an acquisition, or request the same information. "
@@ -944,6 +978,14 @@ class RobotApplication:
                 result, perception_result = await self._execute_visual_perception(
                     call, expected_goal=expected_goal, autonomous=True
                 )
+            elif call.name == RECALL_MEMORY_TOOL.name:
+                LOGGER.info(
+                    "[ATTENTION] episode=E%s acquisition=1/%s tool=%s status=requested",
+                    episode.id, MAX_AUTONOMOUS_ACQUISITIONS_PER_EPISODE, call.name,
+                )
+                result = self._execute_memory_recall(
+                    call, expected_goal=expected_goal, autonomous=True
+                )
             else:
                 action = call.name
                 if self._active_goal is not expected_goal:
@@ -957,7 +999,7 @@ class RobotApplication:
                 result_status = json.loads(result.output).get("status", "rejected")
             except (json.JSONDecodeError, AttributeError):
                 result_status = "rejected"
-            if call.name in (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name):
+            if call.name in self._acquisition_tool_names():
                 acquisitions.append(InitiativeAcquisitionOutcome(
                     call.name, result_status, result.output,
                     inspection_result=inspection_result,
@@ -1090,7 +1132,7 @@ class RobotApplication:
             consumed = True
             available = (*self.acquisition_tools(), *self.effect_tools())
             inspection = perception = None
-            if call.name in (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name):
+            if call.name in self._acquisition_tool_names():
                 LOGGER.info(
                     "[ATTENTION] episode=E%s acquisition=2/%s tool=%s status=requested",
                     episode.id, MAX_AUTONOMOUS_ACQUISITIONS_PER_EPISODE, call.name,
@@ -1102,13 +1144,17 @@ class RobotApplication:
                     call.name, "capability is not available",
                     log_prefix=log_prefix,
                 )
-            elif call.name in (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name):
+            elif call.name in self._acquisition_tool_names():
                 if call.name == INSPECT_SELF_TOOL.name:
                     result, inspection = self._execute_self_inspection(
                         call, expected_goal=expected_goal, autonomous=True
                     )
-                else:
+                elif call.name == OBSERVE_SCENE_TOOL.name:
                     result, perception = await self._execute_visual_perception(
+                        call, expected_goal=expected_goal, autonomous=True
+                    )
+                else:
+                    result = self._execute_memory_recall(
                         call, expected_goal=expected_goal, autonomous=True
                     )
             else:
@@ -1121,7 +1167,7 @@ class RobotApplication:
                 status = json.loads(result.output).get("status", "rejected")
             except (json.JSONDecodeError, AttributeError):
                 status = "rejected"
-            if call.name in (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name):
+            if call.name in self._acquisition_tool_names():
                 second_acquisition = InitiativeAcquisitionOutcome(
                     call.name, status, result.output,
                     inspection_result=inspection, perception_result=perception,
@@ -1436,7 +1482,13 @@ class RobotApplication:
                 self.state is LifecycleState.RUNNING and self._active_goal is not None):
             return ()
         visual = (OBSERVE_SCENE_TOOL,) if self.visual_perception_available() else ()
-        return (INSPECT_SELF_TOOL, *visual)
+        recall = (RECALL_MEMORY_TOOL,) if self._memory_recall is not None else ()
+        return (INSPECT_SELF_TOOL, *visual, *recall)
+
+    @staticmethod
+    def _acquisition_tool_names() -> tuple[str, ...]:
+        return (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name,
+                RECALL_MEMORY_TOOL.name)
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project only currently permitted autonomous semantic effects."""
@@ -1482,6 +1534,8 @@ class RobotApplication:
         tools.append(INSPECT_SELF_TOOL)
         if self.visual_perception_available():
             tools.append(OBSERVE_SCENE_TOOL)
+        if self._memory_recall is not None:
+            tools.append(RECALL_MEMORY_TOOL)
         return tuple(tools)
 
     def visual_perception_available(self) -> bool:
@@ -1510,7 +1564,33 @@ class RobotApplication:
         if call.name == OBSERVE_SCENE_TOOL.name:
             result, _ = await self._execute_visual_perception(call)
             return result
+        if call.name == RECALL_MEMORY_TOOL.name:
+            return self._execute_memory_recall(call)
         return self._rejected_tool(call.name, "tool is not available")
+
+    def _execute_memory_recall(
+        self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
+        autonomous: bool = False,
+    ) -> CognitionToolResult:
+        try:
+            if self.state is not LifecycleState.RUNNING or self._memory_recall is None:
+                raise RuntimeError("persistent memory recall is not available")
+            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+                raise RuntimeError("expected active goal is no longer current")
+            arguments = self._tool_arguments(call, {"query"})
+            result = self._memory_recall.recall(arguments["query"])
+        except Exception as error:
+            return self._rejected_tool(call.name, str(error))
+        rendered = result.render()
+        memory_count = sum(len(entity.memories) for entity in result.entities)
+        LOGGER.info(
+            "[MEMORY] recall result=%s entities=%s memories=%s truncated=%s",
+            result.result, result.matched_entities, memory_count,
+            str(result.truncated).lower(),
+        )
+        return CognitionToolResult(json.dumps({
+            "status": "applied", "recall": rendered,
+        }, ensure_ascii=False, sort_keys=True))
 
     async def _execute_visual_perception(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,

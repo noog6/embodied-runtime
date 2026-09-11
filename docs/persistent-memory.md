@@ -97,12 +97,45 @@ after a full application stop and a new application opens the same file.
 The existing `memory` and `memory clear` commands still inspect and clear only
 volatile `WorkingMemory`.
 
-Persistent memory is not exposed as a cognition tool, injected into prompts,
-or searched from operator utterances. Only explicit console commands admit
-durable records; conversations, observations, goals, attention, runtime events,
-and telemetry are not admitted automatically. This phase has no automatic
-recall or admission, embeddings, semantic similarity, object-file writing, state-stream
-recording, compaction, deletion, archival, supersession, contradiction policy,
-or collection-specific behavior. SQLite is intended for ordinary serialized
-use by one local runtime process; there are no pools, workers, services, or
-distributed-concurrency mechanisms.
+## Bounded cognition recall
+
+Phase 18.3 exposes configured persistent memory through one read-only cognition
+tool, `recall_memory(query: string)`. Recall is a deliberate Phase 16
+acquisition, so a success, miss, ambiguity, validation failure, or store failure
+uses one of the episode's existing two acquisition attempts. It continues the
+same episode with freshly reconstructed runtime and temporal grounding. No
+memory inventory or search result is automatically injected, and operator text
+is never pre-searched.
+
+The query is one non-empty canonical name or alias of at most 256 characters.
+Lookup uses only the store's exact normalized identity matching. At most five
+matching entities and the eight newest active memory IDs per entity are
+projected. That newest subset is rendered in ascending ID order; entity and
+output truncation are explicit, and rendered text is capped at 12,000
+characters. Misses are explicit. Ambiguous exact matches remain in entity-ID
+order for cognition to address rather than being selected by the runtime.
+Directly linked entity IDs and names are resolved, but recall performs no graph
+traversal and does not load payload bodies.
+
+Persistent recall is historical evidence and may be stale relative to present
+physical reality. Cognition should describe uncorroborated recalled state as
+remembered knowledge; current sensor claims require fresh perception.
+
+```text
+WorkingMemory
+    recent volatile interaction context
+
+PersistentMemory
+    durable historical knowledge
+
+recall_memory
+    bounded deliberate acquisition of relevant persistent knowledge
+```
+
+Only explicit console commands admit durable records. Recall cannot create,
+update, duplicate, or delete entities or memories, and there is no cognition
+memory-writing tool or automatic admission. This phase adds no fuzzy,
+substring, full-text, semantic, embedding, or vector retrieval; ranking by a
+model; object-file retrieval; compaction; archival; supersession; contradiction
+policy; background recall; or new attention trigger or budget. Schema version
+1 and its lifecycle remain unchanged.
