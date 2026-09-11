@@ -1,8 +1,14 @@
 # Interaction identity
 
-Phase 20.4 keeps explicit operator dialogue interaction context authoritative and
-adds authoritative, bounded grounding for an available autonomous notification
-effect without changing runtime authority.
+Phase 20.5 keeps explicit operator dialogue interaction context authoritative and
+makes outbound notification route eligibility and selection an explicit runtime
+policy without changing runtime authority.
+
+> **The model may decide whether to use an offered communication effect. The
+> runtime decides where that effect is allowed to go.**
+
+> **A channel being available for dialogue does not automatically make it
+> available for autonomous notification.**
 
 > **Dialogue expects an exchange. A notification delivers information.**
 
@@ -29,6 +35,17 @@ request-scoped cognition grounding.
 
 One transport can carry multiple interaction modes.
 
+The current eligibility matrix is deliberately small:
+
+| Channel | Dialogue | Administrative | Autonomous notification |
+| --- | --- | --- | --- |
+| console | yes | yes | yes |
+| voice | yes | — | no |
+
+Console is the only current autonomous notification route. Voice remains a
+fully supported operator-dialogue channel, but is not an autonomous notification
+route and cannot be made one merely by configuring a sink object.
+
 Cognition authority and delivery semantics are separate concerns.
 
 Interaction identity is request-scoped grounding, not robot state.
@@ -41,12 +58,27 @@ stage's projected tools, its instructions identify an **Available operator
 notification** and the matching notification policy. The grounding describes the
 effect's destination; it does not describe the autonomous episode.
 
-The notification channel is captured once for the episode from the configured
-`OperatorMessageSink`, using the same runtime-notification identity later attached
-to `OperatorMessage`. Thus initial, refreshed, post-acquisition, and continuation
-instructions use a stable destination wherever `address_operator` remains
-available. A sink alone does not expose grounding when policy has withheld the
-tool. Tool authority and delivery semantics remain separate.
+The authoritative notification-route resolver evaluates the configured
+`OperatorMessageSink` channel. Initiative messaging must be enabled, a sink must
+exist, and its channel must resolve to an eligible route before `address_operator`
+is projected. Cognition sees only that already-selected real destination, not a
+menu of channels, and the tool schema contains only `message`; the model cannot
+select a channel.
+
+The resolved semantic route is captured once for the episode, using the same
+runtime-notification identity later attached to `OperatorMessage`. Thus initial,
+refreshed, post-acquisition, final-effect, and continuation instructions use a
+stable destination wherever `address_operator` remains available. A sink alone
+does not expose grounding when policy has withheld the tool. Tool authority and
+delivery semantics remain separate.
+
+At execution, the application obtains the currently configured sink, resolves
+its eligibility again, and requires its semantic route to match the captured
+route. A replacement sink on the same eligible channel may deliver the message;
+the stale sink object is not retained. If the sink disappears, changes channel,
+or becomes unsupported, delivery is rejected. There is no silent rerouting,
+fallback, retry, queue, or persistence policy. Multi-transport routing remains
+deferred until another real transport exists.
 
 The supported console notification is asynchronous, self-contained plain text in
 the local terminal. It is not an operator dialogue response, does not create or
@@ -61,9 +93,8 @@ start voice interaction, or append a turn to `WorkingMemory`. It remains the
 output of the already-authorized autonomous episode. The existing console queue
 and notification presentation remain responsible for asynchronous display.
 Reply binding, notification persistence and history, acknowledgement tracking,
-voice notifications, channel selection, fallback, and routing among multiple
-channels are deferred; outbound communication/routing policy belongs to Phase
-20.5.
+voice notifications, model channel selection, fallback, and routing among
+multiple production channels remain deferred.
 
 Console dialogue exposes `channel=console`, while voice dialogue exposes
 `channel=voice`; both expose the same dialogue mode, operator initiator, and

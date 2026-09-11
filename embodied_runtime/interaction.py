@@ -127,6 +127,20 @@ def runtime_notification(channel: InteractionChannel) -> InteractionContext:
     )
 
 
+def resolve_notification_route(
+    channel: InteractionChannel,
+) -> InteractionContext | None:
+    """Resolve an eligible autonomous operator-notification route.
+
+    Notification-shaped interactions can be constructed for any known channel;
+    this policy boundary separately determines which channels the runtime is
+    currently willing and able to offer for autonomous delivery.
+    """
+    if channel == InteractionChannel.CONSOLE:
+        return runtime_notification(channel)
+    return None
+
+
 CONSOLE_DIALOGUE = InteractionContext(
     InteractionChannel.CONSOLE, InteractionMode.DIALOGUE,
     InteractionInitiator.OPERATOR, True,

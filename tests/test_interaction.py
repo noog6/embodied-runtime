@@ -17,7 +17,7 @@ from embodied_runtime.interaction import (
     InteractionChannel, InteractionContext, InteractionInitiator,
     InteractionMode, OperatorMessage, OperatorMessageSink, runtime_notification,
     render_dialogue_policy, render_notification_context,
-    render_notification_policy,
+    render_notification_policy, resolve_notification_route,
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.state import BodyState, LifecycleState
@@ -63,6 +63,21 @@ class InteractionIdentityTests(unittest.TestCase):
         self.assertEqual(
             runtime_notification(InteractionChannel.CONSOLE),
             CONSOLE_NOTIFICATION,
+        )
+
+    def test_notification_route_policy_allows_console_and_rejects_voice(self):
+        route = resolve_notification_route(InteractionChannel.CONSOLE)
+        self.assertEqual(route, InteractionContext(
+            InteractionChannel.CONSOLE,
+            InteractionMode.NOTIFICATION,
+            InteractionInitiator.RUNTIME,
+            False,
+        ))
+        self.assertIsNone(resolve_notification_route(InteractionChannel.VOICE))
+        # Structural representation and route eligibility are intentionally distinct.
+        self.assertEqual(
+            runtime_notification(InteractionChannel.VOICE).channel,
+            InteractionChannel.VOICE,
         )
 
     def test_dialogue_context_rendering_is_deterministic(self):
@@ -167,6 +182,14 @@ class RecordingSink(OperatorMessageSink):
         self.messages.append(message)
 
 
+class VoiceRecordingSink(RecordingSink):
+    """Test-only proof that transport presence does not grant route authority."""
+
+    @property
+    def channel(self):
+        return InteractionChannel.VOICE
+
+
 class ScriptedBackend(TextCognitionBackend):
     identifier = "scripted"
 
@@ -221,6 +244,26 @@ class AcquisitionThenNotificationBackend(TextCognitionBackend):
         return "done"
 
 
+class RouteReplacementBackend(TextCognitionBackend):
+    identifier = "route-replacement"
+
+    def __init__(self, replace):
+        self.replace = replace
+        self.instructions = None
+        self.tools = ()
+        self.result = None
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.instructions = instructions
+        self.tools = tools
+        self.replace()
+        self.result = json.loads((await tool_executor(CognitionToolCall(
+            "address_operator", '{"message":"Route-sensitive."}'
+        ))).output)
+        return "done"
+
+
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, backend=None, sink=None, *, actions=False, messages=True,
                  body=None):
@@ -251,6 +294,80 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             "required": ["message"], "additionalProperties": False,
         })
         self.assertNotIn("source", ADDRESS_OPERATOR_TOOL.parameters["properties"])
+        for forbidden in ("channel", "route", "transport", "medium", "destination"):
+            self.assertNotIn(forbidden, ADDRESS_OPERATOR_TOOL.parameters["properties"])
+        await app.stop()
+
+    async def test_voice_sink_does_not_project_or_ground_notifications(self):
+        sink = VoiceRecordingSink()
+        backend = ScriptedBackend()
+        app = self.make_app(backend, sink)
+        await app.start()
+        app.set_goal("goal")
+
+        self.assertNotIn("address_operator", tuple(
+            tool.name for tool in app.initiative_tools()
+        ))
+        await app._request_initiative(AttentionStimulus(
+            "body_orientation_changed", "reflex:test", 1, 0, 0, 0
+        ))
+        instructions = backend.requests[0][1]
+        self.assertNotIn("Available operator notification", instructions)
+        self.assertNotIn("Notification policy", instructions)
+        self.assertEqual(sink.messages, [])
+        self.assertIn("channel: voice", VOICE_DIALOGUE.render())
+        self.assertIn("Dialogue policy", render_dialogue_policy(VOICE_DIALOGUE))
+        await app.stop()
+
+    async def test_delivery_rejects_route_change_without_state_or_memory_effects(self):
+        initial = RecordingSink()
+        replacement = VoiceRecordingSink()
+        app = None
+        backend = RouteReplacementBackend(
+            lambda: setattr(app, "_operator_message_sink", replacement)
+        )
+        app = self.make_app(backend, initial)
+        await app.start()
+        app.set_goal("goal")
+        state = app.runtime_state
+        memory = app.working_memory.snapshot()
+
+        outcome = await app._request_initiative(AttentionStimulus(
+            "body_orientation_changed", "reflex:test", 1, 0, 0, 0
+        ))
+
+        self.assertIn("channel: console", backend.instructions)
+        self.assertIn("address_operator", tuple(tool.name for tool in backend.tools))
+        self.assertEqual(backend.result["status"], "rejected")
+        self.assertEqual(outcome.action_status, "rejected")
+        self.assertEqual(initial.messages, [])
+        self.assertEqual(replacement.messages, [])
+        self.assertIs(app.runtime_state, state)
+        self.assertEqual(app.working_memory.snapshot(), memory)
+        self.assertIsNone(app.episode_coordinator.current)
+        await app.stop()
+
+    async def test_delivery_uses_current_same_channel_replacement(self):
+        initial = RecordingSink()
+        replacement = RecordingSink()
+        app = None
+        backend = RouteReplacementBackend(
+            lambda: setattr(app, "_operator_message_sink", replacement)
+        )
+        app = self.make_app(backend, initial)
+        await app.start()
+        app.set_goal("goal")
+
+        outcome = await app._request_initiative(AttentionStimulus(
+            "body_orientation_changed", "reflex:test", 1, 0, 0, 0
+        ))
+
+        self.assertEqual(backend.result["status"], "applied")
+        self.assertEqual(outcome.action_status, "applied")
+        self.assertEqual(initial.messages, [])
+        self.assertEqual(len(replacement.messages), 1)
+        self.assertEqual(replacement.messages[0].interaction, CONSOLE_NOTIFICATION)
+        self.assertEqual(replacement.messages[0].source, "initiative")
         await app.stop()
 
     async def test_invalid_explicit_operator_contexts_are_rejected_before_effects(self):
