@@ -47,7 +47,8 @@ from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, OperatorMessage, OperatorMessageSink,
 )
 from embodied_runtime.memory import (
-    MAX_RECALL_QUERY_CHARS, MemoryRecallProjector, PersistentMemoryStore,
+    MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
+    MemoryRecallProjector, PersistentMemoryStore,
 )
 from embodied_runtime.inspection import (
     HostSelfInspector, SELF_INSPECTION_AREAS, SelfInspectionFact,
@@ -204,6 +205,38 @@ RECALL_MEMORY_TOOL = CognitionToolDefinition(
     },
 )
 
+REMEMBER_TOOL = CognitionToolDefinition(
+    name="remember",
+    description=(
+        "Persist one durable fact, preference, or simple relationship that the operator "
+        "directly stated in the current utterance and that is likely useful beyond this "
+        "session. The subject must already exist in persistent memory by exact canonical "
+        "name or alias, and that exact subject reference must occur in the evidence. "
+        "Provide a concise structured predicate/value and a short, complete verbatim "
+        "evidence clause from the current operator message; the evidence becomes the "
+        "durable text. For a relationship, its optional related entity must also occur "
+        "in the evidence and must equal the structured value. "
+        "Do not store guesses, assistant-generated conclusions, recalled information, "
+        "transient state, jokes or sarcasm, uncertain implications, or ordinary "
+        "conversation merely because this capability exists. This is a write effect; "
+        "request at most one memory proposal."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "subject": {"type": "string", "minLength": 1, "maxLength": 256},
+            "kind": {"type": "string", "enum": ["fact", "preference", "relationship"]},
+            "predicate": {"type": "string", "minLength": 1, "maxLength": 64},
+            "value": {"type": "string", "minLength": 1, "maxLength": 500},
+            "evidence": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "related_entity": {"type": "string", "minLength": 1, "maxLength": 256},
+            "related_role": {"type": "string", "minLength": 1, "maxLength": 64},
+        },
+        "required": ["subject", "kind", "predicate", "value", "evidence"],
+        "additionalProperties": False,
+    },
+)
+
 SCHEDULE_FOLLOWUP_TOOL = CognitionToolDefinition(
     name="schedule_followup",
     description=(
@@ -329,6 +362,10 @@ class RobotApplication:
         self.persistent_memory = persistent_memory_store
         self._memory_recall = (
             MemoryRecallProjector(persistent_memory_store)
+            if persistent_memory_store is not None else None
+        )
+        self._memory_admission = (
+            MemoryAdmission(persistent_memory_store)
             if persistent_memory_store is not None else None
         )
         self._persistent_memory_closed = False
@@ -772,9 +809,14 @@ class RobotApplication:
                             episode.id, number, call.name, status,
                         )
                     else:
-                        result = await self._execute_cognition_tool(
-                            call, expected_goal=grounded_goal
-                        )
+                        if call.name == REMEMBER_TOOL.name:
+                            result = self._execute_memory_admission(
+                                call, message, episode.trigger_source
+                            )
+                        else:
+                            result = await self._execute_cognition_tool(
+                                call, expected_goal=grounded_goal
+                            )
                     tool_outcomes.append(WorkingMemoryToolOutcome(call.name, result.output))
                     return result
 
@@ -869,6 +911,14 @@ class RobotApplication:
                 "Persistent memory is not automatically in context. recall_memory is a "
                 "deliberate exact-name acquisition; its evidence is historical and may be "
                 "stale, and ambiguous matches must remain explicit."
+            )
+            lines.append(
+                "Durable memory admission is selective. Use remember only for durable "
+                "facts, preferences, or simple relationships directly stated by the "
+                "operator in the current utterance and likely useful beyond this session. "
+                "Do not persist guesses, recalled information, transient state, ordinary "
+                "conversation, jokes/sarcasm, or assistant-generated conclusions. The "
+                "subject must already exist in persistent memory."
             )
         if acquisitions:
             lines.append("Ordered acquisition evidence:")
@@ -1536,7 +1586,49 @@ class RobotApplication:
             tools.append(OBSERVE_SCENE_TOOL)
         if self._memory_recall is not None:
             tools.append(RECALL_MEMORY_TOOL)
+            tools.append(REMEMBER_TOOL)
         return tuple(tools)
+
+    def _execute_memory_admission(
+        self, call: CognitionToolCall, current_utterance: str, source_label: str,
+    ) -> CognitionToolResult:
+        try:
+            if self.state is not LifecycleState.RUNNING or self._memory_admission is None:
+                raise RuntimeError("persistent memory admission is not available")
+            required = {"subject", "kind", "predicate", "value", "evidence"}
+            optional = {"related_entity", "related_role"}
+            arguments = json.loads(call.arguments)
+            if not isinstance(arguments, dict):
+                raise ValueError("arguments must be a JSON object")
+            if not required <= set(arguments) or not set(arguments) <= required | optional:
+                raise ValueError(
+                    "subject, kind, predicate, value, and evidence are required; "
+                    "only related_entity and related_role are optional"
+                )
+            proposal = MemoryAdmissionProposal(**arguments)
+            result = self._memory_admission.admit(
+                proposal, current_utterance=current_utterance,
+                source_label=source_label,
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            LOGGER.info("[MEMORY] admission result=rejected reason=validation")
+            return CognitionToolResult(json.dumps({
+                "status": "rejected", "error": str(error),
+            }, sort_keys=True))
+        except Exception as error:
+            LOGGER.info("[MEMORY] admission result=rejected reason=backend")
+            return CognitionToolResult(json.dumps({
+                "status": "rejected", "error": str(error),
+            }, sort_keys=True))
+        if result.status == "applied":
+            LOGGER.info(
+                "[MEMORY] admission result=%s entity=%s memory=%s",
+                result.admission, result.entity, result.memory,
+            )
+        else:
+            reason = "conflict" if result.conflicts else "validation"
+            LOGGER.info("[MEMORY] admission result=rejected reason=%s", reason)
+        return CognitionToolResult(json.dumps(result.as_dict(), sort_keys=True))
 
     def visual_perception_available(self) -> bool:
         camera = self.camera_backend
