@@ -140,25 +140,28 @@ class VoiceInteraction:
         )
 
     async def _run_wake_listener(self) -> None:
+        ignored_huhs = 0
+        LOGGER.info(
+            "[VOICE] wake_listener words=%r status=ready",
+            sorted(self._wake_words),
+        )
         try:
             while not self._stopping:
                 await self._wake_enabled.wait()
                 if self._stopping:
                     break
-                LOGGER.info(
-                    "[VOICE] wake_listener words=%r status=ready",
-                    sorted(self._wake_words),
-                )
                 async with self._microphone_lock:
                     if not self._wake_enabled.is_set() or self._stopping:
                         continue
                     heard = await self._provider.listen()
                 normalized = heard.strip().casefold() if heard is not None else ""
-                if normalized in self._wake_words:
+                if normalized == "huh":
+                    ignored_huhs += 1
+                elif normalized in self._wake_words:
                     LOGGER.info("[VOICE] wake_detected heard=%r", heard.strip())
                     await self.start(source="wake_word")
                 elif normalized:
-                    LOGGER.info(
+                    LOGGER.debug(
                         "[VOICE] wake_rejected text=%r",
                         heard.strip(),
                     )
@@ -167,6 +170,11 @@ class VoiceInteraction:
         except Exception as error:
             LOGGER.warning(
                 "[VOICE] wake_listener_failed error=%s", type(error).__name__
+            )
+        finally:
+            LOGGER.info(
+                "[VOICE] wake_listener status=stopped ignored_huhs=%s",
+                ignored_huhs,
             )
 
     async def stop(self) -> None:
