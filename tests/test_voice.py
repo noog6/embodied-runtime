@@ -3,6 +3,7 @@ import argparse
 import io
 import sys
 import tempfile
+import threading
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -110,6 +111,47 @@ class CoordinatedVoiceProvider:
                 return
             await asyncio.sleep(0.001)
         raise AssertionError(f"expected {count} listens, got {self.listen_calls}")
+
+
+class LostFirstStopVoiceProvider:
+    """Model a recognizer that clears a stop arriving just before capture."""
+
+    def __init__(self):
+        self.listen_called = asyncio.Event()
+        self.capture_entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.stop_calls = 0
+        self.active_listeners = 0
+        self.tts = FakeTextToSpeechProvider(self)
+
+    async def listen(self):
+        self.listen_called.set()
+        await self.capture_entered.wait()
+        self.active_listeners += 1
+        try:
+            await self.release.wait()
+            return None
+        finally:
+            self.active_listeners -= 1
+
+    async def stop_listening(self):
+        self.stop_calls += 1
+        if self.stop_calls == 1:
+            return
+        if self.stop_calls == 2:
+            # Let listen enter only after two stop requests, then model the
+            # vendor clearing and losing both requests on capture entry.
+            self.capture_entered.set()
+            while not self.active_listeners:
+                await asyncio.sleep(0)
+            return
+        self.release.set()
+
+    async def play_engagement_cue(self):
+        pass
+
+    async def close(self):
+        pass
 
 
 class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
@@ -500,6 +542,101 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(voice.wake_active)
         self.assertEqual(provider.active_listeners, 0)
 
+    async def test_wake_shutdown_retries_stop_lost_during_capture_entry(self):
+        provider = LostFirstStopVoiceProvider()
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), wake_words=["mira"]
+        )
+        voice.start_wake_listener()
+        await provider.listen_called.wait()
+
+        await asyncio.wait_for(voice.stop(), 0.5)
+
+        self.assertEqual(provider.stop_calls, 3)
+        self.assertEqual(provider.active_listeners, 0)
+        self.assertIsNone(voice._wake_listen_task)
+        self.assertFalse(voice.wake_active)
+
+    async def test_shutdown_does_not_restart_wake_during_bounded_session(self):
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), VoiceSessionPolicy(1, 1),
+            wake_words=["mira"],
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        session = asyncio.create_task(voice.start(source="console"))
+        await provider.wait_for_listens(2)
+
+        await asyncio.wait_for(voice.stop(), 0.1)
+
+        with self.assertRaises(asyncio.CancelledError):
+            await session
+        self.assertEqual(provider.listen_calls, 2)
+        self.assertEqual(provider.max_active_listeners, 1)
+        self.assertEqual(provider.active_listeners, 0)
+        self.assertFalse(voice.wake_active)
+
+    async def test_wake_shutdown_timeout_is_explicit_and_retains_ownership(self):
+        provider = CoordinatedVoiceProvider()
+        provider.stop_listening = AsyncMock()
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), wake_words=["mira"]
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+
+        with patch(
+            "embodied_runtime.voice._WAKE_CAPTURE_STOP_TIMEOUT_SECONDS", 0.02
+        ), patch(
+            "embodied_runtime.voice._WAKE_CAPTURE_STOP_RETRY_SECONDS", 0.005
+        ), self.assertLogs("embodied_runtime.voice", level="ERROR") as logs:
+            with self.assertRaisesRegex(TimeoutError, "wake capture did not stop"):
+                await voice.stop()
+
+        self.assertTrue(voice.wake_active)
+        self.assertIsNotNone(voice._wake_listen_task)
+        self.assertEqual(provider.active_listeners, 1)
+        self.assertTrue(any("wake_capture_stop_timeout" in line for line in logs.output))
+
+        await provider.results.put(None)
+        await voice.stop()
+        self.assertEqual(provider.active_listeners, 0)
+        self.assertFalse(voice.wake_active)
+
+    async def test_repeated_stop_failures_do_not_cancel_owned_wake_capture(self):
+        provider = CoordinatedVoiceProvider()
+        cooperative_stop = provider.stop_listening
+        provider.stop_listening = AsyncMock(side_effect=RuntimeError("stop failed"))
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), wake_words=["mira"]
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        wake_capture = voice._wake_listen_task
+        self.assertIsNotNone(wake_capture)
+
+        with patch(
+            "embodied_runtime.voice._WAKE_CAPTURE_STOP_TIMEOUT_SECONDS", 0.02
+        ), patch(
+            "embodied_runtime.voice._WAKE_CAPTURE_STOP_RETRY_SECONDS", 0.005
+        ), self.assertLogs("embodied_runtime.voice", level="ERROR"):
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                await voice.stop()
+
+        self.assertGreater(provider.stop_listening.await_count, 1)
+        self.assertIs(voice._wake_listen_task, wake_capture)
+        self.assertFalse(wake_capture.done())
+        self.assertEqual(wake_capture.cancelling(), 0)
+        self.assertEqual(provider.active_listeners, 1)
+        self.assertTrue(voice.wake_active)
+
+        provider.stop_listening = cooperative_stop
+        await voice.stop()
+        self.assertTrue(wake_capture.done())
+        self.assertEqual(provider.active_listeners, 0)
+        self.assertFalse(voice.wake_active)
+
     async def test_wake_shutdown_stop_failure_still_joins_all_tasks(self):
         provider = CoordinatedVoiceProvider()
         voice = VoiceInteraction(
@@ -623,6 +760,40 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             ("enable",), ("say", "answer"), ("disable",),
         ])
         self.assertEqual(calls.count(("espeak",)), 1)
+
+    async def test_fusion_listen_cancellation_waits_for_blocking_worker(self):
+        entered = threading.Event()
+        released = threading.Event()
+
+        class Vosk:
+            def __init__(self, *, language):
+                pass
+
+            def listen(self):
+                entered.set()
+                released.wait()
+                return None
+
+            def stop_listening(self):
+                released.set()
+
+        fusion_hat = ModuleType("fusion_hat")
+        stt = ModuleType("fusion_hat.stt")
+        stt.Vosk = Vosk
+        provider = FusionHatVoiceProvider()
+        with patch.dict(sys.modules, {
+            "fusion_hat": fusion_hat, "fusion_hat.stt": stt,
+        }):
+            listen_task = asyncio.create_task(provider.listen())
+            await asyncio.to_thread(entered.wait)
+            listen_task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(listen_task.done())
+            await provider.stop_listening()
+            with self.assertRaises(asyncio.CancelledError):
+                await listen_task
+
+        self.assertTrue(released.is_set())
 
     async def test_piper_is_lazy_reused_and_plays_in_memory_wav(self):
         calls = []

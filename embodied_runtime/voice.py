@@ -20,6 +20,9 @@ import wave
 
 LOGGER = logging.getLogger(__name__)
 
+_WAKE_CAPTURE_STOP_RETRY_SECONDS = 0.1
+_WAKE_CAPTURE_STOP_TIMEOUT_SECONDS = 2.0
+
 
 class PiperTTSUnavailableError(RuntimeError):
     """Raised when selected local Piper speech cannot be initialized."""
@@ -81,6 +84,7 @@ class VoiceInteraction:
             word.strip().casefold() for word in wake_words or ()
         )
         self._wake_task: asyncio.Task[None] | None = None
+        self._wake_listen_task: asyncio.Task[str | None] | None = None
         self._wake_enabled = asyncio.Event()
         self._microphone_lock = asyncio.Lock()
         self._stopping = False
@@ -153,7 +157,16 @@ class VoiceInteraction:
                 async with self._microphone_lock:
                     if not self._wake_enabled.is_set() or self._stopping:
                         continue
-                    heard = await self._provider.listen()
+                    self._wake_listen_task = asyncio.create_task(
+                        self._provider.listen(), name="voice-wake-capture"
+                    )
+                    try:
+                        heard = await asyncio.shield(self._wake_listen_task)
+                    finally:
+                        await asyncio.gather(
+                            self._wake_listen_task, return_exceptions=True
+                        )
+                        self._wake_listen_task = None
                 normalized = heard.strip().casefold() if heard is not None else ""
                 if normalized == "huh":
                     ignored_huhs += 1
@@ -188,16 +201,63 @@ class VoiceInteraction:
             stop_error = error
             LOGGER.exception("[VOICE] capture_stop_failed")
         wake_task = self._wake_task
+        wake_capture_timed_out = False
         if wake_task is not None:
-            wake_task.cancel()
-            await asyncio.gather(wake_task, return_exceptions=True)
-            self._wake_task = None
+            wake_listen_task = self._wake_listen_task
+            if wake_listen_task is not None and not wake_listen_task.done():
+                capture_error = await self._stop_and_join_wake_capture(
+                    wake_listen_task
+                )
+                if capture_error is not None:
+                    if stop_error is None:
+                        stop_error = capture_error
+                    wake_capture_timed_out = isinstance(capture_error, TimeoutError)
         task = self._session_task
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if wake_task is not None and not wake_capture_timed_out:
+            await asyncio.gather(wake_task, return_exceptions=True)
+            self._wake_task = None
         if stop_error is not None:
             raise stop_error
+
+    async def _stop_and_join_wake_capture(
+        self, wake_listen_task: asyncio.Task[str | None]
+    ) -> Exception | None:
+        """Cooperatively stop an owned wake capture within a fixed deadline."""
+        assert self._provider is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _WAKE_CAPTURE_STOP_TIMEOUT_SECONDS
+        stop_error: Exception | None = None
+        while not wake_listen_task.done():
+            try:
+                await self._provider.stop_listening()
+            except Exception as error:
+                if stop_error is None:
+                    stop_error = error
+                LOGGER.exception("[VOICE] wake_capture_stop_failed")
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(wake_listen_task),
+                    min(_WAKE_CAPTURE_STOP_RETRY_SECONDS, remaining),
+                )
+            except TimeoutError:
+                continue
+
+        if not wake_listen_task.done():
+            timeout_error = TimeoutError(
+                "wake capture did not stop within "
+                f"{_WAKE_CAPTURE_STOP_TIMEOUT_SECONDS:g} seconds"
+            )
+            LOGGER.error("[VOICE] wake_capture_stop_timeout")
+            return timeout_error
+        await asyncio.gather(wake_listen_task, return_exceptions=True)
+        return stop_error
 
     async def _run(self, source: str) -> str:
         assert self._provider is not None
@@ -308,7 +368,14 @@ class FusionHatVoiceProvider:
         return self._stt
 
     async def listen(self) -> str | None:
-        return await asyncio.to_thread(self._listen_sync)
+        # Shield the executor future so cancellation of its asyncio owner still
+        # joins the blocking recognizer rather than abandoning its worker.
+        worker = asyncio.create_task(asyncio.to_thread(self._listen_sync))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await worker
+            raise
 
     def _listen_sync(self) -> str | None:
         return self._ensure_stt().listen()
