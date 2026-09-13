@@ -353,7 +353,54 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cognition.await_args.args, ("question",))
         await voice.stop()
 
-    async def test_rejected_wake_logs_only_non_empty_text_and_never_calls_cognition(self):
+    async def test_wake_listener_logs_ready_once_across_rejected_cycles(self):
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), wake_words=["mira", "mirror"]
+        )
+
+        with self.assertLogs("embodied_runtime.voice", level="DEBUG") as logs:
+            voice.start_wake_listener()
+            await provider.wait_for_listens(1)
+            for listen_count, result in enumerate(
+                ("first rejection", "second rejection"), start=2
+            ):
+                await provider.feed(result)
+                await provider.wait_for_listens(listen_count)
+            await voice.stop()
+
+        ready = [entry for entry in logs.output if "status=ready" in entry]
+        self.assertEqual(len(ready), 1)
+
+    async def test_huh_is_silently_ignored_counted_and_summarized_once(self):
+        provider = CoordinatedVoiceProvider()
+        cognition = AsyncMock()
+        voice = VoiceInteraction(
+            provider, provider.tts, cognition,
+            wake_words=["huh", "huh mirror", "mira", "mirror"],
+        )
+
+        with self.assertLogs("embodied_runtime.voice", level="DEBUG") as logs:
+            voice.start_wake_listener()
+            await provider.wait_for_listens(1)
+            for listen_count, result in enumerate(("huh", " HUH "), start=2):
+                await provider.feed(result)
+                await provider.wait_for_listens(listen_count)
+            await voice.stop()
+
+        cognition.assert_not_awaited()
+        self.assertEqual(provider.cue_calls, 0)
+        self.assertFalse(any("wake_rejected" in entry for entry in logs.output))
+        summaries = [
+            entry for entry in logs.output
+            if "wake_listener status=stopped" in entry
+        ]
+        self.assertEqual(summaries, [
+            "INFO:embodied_runtime.voice:"
+            "[VOICE] wake_listener status=stopped ignored_huhs=2"
+        ])
+
+    async def test_rejected_wake_logs_only_non_empty_text_at_debug(self):
         provider = CoordinatedVoiceProvider()
         cognition = AsyncMock()
         voice = VoiceInteraction(
@@ -362,7 +409,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         voice.start_wake_listener()
         await provider.wait_for_listens(1)
 
-        with self.assertLogs("embodied_runtime.voice", level="INFO") as logs:
+        with self.assertLogs("embodied_runtime.voice", level="DEBUG") as logs:
             results = ("hi mirror", "unrelated speech", "   ", None)
             for listen_count, result in enumerate(results, start=2):
                 await provider.feed(result)
@@ -372,11 +419,15 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             rejected,
             [
-                "INFO:embodied_runtime.voice:[VOICE] wake_rejected text='hi mirror'",
-                "INFO:embodied_runtime.voice:"
+                "DEBUG:embodied_runtime.voice:[VOICE] wake_rejected text='hi mirror'",
+                "DEBUG:embodied_runtime.voice:"
                 "[VOICE] wake_rejected text='unrelated speech'",
             ],
         )
+        self.assertFalse(any(
+            entry.startswith("INFO:") and "wake_rejected" in entry
+            for entry in logs.output
+        ))
         cognition.assert_not_awaited()
         self.assertEqual(provider.cue_calls, 0)
         await voice.stop()
