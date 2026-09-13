@@ -290,9 +290,18 @@ class OperatorDeliveryTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_app(backend, self.catalog(sink))
         await app.start()
         before = len(app.working_memory)
-        response = await app.request_cognition(
-            "Send a list of those ideas to the console.", interaction=VOICE_DIALOGUE
+        with self.assertLogs("embodied_runtime.app", level="INFO") as captured:
+            response = await app.request_cognition(
+                "Send a list of those ideas to the console.", interaction=VOICE_DIALOGUE
+            )
+        logs = "\n".join(captured.output)
+        self.assertIn(
+            "[INTERACTION] episode=E1 mode=delivery destination=console "
+            "source=voice status=requested", logs,
         )
+        self.assertIn("episode=E1 mode=delivery destination=console", logs)
+        self.assertIn("status=applied", logs)
+        self.assertNotIn("Ideas:", logs)
         instructions, tools = backend.requests[0]
         delivery = next(tool for tool in tools if tool.name == "deliver_message")
         self.assertEqual(delivery.parameters["required"], ["destination", "message"])

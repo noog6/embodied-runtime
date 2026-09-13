@@ -294,11 +294,25 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         goal = app.set_goal("Keep body at 35/-10")
         app.working_memory.append("operator", "history")
         memory = app.working_memory.snapshot()
-        await app.observe_presence(present=True, source="test")
-        await asyncio.wait_for(backend.started.wait(), 1)
-        while app.attention.status().state == "in_flight":
+        with self.assertLogs("embodied_runtime", level="INFO") as captured:
+            await app.observe_presence(present=True, source="test")
+            await asyncio.wait_for(backend.started.wait(), 1)
+            while app.attention.status().state == "in_flight":
+                await asyncio.sleep(0)
             await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        logs = "\n".join(captured.output)
+        self.assertIn(
+            "[INITIATIVE] episode=E1 goal=G1 stage=initial backend=fake "
+            "request=started", logs,
+        )
+        self.assertIn(
+            "episode=E1 goal=G1 tool=orient_body class=effect status=requested",
+            logs,
+        )
+        self.assertIn(
+            "episode=E1 goal=G1 tool=orient_body class=effect status=applied",
+            logs,
+        )
         self.assertEqual(len(backend.requests), 1)
         message, initial, tools, executor, refresh = backend.requests[0]
         self.assertEqual(message, ACTION_INITIATIVE_REQUEST)

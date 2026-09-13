@@ -63,18 +63,25 @@ class TemporalFollowupController:
         self._task = asyncio.create_task(
             self._wait(pending), name="temporal:followup"
         )
-        LOGGER.info("[TEMPORAL] status=scheduled delay_s=%s", delay_seconds)
+        LOGGER.info(
+            "[TEMPORAL] goal=G%s status=scheduled delay_s=%s",
+            goal.id, delay_seconds,
+        )
         return pending
 
     def cancel(self, reason: str) -> bool:
         if self._pending is None:
             return False
+        pending = self._pending
         self._pending = None
         self._due_pending = False
         task, self._task = self._task, None
         if task is not None and not task.done():
             task.cancel()
-        LOGGER.info("[TEMPORAL] status=cancelled reason=%s", reason)
+        LOGGER.info(
+            "[TEMPORAL] goal=G%s status=cancelled reason=%s",
+            pending.goal.id, reason,
+        )
         return True
 
     async def stop(self) -> None:
@@ -132,13 +139,19 @@ class TemporalFollowupController:
             return
         self._task = None
         if not self._is_running():
-            LOGGER.info("[TEMPORAL] status=cancelled reason=shutdown")
+            LOGGER.info(
+                "[TEMPORAL] goal=G%s status=cancelled reason=shutdown",
+                pending.goal.id,
+            )
             return
         if self._current_goal() is not pending.goal:
-            LOGGER.info("[TEMPORAL] status=cancelled reason=goal_changed")
+            LOGGER.info(
+                "[TEMPORAL] goal=G%s status=cancelled reason=goal_changed",
+                pending.goal.id,
+            )
             return
         self._due_pending = True
-        LOGGER.info("[TEMPORAL] status=due")
+        LOGGER.info("[TEMPORAL] goal=G%s status=due", pending.goal.id)
         await self._events.publish(TemporalFollowupDue(
             source="temporal_followup", purpose=pending.purpose,
             delay_seconds=pending.delay_seconds, bound_goal=pending.goal,

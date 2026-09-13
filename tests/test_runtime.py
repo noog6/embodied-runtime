@@ -4,7 +4,10 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.app import ApplicationOptions, LifecycleState, RobotApplication
-from embodied_runtime.cli import build_cognition_backend, build_hardware_backend, build_parser, format_platform, format_summary, main
+from embodied_runtime.cli import (
+    _run_console_application, build_cognition_backend, build_hardware_backend,
+    build_parser, format_platform, format_summary, main,
+)
 from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
 from embodied_runtime.hardware.fusion_hat import (
     FusionHatHardwareBackend,
@@ -204,6 +207,49 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         with patch("embodied_runtime.app.LOGGER.info", side_effect=record_log):
             await self.application.stop()
         self.assertEqual(bus_running_when_logged, [False])
+
+    async def test_console_cancellation_logs_lifecycle_once(self) -> None:
+        class WaitingTerminal:
+            def write(self, _text):
+                pass
+
+            async def read_line(self, _prompt):
+                await asyncio.Event().wait()
+
+        with self.assertLogs(level="INFO") as captured:
+            task = asyncio.create_task(_run_console_application(
+                self.application, WaitingTerminal(), None  # type: ignore[arg-type]
+            ))
+            while self.application.state is not LifecycleState.RUNNING:
+                await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        lifecycle = [line.rsplit(" ", 1)[-1] for line in captured.output
+                     if "[APP]" in line]
+        self.assertEqual(lifecycle.count("interrupted"), 1)
+        self.assertEqual(lifecycle.count("stopping"), 1)
+        self.assertEqual(lifecycle.count("stopped"), 1)
+        self.assertLess(lifecycle.index("interrupted"), lifecycle.index("stopping"))
+        self.assertLess(lifecycle.index("stopping"), lifecycle.index("stopped"))
+
+    async def test_console_quit_logs_stop_without_interrupt(self) -> None:
+        class QuitTerminal:
+            def write(self, _text):
+                pass
+
+            async def read_line(self, _prompt):
+                return "quit"
+
+        with self.assertLogs(level="INFO") as captured:
+            result = await _run_console_application(
+                self.application, QuitTerminal(), None  # type: ignore[arg-type]
+            )
+        self.assertEqual(result, 0)
+        logs = "\n".join(captured.output)
+        self.assertNotIn("[APP] interrupted", logs)
+        self.assertEqual(logs.count("[APP] stopping"), 1)
+        self.assertEqual(logs.count("[APP] stopped"), 1)
 
 
 class CliTests(unittest.TestCase):

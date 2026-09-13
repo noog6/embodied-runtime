@@ -260,7 +260,14 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_app(); await app.start(); goal = app.set_goal("goal")
         app.working_memory.append("old", "turn")
         state, memory = app.runtime_state, app.working_memory.snapshot()
-        result = await self.schedule(app, '{"delay_seconds": 30, "purpose": "  revisit  "}')
+        with self.assertLogs("embodied_runtime", level="INFO") as captured:
+            result = await self.schedule(
+                app, '{"delay_seconds": 30, "purpose": "  revisit  "}'
+            )
+        self.assertIn(
+            "[TEMPORAL] goal=G1 status=scheduled delay_s=30",
+            "\n".join(captured.output),
+        )
         self.assertEqual(json.loads(result.output)["status"], "applied")
         self.assertEqual(app.temporal.pending.purpose, "revisit")
         self.assertIs(app.temporal.pending.goal, goal)
@@ -268,8 +275,12 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.working_memory.snapshot(), memory)
         self.assertEqual(app.attention.status().last_trigger, None)
         original = app.temporal.pending
-        rejected = await self.schedule(app, '{"delay_seconds": 40, "purpose": "other"}')
+        with self.assertLogs("embodied_runtime.app", level="INFO") as rejected_logs:
+            rejected = await self.schedule(
+                app, '{"delay_seconds": 40, "purpose": "other"}'
+            )
         self.assertEqual(json.loads(rejected.output)["status"], "rejected")
+        self.assertNotIn("status=scheduled", "\n".join(rejected_logs.output))
         self.assertIs(app.temporal.pending, original)
         await app.stop()
 

@@ -265,9 +265,15 @@ class MemoryAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         store.create_entity("person", "Nick"); gordon = store.create_entity("object", "Gordon")
         app, backend = self.make_app(store, ["remember"])
         await app.start()
-        await app.handle_operator_utterance(
-            "Please remember that Gordon's favorite snack is herring.", source="voice"
-        )
+        with self.assertLogs("embodied_runtime.app", level="INFO") as captured:
+            await app.handle_operator_utterance(
+                "Please remember that Gordon's favorite snack is herring.", source="voice"
+            )
+        logs = "\n".join(captured.output)
+        self.assertIn("[MEMORY] episode=E1 admission status=requested", logs)
+        self.assertIn("admission result=created episode=E1 status=applied", logs)
+        self.assertNotIn("favorite snack", logs)
+        self.assertNotIn("herring", logs)
         self.assertEqual(len(backend.requests), 1)
         self.assertIn("remember", backend.requests[0][1])
         self.assertNotIn("remember", app._acquisition_tool_names())
