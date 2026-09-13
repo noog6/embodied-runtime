@@ -357,6 +357,27 @@ def format_platform(snapshot: PlatformSnapshot) -> str:
     )
 
 
+async def _run_console_application(
+    application: RobotApplication, terminal: AsyncLineTerminal,
+    message_channel: ConsoleOperatorMessageChannel | None,
+) -> int:
+    """Own the console's interrupt and cleanup lifecycle in one boundary."""
+    try:
+        await application.start()
+        LOGGER.info("[CONSOLE] mode=local status=ready")
+        await run_console_session(
+            RuntimeConsole(application), terminal, message_channel,
+        )
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # SIGINT is translated to task cancellation by modern asyncio, while
+        # some selector/platform combinations surface KeyboardInterrupt here.
+        LOGGER.info("[APP] interrupted")
+        raise
+    finally:
+        await application.stop()
+    return 0
+
+
 async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
@@ -423,19 +444,9 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
         return 0
 
     if args.console:
-        try:
-            await application.start()
-            LOGGER.info("[CONSOLE] mode=local status=ready")
-            await run_console_session(
-                RuntimeConsole(application), AsyncLineTerminal(no_color=args.no_color),
-                message_channel,
-            )
-        except asyncio.CancelledError:
-            LOGGER.info("[APP] interrupted")
-            raise
-        finally:
-            await application.stop()
-        return 0
+        return await _run_console_application(
+            application, AsyncLineTerminal(no_color=args.no_color), message_channel
+        )
 
     await application.run()
     return 0

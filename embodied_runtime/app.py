@@ -526,18 +526,19 @@ class RobotApplication:
         self._active_goal = None
         self._active_goal_started_monotonic = None
         self.temporal.cancel("goal_changed")
-        LOGGER.info("[GOAL] status=%s", outcome)
+        LOGGER.info("[GOAL] goal=G%s status=%s", previous.id, outcome)
         return previous
 
     def clear_goal(self) -> bool:
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Clearing a goal requires a running application")
-        cleared = self._active_goal is not None
+        previous = self._active_goal
+        cleared = previous is not None
         self._active_goal = None
         self._active_goal_started_monotonic = None
         if cleared:
             self.temporal.cancel("goal_changed")
-            LOGGER.info("[GOAL] status=cleared")
+            LOGGER.info("[GOAL] goal=G%s status=cleared", previous.id)
         return cleared
 
     def _set_lifecycle(self, lifecycle: LifecycleState) -> None:
@@ -815,6 +816,7 @@ class RobotApplication:
         tool_outcomes: list[WorkingMemoryToolOutcome] = []
         acquisitions: list[InitiativeAcquisitionOutcome] = []
         acquisition_requests: dict[tuple[str, str], CognitionToolResult] = {}
+        stage_name = "initial"
         try:
             # Explicitly bounded grammar: initial decision, then at most two
             # post-acquisition decisions. A non-acquisition decision terminates.
@@ -835,12 +837,29 @@ class RobotApplication:
                     if self.state is not LifecycleState.RUNNING:
                         raise asyncio.CancelledError
                     if capability_consumed:
-                        return self._rejected_tool(
+                        LOGGER.info(
+                            "[COGNITION] episode=E%s tool=%s class=unavailable "
+                            "status=requested", episode.id, call.name,
+                        )
+                        result = self._rejected_tool(
                             call.name, "operator capability request already consumed"
                         )
+                        LOGGER.info(
+                            "[COGNITION] episode=E%s tool=%s class=unavailable "
+                            "status=rejected", episode.id, call.name,
+                        )
+                        return result
                     capability_consumed = True
                     if not any(tool.name == call.name for tool in tools):
+                        LOGGER.info(
+                            "[COGNITION] episode=E%s tool=%s class=unavailable "
+                            "status=requested", episode.id, call.name,
+                        )
                         result = self._rejected_tool(call.name, "tool is not available")
+                        LOGGER.info(
+                            "[COGNITION] episode=E%s tool=%s class=unavailable "
+                            "status=rejected", episode.id, call.name,
+                        )
                         tool_outcomes.append(
                             WorkingMemoryToolOutcome(call.name, result.output)
                         )
@@ -882,23 +901,36 @@ class RobotApplication:
                             episode.id, number, call.name, status,
                         )
                     else:
+                        LOGGER.info(
+                            "[COGNITION] episode=E%s tool=%s class=effect status=requested",
+                            episode.id, call.name,
+                        )
                         if call.name == "deliver_message":
                             result = await self._execute_deliver_message(
                                 call, tools, delivery_destinations,
-                                episode.trigger_source,
+                                episode.trigger_source, episode_id=episode.id,
                             )
                         elif call.name == REMEMBER_TOOL.name:
                             result = self._execute_memory_admission(
-                                call, message, episode.trigger_source
+                                call, message, episode.trigger_source,
+                                episode_id=episode.id,
                             )
                         else:
                             result = await self._execute_cognition_tool(
                                 call, expected_goal=grounded_goal
                             )
+                        LOGGER.info(
+                            "[COGNITION] episode=E%s tool=%s class=effect status=%s",
+                            episode.id, call.name, self._tool_result_status(result),
+                        )
                     tool_outcomes.append(WorkingMemoryToolOutcome(call.name, result.output))
                     return result
 
-                LOGGER.info("[COGNITION] backend=%s request=started", backend.identifier)
+                stage_name = "initial" if stage == 0 else f"post_acquisition_{stage}"
+                LOGGER.info(
+                    "[COGNITION] episode=E%s stage=%s source=%s backend=%s request=started",
+                    episode.id, stage_name, episode.trigger_source, backend.identifier,
+                )
                 response = await backend.respond(
                     message,
                     instructions=self._operator_episode_instructions(
@@ -913,7 +945,9 @@ class RobotApplication:
                     ),
                 )
                 LOGGER.info(
-                    "[COGNITION] backend=%s request=completed response_chars=%s",
+                    "[COGNITION] episode=E%s stage=%s source=%s backend=%s "
+                    "request=completed response_chars=%s",
+                    episode.id, stage_name, episode.trigger_source,
                     backend.identifier, len(response),
                 )
                 if not acquired:
@@ -922,7 +956,10 @@ class RobotApplication:
             await self._finish_operator_episode(episode, "cancelled")
             raise
         except Exception:
-            LOGGER.warning("[COGNITION] backend=%s request=failed", backend.identifier)
+            LOGGER.warning(
+                "[COGNITION] episode=E%s stage=%s source=%s backend=%s request=failed",
+                episode.id, stage_name, episode.trigger_source, backend.identifier,
+            )
             await self._finish_operator_episode(episode, "error")
             raise
         if self.state is not LifecycleState.RUNNING:
@@ -1145,7 +1182,13 @@ class RobotApplication:
                     log_prefix="INITIATIVE",
                 )
             capability_requested = True
-            LOGGER.info("[INITIATIVE] tool=%s status=requested", call.name)
+            capability_class = (
+                "acquisition" if call.name in self._acquisition_tool_names() else "effect"
+            )
+            LOGGER.info(
+                "[INITIATIVE] episode=E%s goal=G%s tool=%s class=%s status=requested",
+                episode.id, expected_goal.id, call.name, capability_class,
+            )
             if call.name == INSPECT_SELF_TOOL.name:
                 LOGGER.info(
                     "[ATTENTION] episode=E%s acquisition=1/%s tool=%s status=requested",
@@ -1201,11 +1244,17 @@ class RobotApplication:
                 action_result = result.output
             if action is not None:
                 self.attention.record_action(action, action_status)
+            LOGGER.info(
+                "[INITIATIVE] episode=E%s goal=G%s tool=%s class=%s status=%s",
+                episode.id, expected_goal.id, call.name, capability_class, result_status,
+            )
             return result
 
         LOGGER.info(
-            "[INITIATIVE] backend=%s request=started capabilities=%s",
-            backend.identifier, "enabled" if capabilities_available else "disabled",
+            "[INITIATIVE] episode=E%s goal=G%s stage=initial backend=%s "
+            "request=started capabilities=%s",
+            episode.id, expected_goal.id, backend.identifier,
+            "enabled" if capabilities_available else "disabled",
         )
         try:
             response = await backend.respond(
@@ -1222,11 +1271,15 @@ class RobotApplication:
                 ) if tools else None,
             )
         except Exception:
-            LOGGER.warning("[INITIATIVE] backend=%s request=failed", backend.identifier)
+            LOGGER.warning(
+                "[INITIATIVE] episode=E%s goal=G%s stage=initial backend=%s request=failed",
+                episode.id, expected_goal.id, backend.identifier,
+            )
             raise
         LOGGER.info(
-            "[INITIATIVE] backend=%s request=completed response_chars=%s",
-            backend.identifier, len(response),
+            "[INITIATIVE] episode=E%s goal=G%s stage=initial backend=%s "
+            "request=completed response_chars=%s",
+            episode.id, expected_goal.id, backend.identifier, len(response),
         )
         effects = []
         if action is not None:
@@ -1324,6 +1377,11 @@ class RobotApplication:
         action = status = result_text = None
         second_acquisition: InitiativeAcquisitionOutcome | None = None
         consumed = False
+        LOGGER.info(
+            "[ACQUISITION] episode=E%s goal=G%s continuation=post_acquisition_1 "
+            "backend=%s request=started",
+            episode.id, expected_goal.id, backend.identifier,
+        )
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
             nonlocal action, status, result_text, consumed, second_acquisition
@@ -1339,6 +1397,11 @@ class RobotApplication:
                 LOGGER.info(
                     "[ATTENTION] episode=E%s acquisition=2/%s tool=%s status=requested",
                     episode.id, MAX_AUTONOMOUS_ACQUISITIONS_PER_EPISODE, call.name,
+                )
+            else:
+                LOGGER.info(
+                    "[ACQUISITION] episode=E%s goal=G%s tool=%s class=effect "
+                    "status=requested", episode.id, expected_goal.id, call.name,
                 )
             if (self.state is not LifecycleState.RUNNING
                     or self._active_goal is not expected_goal
@@ -1384,6 +1447,11 @@ class RobotApplication:
                 )
             if action is not None:
                 self.attention.record_action(action, status)
+            if call.name not in self._acquisition_tool_names():
+                LOGGER.info(
+                    "[ACQUISITION] episode=E%s goal=G%s tool=%s class=effect "
+                    "status=%s", episode.id, expected_goal.id, call.name, status,
+                )
             return result
 
         try:
@@ -1401,9 +1469,19 @@ class RobotApplication:
         except asyncio.CancelledError:
             raise
         except Exception:
+            LOGGER.warning(
+                "[ACQUISITION] episode=E%s goal=G%s continuation=post_acquisition_1 "
+                "backend=%s request=failed",
+                episode.id, expected_goal.id, backend.identifier,
+            )
             return False, (None if action is None else InitiativeEffectOutcome(
                 action, status or "rejected", result_text or '{"status": "rejected"}'
             ))
+        LOGGER.info(
+            "[ACQUISITION] episode=E%s goal=G%s continuation=post_acquisition_1 "
+            "backend=%s request=completed",
+            episode.id, expected_goal.id, backend.identifier,
+        )
         if second_acquisition is not None and self._active_goal is expected_goal:
             final_completed, final_effect = await self._request_final_effect_decision(
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
@@ -1426,6 +1504,11 @@ class RobotApplication:
         tools = self.effect_tools()
         action = status = result_text = None
         consumed = False
+        LOGGER.info(
+            "[ACQUISITION] episode=E%s goal=G%s continuation=post_acquisition_2 "
+            "backend=%s request=started",
+            episode.id, expected_goal.id, backend.identifier,
+        )
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
             nonlocal action, status, result_text, consumed
@@ -1434,6 +1517,10 @@ class RobotApplication:
                                            log_prefix="ACQUISITION")
             consumed = True
             available = self.effect_tools()
+            LOGGER.info(
+                "[ACQUISITION] episode=E%s goal=G%s tool=%s class=effect "
+                "status=requested", episode.id, expected_goal.id, call.name,
+            )
             if (self.state is not LifecycleState.RUNNING
                     or self._active_goal is not expected_goal
                     or not any(tool.name == call.name for tool in available)):
@@ -1452,6 +1539,10 @@ class RobotApplication:
                 status = "rejected"
             if action is not None:
                 self.attention.record_action(action, status)
+            LOGGER.info(
+                "[ACQUISITION] episode=E%s goal=G%s tool=%s class=effect status=%s",
+                episode.id, expected_goal.id, call.name, status,
+            )
             return result
 
         try:
@@ -1469,9 +1560,19 @@ class RobotApplication:
         except asyncio.CancelledError:
             raise
         except Exception:
+            LOGGER.warning(
+                "[ACQUISITION] episode=E%s goal=G%s continuation=post_acquisition_2 "
+                "backend=%s request=failed",
+                episode.id, expected_goal.id, backend.identifier,
+            )
             return False, (None if action is None else InitiativeEffectOutcome(
                 action, status or "rejected", result_text or '{"status": "rejected"}'
             ))
+        LOGGER.info(
+            "[ACQUISITION] episode=E%s goal=G%s continuation=post_acquisition_2 "
+            "backend=%s request=completed",
+            episode.id, expected_goal.id, backend.identifier,
+        )
         return True, (None if action is None else InitiativeEffectOutcome(
             action, status or "rejected", result_text or '{"status": "rejected"}'
         ))
@@ -1524,7 +1625,11 @@ class RobotApplication:
             consumed = True
             action = call.name
             self.attention.record_continuation(action=action)
-            LOGGER.info("[CONTINUATION] tool=%s status=requested", call.name)
+            LOGGER.info(
+                "[CONTINUATION] episode=E%s goal=G%s tool=%s class=effect "
+                "status=requested",
+                episode.id, expected_goal.id, call.name,
+            )
             available = self.continuation_tools(first_effect.name)
             if (
                 first_effect.status != "applied"
@@ -1548,11 +1653,16 @@ class RobotApplication:
             except (json.JSONDecodeError, AttributeError):
                 status = "rejected"
             self.attention.record_continuation(action_status=status)
+            LOGGER.info(
+                "[CONTINUATION] episode=E%s goal=G%s tool=%s class=effect status=%s",
+                episode.id, expected_goal.id, call.name, status,
+            )
             return result
 
         LOGGER.info(
-            "[CONTINUATION] backend=%s request=started capabilities=enabled",
-            backend.identifier,
+            "[CONTINUATION] episode=E%s goal=G%s backend=%s request=started "
+            "capabilities=enabled",
+            episode.id, expected_goal.id, backend.identifier,
         )
         try:
             response = await backend.respond(
@@ -1573,7 +1683,8 @@ class RobotApplication:
         except Exception:
             self.attention.record_continuation(state="failed")
             LOGGER.warning(
-                "[CONTINUATION] backend=%s request=failed", backend.identifier
+                "[CONTINUATION] episode=E%s goal=G%s backend=%s request=failed",
+                episode.id, expected_goal.id, backend.identifier,
             )
             return False, (
                 InitiativeEffectOutcome(action, status or "rejected", result_text or "")
@@ -1581,8 +1692,9 @@ class RobotApplication:
             )
         self.attention.record_continuation(state="completed", response=response)
         LOGGER.info(
-            "[CONTINUATION] backend=%s request=completed response_chars=%s",
-            backend.identifier, len(response),
+            "[CONTINUATION] episode=E%s goal=G%s backend=%s request=completed "
+            "response_chars=%s",
+            episode.id, expected_goal.id, backend.identifier, len(response),
         )
         return True, (
             InitiativeEffectOutcome(action, status or "rejected", result_text or "")
@@ -1614,14 +1726,25 @@ class RobotApplication:
         )
         tools = self.outcome_tools(expected_goal, all_applied)
         LOGGER.info(
-            "[OUTCOME] backend=%s request=started closure=%s", backend.identifier,
+            "[OUTCOME] episode=E%s goal=G%s backend=%s request=started closure=%s",
+            episode.id, expected_goal.id, backend.identifier,
             "enabled" if tools else "disabled",
         )
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
-            return self._execute_outcome_tool(
+            LOGGER.info(
+                "[OUTCOME] episode=E%s goal=G%s tool=%s class=effect status=requested",
+                episode.id, expected_goal.id, call.name,
+            )
+            result = self._execute_outcome_tool(
                 call, expected_goal, all_applied
             )
+            LOGGER.info(
+                "[OUTCOME] episode=E%s goal=G%s tool=%s class=effect status=%s",
+                episode.id, expected_goal.id, call.name,
+                self._tool_result_status(result),
+            )
+            return result
 
         try:
             response = await backend.respond(
@@ -1641,12 +1764,16 @@ class RobotApplication:
             raise
         except Exception:
             self.attention.record_outcome(state="failed")
-            LOGGER.warning("[OUTCOME] backend=%s request=failed", backend.identifier)
+            LOGGER.warning(
+                "[OUTCOME] episode=E%s goal=G%s backend=%s request=failed",
+                episode.id, expected_goal.id, backend.identifier,
+            )
             return
         self.attention.record_outcome(state="completed", response=response)
         LOGGER.info(
-            "[OUTCOME] backend=%s request=completed response_chars=%s",
-            backend.identifier, len(response),
+            "[OUTCOME] episode=E%s goal=G%s backend=%s request=completed "
+            "response_chars=%s",
+            episode.id, expected_goal.id, backend.identifier, len(response),
         )
 
     def outcome_tools(
@@ -1767,7 +1894,10 @@ class RobotApplication:
 
     def _execute_memory_admission(
         self, call: CognitionToolCall, current_utterance: str, source_label: str,
+        *, episode_id: int | None = None,
     ) -> CognitionToolResult:
+        episode = "none" if episode_id is None else f"E{episode_id}"
+        LOGGER.info("[MEMORY] episode=%s admission status=requested", episode)
         try:
             if self.state is not LifecycleState.RUNNING or self._memory_admission is None:
                 raise RuntimeError("persistent memory admission is not available")
@@ -1789,23 +1919,33 @@ class RobotApplication:
                 source_label=source_label,
             )
         except (json.JSONDecodeError, TypeError, ValueError) as error:
-            LOGGER.info("[MEMORY] admission result=rejected reason=validation")
+            LOGGER.info(
+                "[MEMORY] admission result=rejected reason=validation episode=%s "
+                "status=rejected", episode,
+            )
             return CognitionToolResult(json.dumps({
                 "status": "rejected", "error": str(error),
             }, sort_keys=True))
         except Exception as error:
-            LOGGER.info("[MEMORY] admission result=rejected reason=backend")
+            LOGGER.info(
+                "[MEMORY] admission result=rejected reason=backend episode=%s "
+                "status=rejected", episode
+            )
             return CognitionToolResult(json.dumps({
                 "status": "rejected", "error": str(error),
             }, sort_keys=True))
         if result.status == "applied":
             LOGGER.info(
-                "[MEMORY] admission result=%s entity=%s memory=%s",
-                result.admission, result.entity, result.memory,
+                "[MEMORY] admission result=%s episode=%s status=applied "
+                "entity=%s memory=%s",
+                result.admission, episode, result.entity, result.memory,
             )
         else:
             reason = "conflict" if result.conflicts else "validation"
-            LOGGER.info("[MEMORY] admission result=rejected reason=%s", reason)
+            LOGGER.info(
+                "[MEMORY] admission result=rejected reason=%s episode=%s "
+                "status=rejected", reason, episode,
+            )
         return CognitionToolResult(json.dumps(result.as_dict(), sort_keys=True))
 
     def visual_perception_available(self) -> bool:
@@ -1819,7 +1959,6 @@ class RobotApplication:
     async def _execute_cognition_tool(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
     ) -> CognitionToolResult:
-        LOGGER.info("[COGNITION] tool=%s status=requested", call.name)
         if call.name == ORIENT_BODY_TOOL.name:
             return await self._execute_orient_body(
                 call, available=self.cognition_tools(), source="cognition"
@@ -2129,7 +2268,7 @@ class RobotApplication:
         self, call: CognitionToolCall,
         available: tuple[CognitionToolDefinition, ...],
         authorized: Sequence[OperatorDeliveryDestination],
-        source: str,
+        source: str, *, episode_id: int | None = None,
     ) -> CognitionToolResult:
         """Apply one operator-authorized delivery through the current route."""
         try:
@@ -2141,6 +2280,12 @@ class RobotApplication:
             value = arguments["message"]
             if type(destination) is not str:
                 raise ValueError("destination must be a string")
+            LOGGER.info(
+                "[INTERACTION] episode=%s mode=delivery destination=%s "
+                "source=%s status=requested",
+                "none" if episode_id is None else f"E{episode_id}",
+                destination, source,
+            )
             projected = {item.name: item for item in authorized}
             if destination not in projected:
                 raise ValueError("destination is not authorized for this operator stage")
@@ -2170,9 +2315,17 @@ class RobotApplication:
             interaction = operator_delivery(route.destination.channel)
             await route.sink.deliver(OperatorMessage(message, source, interaction))
         except Exception as error:
+            LOGGER.info(
+                "[INTERACTION] episode=%s mode=delivery destination=%s "
+                "source=%s status=rejected",
+                "none" if episode_id is None else f"E{episode_id}",
+                locals().get("destination", "unknown"), source,
+            )
             return self._rejected_tool(call.name, str(error))
         LOGGER.info(
-            "[INTERACTION] destination=%s source=%s chars=%s status=delivered",
+            "[INTERACTION] episode=%s mode=delivery destination=%s source=%s "
+            "chars=%s status=applied",
+            "none" if episode_id is None else f"E{episode_id}",
             destination, source, len(message),
         )
         return CognitionToolResult(json.dumps({
@@ -2257,6 +2410,15 @@ class RobotApplication:
                 {"status": outcome, "description": goal.description}, sort_keys=True
             )
         )
+
+    @staticmethod
+    def _tool_result_status(result: CognitionToolResult) -> str:
+        """Project a tool result to the stable applied/rejected log vocabulary."""
+        try:
+            status = json.loads(result.output).get("status")
+        except (json.JSONDecodeError, AttributeError):
+            return "rejected"
+        return "rejected" if status == "rejected" else "applied"
 
     @staticmethod
     def _rejected_tool(

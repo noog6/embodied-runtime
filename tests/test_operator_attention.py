@@ -456,9 +456,15 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         app.set_goal("monitor charging")
         clock.now = 160
         app.temporal.schedule(120, "check charging voltage", app.active_goal)
-        await app.request_cognition(
-            "inspect then answer", interaction=CONSOLE_DIALOGUE
-        )
+        with self.assertLogs("embodied_runtime", level="INFO") as captured:
+            await app.request_cognition(
+                "inspect then answer", interaction=CONSOLE_DIALOGUE
+            )
+        rendered_logs = "\n".join(captured.output)
+        self.assertIn("episode=E1 status=started", rendered_logs)
+        self.assertIn("episode=E1 stage=initial source=console", rendered_logs)
+        self.assertIn("episode=E1 stage=post_acquisition_1 source=console", rendered_logs)
+        self.assertIn("episode=E1 status=closed reason=handled", rendered_logs)
         self.assertEqual(len(backend.requests), 2)
         first, second = backend.requests
         for instructions in (first[0], second[0]):
