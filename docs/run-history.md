@@ -77,3 +77,53 @@ artifacts produce concise reports without changing any history file.
 These commands are process-level operator administration. They do not enter
 cognition, add WorkingMemory turns, expose run identity through self-inspection,
 or alter RuntimeState or persistent semantic memory.
+
+## Bounded cognition acquisition (v3)
+
+Version 1 is the durable run record, version 2 is the local operator browser,
+and version 3 is a deliberate read-only cognition acquisition over that same
+evidence. When the CLI successfully creates a run, it injects a read-only
+`RunHistoryEvidenceReader` with that exact `RunHistory.run_id`; it never gives
+the application the writable history object. If creation fails, explicit IDs
+and recent discovery remain usable but `current` and `previous` are unavailable.
+Direct `RobotApplication` construction has no history provider by default.
+
+`inspect_run_history(operation, run?, query?)` supports `recent`, `overview`,
+and `search`. Run selectors are only `current`, `previous`, and an exact
+case-insensitive `R<positive integer>`. `current` uses only the explicitly
+injected ID, never the newest directory. `previous` is the highest safe direct
+ID below that explicit current ID (gaps are allowed); malformed evidence in that
+run is reported rather than skipped. `recent` returns metadata for at most five
+numeric-newest safe run directories and no log excerpts.
+
+An overview returns validated metadata, category counts, and at most the first
+8 plus last 16 model-safe operational lines, deduplicated in source order.
+Search is case-insensitive literal substring matching, streams one log, returns
+at most 20 matches plus truncation state, and retains source line numbers. A
+returned line is capped at 800 characters. A separately opened reader may see
+complete records persisted so far in the current, still-appending log; an
+unterminated final line is treated as in progress and omitted.
+
+The model-facing projection first requires the exact runtime log envelope: a
+millisecond ISO-8601 timestamp with `Z` or a numeric offset, one space, and an
+uppercase bracketed category at the start of the line. Tracebacks, stack frames,
+exception continuations, and all other unstructured lines are ineligible. It
+then conservatively withholds an entire eligible line containing
+content-bearing fields such as `text=`, `message=`, `purpose=`, `description=`,
+`summary=`, `evidence=`, `focus=`, `query=`, `prompt=`, `utterance=`, or
+`response=`, plus the voice-specific `heard=` and wake-word-list `words=`,
+**before** matching. Thus history is operational evidence, not a
+conversation replay or transcript archive. Tool-result and literal query bodies
+are not logged; bounded `[HISTORY]` records contain only episode, operation,
+selector, status, match count, and bounded reason.
+
+History uses the existing two-acquisition episode budget alongside
+`inspect_self`, `observe_scene`, and `recall_memory`; it gains no semantic-effect
+authority and duplicate operator requests retain the existing request-local
+cache behavior. It is offered to operator cognition whenever the reader is
+configured, and to initiative only through the existing running, enabled, and
+active-goal gates. Nothing inspects history automatically at boot or while idle.
+Evidence is temporary grounding: it adds neither a separate WorkingMemory turn
+nor automatic persistent memory. Current Runtime context remains authoritative,
+and a current `started` record is only a partial snapshot—not proof of final
+health, success, abandonment, or failure.

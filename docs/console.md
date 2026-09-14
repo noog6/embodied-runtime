@@ -7,8 +7,9 @@ by this command; aggregate `status` and logs exclude its content, and later
 cognition never receives it.
 
 Initiative uses independent permissions. No flags means operator-only
-cognition; `--initiative` permits bounded read-only `inspect_self` or
-`observe_scene` acquisition where available and the single bounded
+cognition; `--initiative` permits bounded read-only `inspect_self`,
+`observe_scene`, `recall_memory`, or `inspect_run_history` acquisition where
+available and the single bounded
 `schedule_followup` semantic effect; `--initiative-actions` permits
 `orient_body` on a nonphysical body; and `--initiative-messages` permits
 `address_operator`. The latter currently requires `--console`, because the local

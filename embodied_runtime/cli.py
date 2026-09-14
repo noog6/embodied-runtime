@@ -31,7 +31,8 @@ from embodied_runtime.hardware.fusion_hat import (
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.run_history import (
-    DEFAULT_HISTORY_ROOT, RunHistory, RunHistorySetupError, start_run,
+    DEFAULT_HISTORY_ROOT, RunHistory, RunHistoryEvidenceReader, RunHistorySetupError,
+    start_run,
 )
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.interaction import (
@@ -431,6 +432,7 @@ async def _run_console_application(
 async def _run_application(
     args: argparse.Namespace, profile: RobotProfile,
     history_root: Path = DEFAULT_HISTORY_ROOT,
+    history_evidence: RunHistoryEvidenceReader | None = None,
 ) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
@@ -466,6 +468,7 @@ async def _run_application(
         voice_wake_words=(args.voice_wake_words if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
         timezone_name=args.timezone,
         persistent_memory_store=persistent_memory,
+        run_history_evidence=history_evidence,
     )
     if args.diagnostics:
         try:
@@ -603,7 +606,11 @@ def main(
 
     try:
         result = _run_with_asyncio_cleanup(
-            _run_application(args, profile, history_root)
+            _run_application(
+                args, profile, history_root,
+                RunHistoryEvidenceReader(history_root, history.run_id)
+                if history is not None else RunHistoryEvidenceReader(history_root),
+            )
         )
     except (
         FusionHatUnavailableError, Picamera2UnavailableError,

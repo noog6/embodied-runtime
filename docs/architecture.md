@@ -126,7 +126,9 @@ With opt-in initiative, one narrow path is transition-driven:
 `BodyOrientationChanged` from a local reflex -> attention gate, plus an existing
 `ActiveGoal` -> optional one-shot cognition. Attention only selects semantic
 events, owns the one-in-flight lifecycle, cancellation, and volatile diagnostics.
-`--initiative` permits bounded read-only acquisition where available and the
+`--initiative` permits bounded read-only acquisition (`inspect_self`,
+`observe_scene`, `recall_memory`, or content-filtered `inspect_run_history` when
+their providers are configured) and the
 single `schedule_followup` semantic effect. Independent effect permissions project
 `orient_body` for a nonphysical body and/or `address_operator` when an operator
 message sink is configured. Without the Phase 10 continuation opt-in, the application accepts at most one

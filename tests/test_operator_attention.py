@@ -15,6 +15,8 @@ from embodied_runtime.interaction import (
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.observations import SemanticObservation
+from embodied_runtime.perception import VisualPerceptionBackend, VisualPerceptionResult
+from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.voice import VoiceSessionPolicy
 from tests.test_platform import snapshot
 
@@ -30,6 +32,49 @@ class MutableClock:
 
     def __call__(self):
         return self.now
+
+
+class CountingHistoryReader:
+    def __init__(self, current_run_id="R37"):
+        self.current_run_id = current_run_id
+        self.calls = []
+
+    def inspect(self, operation, run=None, query=None):
+        self.calls.append((operation, run, query))
+        result = {"status": "applied", "operation": operation, "runs": []}
+        if operation == "search":
+            result.update(run_id="R1", query=query, matches=[{
+                "line_number": 1, "text": "SECRET RETURNED EVIDENCE",
+            }], truncated=False)
+        return result
+
+
+class OperatorCamera(CameraBackend):
+    identifier = "operator-camera"
+    is_physical = False
+
+    def __init__(self):
+        self.running = False
+
+    @property
+    def is_running(self):
+        return self.running
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+    def capture_frame(self):
+        return CameraFrame(b"frame", "image/jpeg", 1, 1, 1)
+
+
+class OperatorVision(VisualPerceptionBackend):
+    identifier = "operator-vision"
+
+    async def interpret(self, frame, focus):
+        return VisualPerceptionResult(focus, "clear", False)
 
 
 class ContinuityBackend(TextCognitionBackend):
@@ -507,6 +552,75 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         turn = app.working_memory.snapshot()[0]
         self.assertEqual([outcome.name for outcome in turn.tool_outcomes],
                          ["inspect_self", "inspect_self"])
+        await app.stop()
+
+    async def test_history_mixes_with_self_and_is_not_offered_as_third_acquisition(self):
+        history = CountingHistoryReader()
+        backend = ScriptedBackend((
+            ("inspect_run_history", {"operation": "recent", "run": None, "query": None}),
+            ("inspect_self", {"area": "runtime"}),
+        ))
+        app = self.app(backend, run_history_evidence=history)
+        await app.start()
+        await app.request_cognition("compare the run record and runtime")
+        self.assertEqual(history.calls, [("recent", None, None)])
+        self.assertIn("inspect_run_history", backend.requests[0][2])
+        self.assertIn("inspect_run_history", backend.requests[1][2])
+        self.assertNotIn("inspect_run_history", backend.requests[2][2])
+        self.assertNotIn("inspect_self", backend.requests[2][2])
+        self.assertEqual(
+            [item.name for item in app.working_memory.snapshot()[0].tool_outcomes],
+            ["inspect_run_history", "inspect_self"],
+        )
+        await app.stop()
+
+    async def test_history_mixes_with_visual_acquisition(self):
+        history = CountingHistoryReader()
+        backend = ScriptedBackend((
+            ("inspect_run_history", {"operation": "recent", "run": None, "query": None}),
+            ("observe_scene", {"focus": "desk"}),
+        ))
+        app = self.app(
+            backend, run_history_evidence=history, camera_backend=OperatorCamera(),
+            visual_perception_backend=OperatorVision(),
+        )
+        await app.start()
+        await app.request_cognition("compare run evidence and the desk")
+        self.assertEqual(history.calls, [("recent", None, None)])
+        self.assertEqual(
+            [item.name for item in app.working_memory.snapshot()[0].tool_outcomes],
+            ["inspect_run_history", "observe_scene"],
+        )
+        await app.stop()
+
+    async def test_identical_history_acquisition_is_cached_and_id_is_not_preexposed(self):
+        history = CountingHistoryReader("R37")
+        call = ("inspect_run_history", {
+            "operation": "overview", "run": "current", "query": None,
+        })
+        backend = ScriptedBackend((call, call))
+        app = self.app(backend, run_history_evidence=history)
+        await app.start()
+        await app.request_cognition("inspect once")
+        self.assertNotIn("R37", backend.requests[0][1])
+        self.assertEqual(history.calls, [("overview", "current", None)])
+        self.assertEqual(len(backend.requests), 2)
+        await app.stop()
+
+    async def test_history_log_omits_search_query_and_returned_evidence(self):
+        history = CountingHistoryReader()
+        backend = ScriptedBackend((("inspect_run_history", {
+            "operation": "search", "run": "R1", "query": "SECRET QUERY BODY",
+        }),))
+        app = self.app(backend, run_history_evidence=history)
+        await app.start()
+        with self.assertLogs("embodied_runtime.app", level="INFO") as captured:
+            await app.request_cognition("inspect bounded history")
+        history_logs = "\n".join(
+            line for line in captured.output if "[HISTORY]" in line)
+        self.assertIn("operation=search run=R1 status=applied matches=1", history_logs)
+        self.assertNotIn("SECRET QUERY BODY", history_logs)
+        self.assertNotIn("SECRET RETURNED EVIDENCE", history_logs)
         await app.stop()
 
     async def test_temporal_grounding_is_fresh_across_operator_acquisition(self):

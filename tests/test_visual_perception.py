@@ -138,7 +138,8 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
 
-    def initiative_app(self, backend, camera, vision, *, sink=None, inspector=None):
+    def initiative_app(self, backend, camera, vision, *, sink=None, inspector=None,
+                       **kwargs):
         return RobotApplication(
             RobotProfile("test", "Test"), VirtualHardwareBackend(),
             ApplicationOptions(
@@ -150,6 +151,7 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
             visual_perception_backend=vision, cognition_backend=backend,
             body_backend=VirtualBodyBackend(), operator_message_sink=sink or Sink(),
             self_inspector=inspector,
+            **kwargs,
         )
 
     @staticmethod
@@ -278,6 +280,34 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(app.active_goal, goal)
         self.assertEqual(app.working_memory.snapshot(), memory)
         self.assertEqual(app.attention.status().last_outcome_state, "not_run")
+        await app.stop()
+
+    async def test_initial_autonomous_history_acquisition_logs_requested_symmetrically(self):
+        class History:
+            current_run_id = "R1"
+
+            def inspect(self, operation, run=None, query=None):
+                return {"status": "applied", "operation": operation, "runs": []}
+
+        backend = SequenceCognition([
+            invoke("inspect_run_history", {
+                "operation": "recent", "run": None, "query": None,
+            }),
+            no_tool,
+        ])
+        app = self.initiative_app(
+            backend, Camera(), Vision(), run_history_evidence=History())
+        await app.start()
+        app.set_goal("Review relevant operational evidence")
+        with self.assertLogs("embodied_runtime.app", level="INFO") as captured:
+            await app._request_initiative(self.stimulus())
+        rendered = "\n".join(captured.output)
+        self.assertIn(
+            "[ATTENTION] episode=E0 acquisition=1/2 "
+            "tool=inspect_run_history status=requested", rendered)
+        self.assertIn(
+            "[ATTENTION] episode=E0 acquisition=1/2 "
+            "tool=inspect_run_history status=applied", rendered)
         await app.stop()
 
     async def test_mixed_acquisitions_preserve_order_and_distinct_authority(self):

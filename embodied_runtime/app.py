@@ -66,6 +66,9 @@ from embodied_runtime.perception import (
     MAX_CAMERA_FRAME_BYTES, VisualPerceptionBackend, VisualPerceptionResult,
 )
 from embodied_runtime.reflexes import Reflex
+from embodied_runtime.run_history import (
+    MAX_GREP_QUERY_LENGTH, RunHistoryEvidenceReader, canonical_run_id,
+)
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.platform import (
     HostPlatformProvider,
@@ -238,6 +241,25 @@ RECALL_MEMORY_TOOL = CognitionToolDefinition(
             "type": "string", "minLength": 1, "maxLength": MAX_RECALL_QUERY_CHARS,
         }},
         "required": ["query"],
+        "additionalProperties": False,
+    },
+)
+
+INSPECT_RUN_HISTORY_TOOL = CognitionToolDefinition(
+    name="inspect_run_history",
+    description=(
+        "Deliberately inspect bounded, content-filtered operational evidence from "
+        "recorded runs. This read-only evidence is not remembered semantic knowledge."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "operation": {"type": "string", "enum": ["recent", "overview", "search"]},
+            "run": {"type": ["string", "null"]},
+            "query": {"type": ["string", "null"], "minLength": 1,
+                      "maxLength": MAX_GREP_QUERY_LENGTH},
+        },
+        "required": ["operation", "run", "query"],
         "additionalProperties": False,
     },
 )
@@ -441,6 +463,7 @@ class RobotApplication:
         timezone_name: str = "UTC",
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         persistent_memory_store: PersistentMemoryStore | None = None,
+        run_history_evidence: RunHistoryEvidenceReader | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -463,6 +486,7 @@ class RobotApplication:
             working_memory if working_memory is not None else WorkingMemory()
         )
         self.persistent_memory = persistent_memory_store
+        self._run_history_evidence = run_history_evidence
         self._memory_recall = (
             MemoryRecallProjector(persistent_memory_store)
             if persistent_memory_store is not None else None
@@ -964,6 +988,10 @@ class RobotApplication:
                         elif call.name == OBSERVE_SCENE_TOOL.name:
                             result, perception = await self._execute_visual_perception(call)
                             inspection = None
+                        elif call.name == INSPECT_RUN_HISTORY_TOOL.name:
+                            result = self._execute_run_history_inspection(
+                                call, episode_id=episode.id)
+                            inspection = perception = None
                         else:
                             result = self._execute_memory_recall(call)
                             inspection = perception = None
@@ -1197,6 +1225,8 @@ class RobotApplication:
                 "memory changed. Working memory, operator intent, and prior turns are not "
                 "proof of a persistent write."
             )
+        if self._run_history_evidence is not None:
+            lines.append(self._run_history_grounding())
         if acquisitions:
             lines.append("Ordered acquisition evidence:")
             for index, acquisition in enumerate(acquisitions, 1):
@@ -1243,12 +1273,28 @@ class RobotApplication:
             "most one capability in this request."
             if capabilities_available else ""
         )
+        history_guidance = (
+            "\n\n" + self._run_history_grounding()
+            if self._run_history_evidence is not None and capabilities_available else ""
+        )
         sections = self._notification_sections(tools, notification_interaction)
         notification = "" if not sections else "\n\n" + "\n\n".join(sections)
         return (
             f"{context}{notification}\n\n{episode.render()}\n\n"
             f"{stimulus.render(actions_enabled=capabilities_available)}"
-            f"{inspection_guidance}{sequencing}"
+            f"{inspection_guidance}{history_guidance}{sequencing}"
+        )
+
+    @staticmethod
+    def _run_history_grounding() -> str:
+        return (
+            "Run history is deliberate, content-filtered operational evidence, not "
+            "automatically remembered semantic knowledge. Previous evidence may be stale; "
+            "fresh Runtime context is authoritative for current state. The current selector "
+            "is only a partial snapshot persisted so far. A stored started status alone does "
+            "not prove running, crashed, or abandoned. Attribute acquired facts to the run "
+            "record, do not reconstruct withheld content, and inspect history only when "
+            "materially relevant."
         )
 
     async def _request_initiative(
@@ -1331,6 +1377,14 @@ class RobotApplication:
                 result = self._execute_memory_recall(
                     call, expected_goal=expected_goal, autonomous=True
                 )
+            elif call.name == INSPECT_RUN_HISTORY_TOOL.name:
+                LOGGER.info(
+                    "[ATTENTION] episode=E%s acquisition=1/%s tool=%s status=requested",
+                    episode.id, MAX_AUTONOMOUS_ACQUISITIONS_PER_EPISODE, call.name,
+                )
+                result = self._execute_run_history_inspection(
+                    call, expected_goal=expected_goal, autonomous=True,
+                    episode_id=episode.id)
             else:
                 action = call.name
                 if self._active_goal is not expected_goal:
@@ -1537,6 +1591,10 @@ class RobotApplication:
                     result, perception = await self._execute_visual_perception(
                         call, expected_goal=expected_goal, autonomous=True
                     )
+                elif call.name == INSPECT_RUN_HISTORY_TOOL.name:
+                    result = self._execute_run_history_inspection(
+                        call, expected_goal=expected_goal, autonomous=True,
+                        episode_id=episode.id)
                 else:
                     result = self._execute_memory_recall(
                         call, expected_goal=expected_goal, autonomous=True
@@ -1946,12 +2004,14 @@ class RobotApplication:
             return ()
         visual = (OBSERVE_SCENE_TOOL,) if self.visual_perception_available() else ()
         recall = (RECALL_MEMORY_TOOL,) if self._memory_recall is not None else ()
-        return (INSPECT_SELF_TOOL, *visual, *recall)
+        history = ((INSPECT_RUN_HISTORY_TOOL,)
+                   if self._run_history_evidence is not None else ())
+        return (INSPECT_SELF_TOOL, *visual, *recall, *history)
 
     @staticmethod
     def _acquisition_tool_names() -> tuple[str, ...]:
         return (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name,
-                RECALL_MEMORY_TOOL.name)
+                RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name)
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project only currently permitted autonomous semantic effects."""
@@ -2008,6 +2068,8 @@ class RobotApplication:
         if self._memory_recall is not None:
             tools.append(RECALL_MEMORY_TOOL)
             tools.append(REMEMBER_TOOL)
+        if self._run_history_evidence is not None:
+            tools.append(INSPECT_RUN_HISTORY_TOOL)
         return tuple(tools)
 
     def _execute_memory_admission(
@@ -2099,7 +2161,44 @@ class RobotApplication:
             return result
         if call.name == RECALL_MEMORY_TOOL.name:
             return self._execute_memory_recall(call)
+        if call.name == INSPECT_RUN_HISTORY_TOOL.name:
+            return self._execute_run_history_inspection(call)
         return self._rejected_tool(call.name, "tool is not available")
+
+    def _execute_run_history_inspection(
+        self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
+        autonomous: bool = False, episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        operation = "invalid"
+        selector = "none"
+        try:
+            if self.state is not LifecycleState.RUNNING or self._run_history_evidence is None:
+                raise RuntimeError("run history inspection is not available")
+            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+                raise RuntimeError("expected active goal is no longer current")
+            arguments = json.loads(call.arguments)
+            if not isinstance(arguments, dict) or not set(arguments) <= {
+                    "operation", "run", "query"} or "operation" not in arguments:
+                raise ValueError("invalid arguments")
+            operation = arguments["operation"] if type(arguments["operation"]) is str else "invalid"
+            raw_selector = arguments.get("run")
+            selector = (
+                raw_selector if raw_selector in ("current", "previous") else
+                canonical_run_id(raw_selector) if type(raw_selector) is str else "none"
+            ) or "invalid"
+            result = self._run_history_evidence.inspect(
+                arguments["operation"], arguments.get("run"), arguments.get("query"))
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError):
+            result = {"status": "rejected", "reason": "invalid_tool_arguments"}
+        status = str(result.get("status", "rejected"))
+        reason = result.get("reason")
+        count = len(result.get("matches", [])) if isinstance(result.get("matches"), list) else 0
+        LOGGER.info(
+            "[HISTORY] episode=%s operation=%s run=%s status=%s matches=%s reason=%s",
+            f"E{episode_id}" if episode_id is not None else "none", operation,
+            selector, status, count, reason or "none",
+        )
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
     def _execute_memory_recall(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
