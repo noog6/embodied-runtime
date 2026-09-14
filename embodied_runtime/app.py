@@ -245,11 +245,16 @@ REMEMBER_TOOL = CognitionToolDefinition(
         "Persist one durable fact, preference, or simple relationship that the operator "
         "directly stated in the current utterance and that is likely useful beyond this "
         "session. The subject must already exist in persistent memory by exact canonical "
-        "name or alias, and that exact subject reference must occur in the evidence. "
-        "Provide a concise structured predicate/value and a short, complete verbatim "
-        "evidence clause from the current operator message; the evidence becomes the "
-        "durable text. For a relationship, its optional related entity must also occur "
-        "in the evidence and must equal the structured value. "
+        "name or alias. Copy the exact subject reference used in the current operator "
+        "utterance; never invent or create an entity. Select kind by meaning, not to "
+        "bypass admission. Use a concise stable identifier for predicate. Copy value "
+        "from the operator's wording rather than paraphrasing it. Copy evidence verbatim "
+        "from the CURRENT operator utterance: use the shortest complete clause containing "
+        "the exact subject reference and value (and related entity for a relationship). "
+        "Never summarize, rewrite, infer, or combine assistant-generated language; the "
+        "evidence becomes durable text. For fact/preference set both related fields to "
+        "null. For relationship populate both: related_entity is the exact existing "
+        "name/alias in evidence and equals value, while related_role is a simple identifier. "
         "Do not store guesses, assistant-generated conclusions, recalled information, "
         "transient state, jokes or sarcasm, uncertain implications, or ordinary "
         "conversation merely because this capability exists. This is a write effect; "
@@ -258,16 +263,58 @@ REMEMBER_TOOL = CognitionToolDefinition(
     parameters={
         "type": "object",
         "properties": {
-            "subject": {"type": "string", "minLength": 1, "maxLength": 256},
-            "kind": {"type": "string", "enum": ["fact", "preference", "relationship"]},
-            "predicate": {"type": "string", "minLength": 1, "maxLength": 64},
-            "value": {"type": "string", "minLength": 1, "maxLength": 500},
-            "evidence": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "subject": {
+                "type": "string", "minLength": 1, "maxLength": 256,
+                "description": (
+                    "Existing canonical name or exact alias copied from the current "
+                    "operator utterance; never create or invent an entity."
+                ),
+            },
+            "kind": {
+                "type": "string", "enum": ["fact", "preference", "relationship"],
+                "description": (
+                    "Semantic category of the statement; never select it to bypass "
+                    "admission rules."
+                ),
+            },
+            "predicate": {
+                "type": "string", "minLength": 1, "maxLength": 64,
+                "description": (
+                    "Concise stable simple machine identifier, not prose; for example "
+                    "preferred_editor, automatic_shutdown_voltage, or owner."
+                ),
+            },
+            "value": {
+                "type": "string", "minLength": 1, "maxLength": 500,
+                "description": (
+                    "Exact supported phrase from evidence, not a paraphrase; for "
+                    "relationships exactly equal to related_entity."
+                ),
+            },
+            "evidence": {
+                "type": "string", "minLength": 1, "maxLength": 1000,
+                "description": (
+                    "Shortest complete clause copied verbatim from the CURRENT operator "
+                    "utterance containing subject and value, plus related_entity for "
+                    "relationships; never summarize, rewrite, infer, or use assistant "
+                    "text. Becomes durable memory text."
+                ),
+            },
             "related_entity": {
                 "type": ["string", "null"], "minLength": 1, "maxLength": 256,
+                "description": (
+                    "Null for fact/preference. For relationship, exact existing canonical "
+                    "name or alias copied from evidence; must equal value and be paired "
+                    "with related_role."
+                ),
             },
             "related_role": {
                 "type": ["string", "null"], "minLength": 1, "maxLength": 64,
+                "description": (
+                    "Null for fact/preference. For relationship, concise simple identifier "
+                    "paired with related_entity; do not invent a relationship merely "
+                    "because this field exists."
+                ),
             },
         },
         "required": [
@@ -1114,6 +1161,18 @@ class RobotApplication:
                 "conversation, jokes/sarcasm, or assistant-generated conclusions. The "
                 "subject must already exist in persistent memory."
             )
+            lines.append(
+                "Persistent-memory acknowledgement policy: only the authoritative "
+                "remember result for THIS turn proves what happened. status=applied "
+                "with admission=created permits saying a new durable memory was saved. "
+                "status=applied with admission=duplicate means it was already stored; "
+                "do not imply this turn created or just saved a record. status=rejected "
+                "means nothing was written; clearly avoid any success claim and, when "
+                "useful, explain only its bounded reason. If remember was not called or "
+                "there is no authoritative remember result this turn, never claim durable "
+                "memory changed. Working memory, operator intent, and prior turns are not "
+                "proof of a persistent write."
+            )
         if acquisitions:
             lines.append("Ordered acquisition evidence:")
             for index, acquisition in enumerate(acquisitions, 1):
@@ -1959,15 +2018,17 @@ class RobotApplication:
                 "status=rejected", episode,
             )
             return CognitionToolResult(json.dumps({
-                "status": "rejected", "error": str(error),
+                "status": "rejected", "reason": "invalid_tool_arguments",
+                "error": str(error),
             }, sort_keys=True))
-        except Exception as error:
+        except Exception:
             LOGGER.info(
                 "[MEMORY] admission result=rejected reason=backend episode=%s "
                 "status=rejected", episode
             )
             return CognitionToolResult(json.dumps({
-                "status": "rejected", "error": str(error),
+                "status": "rejected", "reason": "backend_failure",
+                "error": "persistent memory backend failure",
             }, sort_keys=True))
         if result.status == "applied":
             LOGGER.info(
@@ -1976,10 +2037,9 @@ class RobotApplication:
                 result.admission, episode, result.entity, result.memory,
             )
         else:
-            reason = "conflict" if result.conflicts else "validation"
             LOGGER.info(
                 "[MEMORY] admission result=rejected reason=%s episode=%s "
-                "status=rejected", reason, episode,
+                "status=rejected", result.reason, episode,
             )
         return CognitionToolResult(json.dumps(result.as_dict(), sort_keys=True))
 

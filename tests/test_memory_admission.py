@@ -74,13 +74,30 @@ class MemoryAdmissionTests(unittest.TestCase):
         missing = self.admit(proposal(subject="Pixel", evidence="Pixel likes herring"),
                              "Pixel likes herring")
         self.assertEqual(missing.status, "rejected")
+        self.assertEqual(missing.reason, "subject_not_found")
         self.assertEqual(self.store.find_entities_exact("Pixel"), ())
         other = self.store.create_entity("object", "Other")
         self.store.add_entity_alias(self.gordon.id, "Seal")
         self.store.add_entity_alias(other.id, "Seal")
-        ambiguous = self.admit(proposal(subject="Seal"))
+        ambiguous = self.admit(
+            proposal(subject="Seal", evidence="Seal likes herring"),
+            "Seal likes herring",
+        )
         self.assertEqual(ambiguous.status, "rejected")
+        self.assertEqual(ambiguous.reason, "subject_ambiguous")
         self.assertEqual(self.store.list_memories_for_entity(self.gordon.id), ())
+
+    def test_grounding_rejections_have_stable_reasons(self):
+        not_verbatim = self.admit(
+            proposal(evidence="Gordon likes herring"), self.utterance
+        )
+        unsupported_value = self.admit(proposal(value="sardines"), self.utterance)
+        unsupported_subject = self.admit(
+            proposal(subject="Nick", evidence="Gordon's favorite snack is herring")
+        )
+        self.assertEqual(not_verbatim.reason, "evidence_not_in_utterance")
+        self.assertEqual(unsupported_value.reason, "value_not_supported")
+        self.assertEqual(unsupported_subject.reason, "subject_not_supported")
 
     def test_evidence_value_controls_and_bounds_are_rejected(self):
         cases = (
@@ -120,6 +137,9 @@ class MemoryAdmissionTests(unittest.TestCase):
         stored = self.store.get_memory(int(result.memory[3:]))
         self.assertEqual(set((link.entity_id, link.role) for link in stored.links),
                          {(self.gordon.id, "subject"), (self.nick.id, "owner")})
+        duplicate = self.admit(item, "Remember that Gordon belongs to Nick.")
+        self.assertEqual((duplicate.admission, duplicate.memory),
+                         ("duplicate", result.memory))
         for bad in (
             proposal(kind="relationship", related_entity="Nick"),
             proposal(kind="fact", related_entity="Nick", related_role="owner"),
@@ -149,8 +169,28 @@ class MemoryAdmissionTests(unittest.TestCase):
             "Gordon likes sardines"
         )
         self.assertEqual(conflict.error, "conflicting active persistent memory")
+        self.assertEqual(conflict.reason, "conflict")
         self.assertEqual(conflict.conflicts, (created.memory,))
         self.assertEqual(len(self.store.list_memories_for_entity(self.gordon.id)), 1)
+
+    def test_operator_preference_created_duplicate_and_conflict_contract(self):
+        vi = proposal(
+            subject="Nick", kind="preference", predicate="preferred_editor",
+            value="vi", evidence="Nick prefers vi",
+        )
+        created = self.admit(vi, "Remember that Nick prefers vi.")
+        duplicate = self.admit(vi, "Remember that Nick prefers vi.")
+        emacs = proposal(
+            subject="Nick", kind="preference", predicate="preferred_editor",
+            value="emacs", evidence="Nick prefers emacs",
+        )
+        conflict = self.admit(emacs, "Remember that Nick prefers emacs.")
+        self.assertEqual((created.status, created.admission), ("applied", "created"))
+        self.assertEqual((duplicate.status, duplicate.admission, duplicate.memory),
+                         ("applied", "duplicate", created.memory))
+        self.assertEqual((conflict.status, conflict.reason), ("rejected", "conflict"))
+        self.assertEqual(conflict.conflicts, (created.memory,))
+        self.assertEqual(len(self.store.list_memories_for_entity(self.nick.id)), 1)
 
     def test_machine_identifiers_are_casefolded(self):
         created = self.admit(proposal(predicate="FAVORITE_SNACK"))
@@ -234,9 +274,11 @@ class AdmissionBackend(TextCognitionBackend):
         self.requests = []
         self.results = []
         self.episode_ids = []
+        self.refreshed = []
 
     async def respond(self, message, *, instructions=None, tools=(), tool_executor=None,
                       **kwargs):
+        refreshed_instructions = kwargs.get("refreshed_instructions")
         self.requests.append((instructions, tuple(tool.name for tool in tools)))
         if self.sequence:
             self.episode_ids.append(self.app.episode_coordinator.current.id)
@@ -244,6 +286,8 @@ class AdmissionBackend(TextCognitionBackend):
             args = ({"query": "Gordon"} if name == "recall_memory"
                     else asdict(proposal()))
             self.results.append(await tool_executor(CognitionToolCall(name, json.dumps(args))))
+            if refreshed_instructions is not None:
+                self.refreshed.append(refreshed_instructions())
             return "provisional"
         return "I will remember that."
 
@@ -310,6 +354,7 @@ class MemoryAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Gordon's favorite snack is herring.", "voice",
         )
         self.assertEqual(json.loads(result.output)["status"], "rejected")
+        self.assertEqual(json.loads(result.output)["reason"], "invalid_tool_arguments")
         self.assertEqual(store.list_memories_for_entity(gordon.id), ())
         await app.stop()
 
@@ -336,6 +381,7 @@ class MemoryAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Gordon's favorite color is blue.", "voice",
         )
         self.assertEqual(json.loads(rejected.output)["status"], "rejected")
+        self.assertEqual(json.loads(rejected.output)["reason"], "invalid_tool_arguments")
         self.assertEqual(len(store.list_memories_for_entity(gordon.id)), 1)
         await app.stop()
 
@@ -352,7 +398,8 @@ class MemoryAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response, "provisional")
         self.assertEqual(store.create_attempts, 1)
         self.assertEqual(json.loads(backend.results[0].output), {
-            "error": "simulated admission backend failure", "status": "rejected",
+            "error": "persistent memory backend failure",
+            "reason": "backend_failure", "status": "rejected",
         })
         self.assertEqual(len(backend.requests), 1)
         self.assertEqual(backend.sequence, ["recall_memory"])
@@ -361,6 +408,21 @@ class MemoryAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.episode_coordinator.last.id, 1)
         self.assertTrue(any("admission result=rejected reason=backend" in line
                             for line in captured.output))
+        await app.stop()
+
+    async def test_refreshed_instructions_ground_final_memory_acknowledgement(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        store = SQLiteMemoryStore(Path(temporary.name) / "memory.sqlite3")
+        store.create_entity("object", "Gordon")
+        app, backend = self.make_app(store, ["remember"])
+        await app.start()
+        await app.request_cognition("Gordon's favorite snack is herring.")
+        policy = backend.refreshed[0]
+        for marker in (
+            "admission=created", "admission=duplicate", "status=rejected",
+            "remember was not called", "never claim durable memory changed",
+        ):
+            self.assertIn(marker, policy)
         await app.stop()
 
     async def test_validation_rejection_is_a_terminating_non_acquisition_effect(self):
