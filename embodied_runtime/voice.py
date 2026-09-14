@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import threading
 import time
 from typing import Protocol
 import wave
@@ -357,32 +358,67 @@ class FusionHatVoiceProvider:
     def __init__(self, *, language: str = "en-us") -> None:
         self._language = language
         self._stt = None
+        self._listen_state_lock = threading.Lock()
+        self._listen_stop: threading.Event | None = None
 
     def _ensure_stt(self):
-        if self._stt is None:
+        with self._listen_state_lock:
+            stt = self._stt
+        if stt is None:
             try:
                 from fusion_hat.stt import Vosk
             except ImportError as error:
                 raise RuntimeError("Fusion HAT speech recognition is unavailable") from error
-            self._stt = Vosk(language=self._language)
-        return self._stt
+            initialized = Vosk(language=self._language)
+            with self._listen_state_lock:
+                if self._stt is None:
+                    self._stt = initialized
+                stt = self._stt
+        return stt
 
     async def listen(self) -> str | None:
-        # Shield the executor future so cancellation of its asyncio owner still
-        # joins the blocking recognizer rather than abandoning its worker.
-        worker = asyncio.create_task(asyncio.to_thread(self._listen_sync))
+        stop = threading.Event()
+        with self._listen_state_lock:
+            if self._listen_stop is not None:
+                raise RuntimeError("speech recognition is already listening")
+            self._listen_stop = stop
+        # An executor Future is not a separate Task for Runner.cancel-all to
+        # cancel independently of this coroutine's ownership of the thread.
+        loop = asyncio.get_running_loop()
+        worker = loop.run_in_executor(None, self._listen_sync, stop)
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
-            await worker
+            # Cancellation does not stop executor work.  Continue shielding
+            # until the callable really returns, including across repeat
+            # cancellation requests, before reporting owner cancellation.
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
             raise
+        finally:
+            with self._listen_state_lock:
+                if self._listen_stop is stop:
+                    self._listen_stop = None
 
-    def _listen_sync(self) -> str | None:
-        return self._ensure_stt().listen()
+    def _listen_sync(self, stop: threading.Event) -> str | None:
+        stt = self._ensure_stt()
+        # A stop requested while lazy construction was in progress belongs to
+        # this attempt and prevents entry into a fresh blocking capture.
+        if stop.is_set():
+            return None
+        return stt.listen()
 
     async def stop_listening(self) -> None:
-        if self._stt is not None:
-            await asyncio.to_thread(self._stt.stop_listening)
+        with self._listen_state_lock:
+            stop = self._listen_stop
+            if stop is not None:
+                stop.set()
+            stt = self._stt
+        if stt is not None:
+            await asyncio.to_thread(stt.stop_listening)
 
     async def play_engagement_cue(self) -> None:
         """Play the fixed local wake acknowledgement through the HAT speaker."""

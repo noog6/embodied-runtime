@@ -764,6 +764,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_fusion_listen_cancellation_waits_for_blocking_worker(self):
         entered = threading.Event()
         released = threading.Event()
+        completed = threading.Event()
 
         class Vosk:
             def __init__(self, *, language):
@@ -772,6 +773,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             def listen(self):
                 entered.set()
                 released.wait()
+                completed.set()
                 return None
 
             def stop_listening(self):
@@ -789,11 +791,111 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             listen_task.cancel()
             await asyncio.sleep(0)
             self.assertFalse(listen_task.done())
+            listen_task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(listen_task.done())
+            self.assertFalse(completed.is_set())
             await provider.stop_listening()
             with self.assertRaises(asyncio.CancelledError):
                 await listen_task
 
         self.assertTrue(released.is_set())
+        self.assertTrue(completed.is_set())
+
+    async def test_fusion_stop_during_initialization_skips_capture_and_is_not_sticky(self):
+        constructing = threading.Event()
+        allow_construction = threading.Event()
+        capture_entered = threading.Event()
+        capture_released = threading.Event()
+        listen_calls = 0
+        stop_calls = 0
+
+        class Vosk:
+            def __init__(self, *, language):
+                constructing.set()
+                allow_construction.wait()
+
+            def listen(self):
+                nonlocal listen_calls
+                listen_calls += 1
+                capture_entered.set()
+                capture_released.wait()
+                return "heard"
+
+            def stop_listening(self):
+                nonlocal stop_calls
+                stop_calls += 1
+                capture_released.set()
+
+        fusion_hat = ModuleType("fusion_hat")
+        stt = ModuleType("fusion_hat.stt")
+        stt.Vosk = Vosk
+        provider = FusionHatVoiceProvider()
+        with patch.dict(sys.modules, {
+            "fusion_hat": fusion_hat, "fusion_hat.stt": stt,
+        }):
+            first = asyncio.create_task(provider.listen())
+            await asyncio.to_thread(constructing.wait)
+            self.assertIsNone(provider._stt)
+
+            await provider.stop_listening()
+            allow_construction.set()
+            self.assertIsNone(await asyncio.wait_for(first, 0.1))
+            self.assertEqual(listen_calls, 0)
+
+            second = asyncio.create_task(provider.listen())
+            await asyncio.to_thread(capture_entered.wait)
+            self.assertFalse(second.done())
+            await provider.stop_listening()
+            self.assertEqual(await asyncio.wait_for(second, 0.1), "heard")
+
+        self.assertEqual(listen_calls, 1)
+        self.assertEqual(stop_calls, 1)
+
+    async def test_wake_shutdown_remembers_stop_during_fusion_initialization(self):
+        constructing = threading.Event()
+        allow_construction = threading.Event()
+        stop_recorded = asyncio.Event()
+        listen_called = False
+
+        class Vosk:
+            def __init__(self, *, language):
+                constructing.set()
+                allow_construction.wait()
+
+            def listen(self):
+                nonlocal listen_called
+                listen_called = True
+                return None
+
+            def stop_listening(self):
+                raise AssertionError("capture was never entered")
+
+        class TrackingProvider(FusionHatVoiceProvider):
+            async def stop_listening(self):
+                await super().stop_listening()
+                stop_recorded.set()
+
+        fusion_hat = ModuleType("fusion_hat")
+        stt = ModuleType("fusion_hat.stt")
+        stt.Vosk = Vosk
+        provider = TrackingProvider()
+        voice = VoiceInteraction(
+            provider, FakeTextToSpeechProvider(), AsyncMock(), wake_words=["mira"]
+        )
+        with patch.dict(sys.modules, {
+            "fusion_hat": fusion_hat, "fusion_hat.stt": stt,
+        }), self.assertNoLogs("embodied_runtime.voice", level="ERROR"):
+            voice.start_wake_listener()
+            await asyncio.to_thread(constructing.wait)
+            stopping = asyncio.create_task(voice.stop())
+            await stop_recorded.wait()
+            allow_construction.set()
+            await asyncio.wait_for(stopping, 0.1)
+
+        self.assertFalse(listen_called)
+        self.assertIsNone(voice._wake_listen_task)
+        self.assertFalse(voice.wake_active)
 
     async def test_piper_is_lazy_reused_and_plays_in_memory_wav(self):
         calls = []
