@@ -1,11 +1,13 @@
 import asyncio
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.app import ApplicationOptions, LifecycleState, RobotApplication
 from embodied_runtime.cli import (
-    _run_console_application, build_cognition_backend, build_hardware_backend,
+    _live_non_daemon_thread_names, _run_console_application,
+    _run_with_asyncio_cleanup, build_cognition_backend, build_hardware_backend,
     build_parser, format_platform, format_summary, main,
 )
 from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
@@ -251,8 +253,109 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logs.count("[APP] stopping"), 1)
         self.assertEqual(logs.count("[APP] stopped"), 1)
 
+    async def test_console_eof_stops_normally_once(self) -> None:
+        terminal = SimpleNamespace(
+            write=lambda _text: None,
+            read_line=AsyncMock(return_value=None),
+        )
+        with self.assertLogs(level="INFO") as captured:
+            result = await _run_console_application(
+                self.application, terminal, None  # type: ignore[arg-type]
+            )
+        logs = "\n".join(captured.output)
+        self.assertEqual(result, 0)
+        self.assertNotIn("[APP] interrupted", logs)
+        self.assertEqual(logs.count("[APP] stopping"), 1)
+        self.assertEqual(logs.count("[APP] stopped"), 1)
+
 
 class CliTests(unittest.TestCase):
+    def test_outer_finalization_follows_application_shutdown(self) -> None:
+        logs: list[str] = []
+
+        def record(message: str, *args: object) -> None:
+            logs.append(message % args if args else message)
+
+        async def stopped_application(*_args: object) -> int:
+            record("[APP] stopped")
+            return 0
+
+        with patch(
+            "embodied_runtime.cli._run_application", side_effect=stopped_application
+        ), patch("embodied_runtime.cli.LOGGER.info", side_effect=record):
+            self.assertEqual(main(["--diagnostics"]), 0)
+        rendered = "\n".join(logs)
+        self.assertLess(rendered.index("[APP] stopped"), rendered.index(
+            "[PROCESS] application_coroutine status=completed"
+        ))
+        self.assertLess(rendered.index(
+            "[PROCESS] asyncio_cleanup status=completed"
+        ), rendered.index("[PROCESS] main status=returning exit_code=0"))
+
+    def test_runner_cleanup_is_timed_and_invoked_once(self) -> None:
+        events: list[str] = []
+
+        class RecordingRunner:
+            def run(self, coroutine):
+                events.append("run")
+                return asyncio.run(coroutine)
+
+            def close(self):
+                events.append("close")
+
+        async def application() -> int:
+            events.append("application")
+            return 7
+
+        with patch("embodied_runtime.cli.asyncio.Runner", RecordingRunner), patch(
+            "embodied_runtime.cli.time.perf_counter", side_effect=(10.0, 10.125)
+        ), self.assertLogs("embodied_runtime.cli", level="INFO") as captured:
+            self.assertEqual(_run_with_asyncio_cleanup(application()), 7)
+        self.assertEqual(events, ["run", "application", "close"])
+        self.assertIn(
+            "[PROCESS] asyncio_cleanup status=completed duration_ms=125.0",
+            "\n".join(captured.output),
+        )
+
+    def test_keyboard_interrupt_cleans_runner_before_main_returns(self) -> None:
+        async def interrupted(*_args: object) -> int:
+            raise KeyboardInterrupt
+
+        with patch(
+            "embodied_runtime.cli._run_application", side_effect=interrupted
+        ), self.assertLogs("embodied_runtime.cli", level="INFO") as captured:
+            self.assertEqual(main(["--diagnostics"]), 130)
+        logs = "\n".join(captured.output)
+        self.assertLess(logs.index(
+            "[PROCESS] asyncio_cleanup status=completed"
+        ), logs.index("[PROCESS] main status=returning exit_code=130"))
+
+    def test_non_daemon_thread_report_filters_and_sorts(self) -> None:
+        class FakeThread:
+            def __init__(self, name: str, *, alive: bool, daemon: bool):
+                self.name = name
+                self._alive = alive
+                self.daemon = daemon
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        current = FakeThread("current", alive=True, daemon=False)
+        main_thread = FakeThread("main", alive=True, daemon=False)
+        threads = (
+            current, main_thread,
+            FakeThread("z-worker", alive=True, daemon=False),
+            FakeThread("daemon", alive=True, daemon=True),
+            FakeThread("ended", alive=False, daemon=False),
+            FakeThread("a-worker", alive=True, daemon=False),
+        )
+        self.assertEqual(
+            _live_non_daemon_thread_names(  # type: ignore[arg-type]
+                threads, current=current, main_thread=main_thread
+            ),
+            ("a-worker", "z-worker"),
+        )
+
     def test_defaults(self) -> None:
         args = build_parser().parse_args([])
         self.assertEqual(args.profile, "mira")

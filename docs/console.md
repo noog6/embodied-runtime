@@ -77,6 +77,13 @@ The text following `ask` is instead treated as raw natural-language payload, so
 apostrophes and punctuation do not require shell quoting. Cognition errors are
 reported without ending the console session.
 
+During shutdown, `[APP] stopped` means that application-owned resources have
+finished stopping. The subsequent `[PROCESS] asyncio_cleanup` duration measures
+runner cleanup (including pending-task, async-generator, and default-executor
+shutdown), and `[PROCESS] main status=returning` is the final boundary before the
+CLI returns toward interpreter exit. A bounded thread line reports any live
+non-daemon threads that could still hold the process open.
+
 With `--initiative-continuation`, `attention` additionally reports the latest
 continuation state, action, action status, and bounded response. The flag
 requires initiative plus both action and message permissions; the latter still
