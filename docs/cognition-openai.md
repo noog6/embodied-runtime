@@ -92,12 +92,29 @@ function output and refreshed authoritative grounding for one final text-only
 response. Its `previous_response_id` is local to that one ask; it is neither
 retained nor reused and does not provide conversation memory.
 
-The adapter is initialized lazily on the first request. A missing SDK, missing
-key, or provider failure affects that request only and does not stop the runtime.
+Text cognition backends may perform backend-specific preparation before the
+application announces readiness. The OpenAI adapter uses its single preparation
+attempt to eagerly initialize and cache the client, then sends exactly one
+minimal, tool-free Responses request with the fixed input `Reply ready.` using
+the configured model. It supplies no instructions, runtime context, tools,
+working memory, goal, prior response identifier, or operator data. The response
+text and identifier are discarded, so preparation creates no attention episode,
+conversation turn, memory, goal, persistence, or application effect.
+
+`[APP] running` is logged only after preparation succeeds or reaches an
+explicitly degraded result. A missing SDK, missing key, or provider failure is
+an expected cognition-layer failure: it does not stop the rest of the runtime
+and does not disable a later ordinary cognition attempt. Preparation has no
+retry loop, periodic keepalive, special model, or prompt-cache optimization;
+calling it again on the same OpenAI backend is a no-op, even if its one attempt
+failed.
+
 The adapter logs content-free `[COGNITION]` elapsed timings for that first local
-client initialization and for each initial or tool-continuation Responses API
-call. Provider-call ordinals are local to one backend instance, and `cold=true`
-means only that the call is the instance's first outbound provider request.
+client initialization and for each prewarm, initial, or tool-continuation
+Responses API call. Provider-call ordinals are local to one backend instance,
+and `cold=true` means only that the call is the instance's first outbound
+provider request. A successful prewarm is therefore ordinal 1 and the first real
+request is ordinal 2 with `cold=false`.
 Request lines include character/tool counts and public numeric token usage when
 the SDK supplies it; they never include prompt, result, identifier, or tool
 content.
@@ -106,11 +123,10 @@ supplies its working-memory snapshot. This phase adds no durable storage, task
 manager, planning, retries, physical autonomous action, images, perception,
 audio, streaming, or Realtime API integration.
 
-For a physical cold-start check, restart the runtime, ask
-`Say only: ready.` three times, quit, restart, and repeat. Compare the
-`component=client_init`, `provider_request=initial`, and (if a tool is selected)
-`provider_request=continuation` lines. This is a manual observation procedure,
-not a benchmark or prewarm.
+For a physical cold-start check, restart the runtime and compare the startup
+`component=client_init` and `provider_request=prewarm` lines before
+`[APP] running` with the first `provider_request=initial` line after asking
+`Say only: ready.`. This is a manual observation procedure, not a benchmark.
 
 ## Bounded continuation
 
