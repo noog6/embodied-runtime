@@ -60,13 +60,19 @@ The supported commands are exactly:
 - `presence` for current semantic presence;
 - `simulate presence <on|off>` for explicitly synthetic development input;
 - `ask <message>` for one independent text cognition request;
+- `voice` to start one bounded voice session;
 - `memory` for working-memory count/capacity metadata (not retained text);
 - `memory clear` to synchronously forget all retained session turns without
   changing runtime state or configured backends;
+- `memory persistent`, `memory entity add`, `memory entity find`, `memory alias
+  add`, `memory find`, `memory add`, `memory show`, and `memory list` for the
+  persistent-memory administration described below;
 - `goal` to show the current intentional state;
 - `goal clear` to apply an explicit local operator override without changing
   RuntimeState or WorkingMemory;
 - `attention` to show the latest volatile initiative and outcome diagnostics;
+- `followup` to show the pending temporal follow-up and `followup clear` to
+  cancel it;
 - `help` (or `?`), `quit`, and `exit`.
 
 Only the `simulate` namespace denotes synthetic input. It translates to the
@@ -113,8 +119,9 @@ not retained in diagnostics. See [Bounded semantic self-inspection](self-inspect
 
 ## Temporal follow-up control
 
-`followup` shows either `state: none` or the one pending follow-up's bounded
-relative delay, remaining seconds, and purpose. `followup clear` cancels it.
+`followup` shows either `state: none` or the one pending or due-pending
+follow-up's bounded relative delay, remaining seconds, and purpose. `followup
+clear` cancels it.
 There is intentionally no add/list/scheduler command. `[TEMPORAL]` logs use a
 restrained colour and omit purpose text. See
 [Bounded temporal follow-up](temporal-followup.md).
@@ -131,6 +138,7 @@ episode with source `console`. Administrative commands remain direct runtime
 operations. `attention` separates shared current/last episode lifecycle fields
 (including trigger and source) from the last autonomous-initiative diagnostics;
 it never displays the operator utterance as an episode concern.
+
 # Memory commands
 
 `memory` and `memory clear` continue to inspect and clear bounded, volatile
