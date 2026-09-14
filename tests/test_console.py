@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 import asyncio
 from dataclasses import replace
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -138,12 +139,99 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  attention                      Show initiative attention state\n"
             "  followup                       Show pending temporal follow-up\n"
             "  followup clear                 Cancel pending temporal follow-up\n"
+            "  runs                           List recent recorded runs\n"
+            "  run show R<n>                  Show one recorded run\n"
+            "  run grep R<n> <text>           Search one run's runtime log\n"
             "  help                           Show this help\n"
             "  quit                           Stop the console and runtime\n"
             "  exit                           Stop the console and runtime"
         )
         self.assertEqual(self.console.execute("help"), (expected, False))
         self.assertEqual(self.console.execute("?"), (expected, False))
+
+    def _write_run(self, root, number, *, status="completed", exit_code=0,
+                   ended_at="2026-01-01T00:01:04+00:00"):
+        directory = root / f"R{number}"
+        directory.mkdir()
+        metadata = {
+            "schema_version": 1, "run_id": f"R{number}", "run_number": number,
+            "started_at": "2026-01-01T00:00:00+00:00", "ended_at": ended_at,
+            "status": status, "exit_code": exit_code, "profile": "test",
+            "hardware": "virtual", "config_source": None,
+        }
+        (directory / "run.json").write_text(json.dumps(metadata))
+        return directory
+
+    def test_run_browser_lists_numeric_bounded_history_and_started_truth(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for number in range(1, 23):
+                self._write_run(root, number)
+            started = json.loads((root / "R22" / "run.json").read_text())
+            started.update(status="started", ended_at=None, exit_code=None)
+            (root / "R22" / "run.json").write_text(json.dumps(started))
+            (root / "notes").mkdir()
+            console = RuntimeConsole(self.app, history_root=root)
+            report = console.execute("runs")[0]
+            identities = [line.split()[0] for line in report.splitlines()[1:21]]
+            self.assertEqual(identities, [f"R{n}" for n in range(22, 2, -1)])
+            self.assertIn("2 older runs not shown", report)
+            self.assertIn("R22   started", report)
+            self.assertIn("  -", report)
+            self.assertNotIn("running", report)
+            self.assertIn("00:01:04", report)
+
+    def test_run_show_validates_and_grep_is_literal_bounded_and_read_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self._write_run(root, 2)
+            log = "prefix [APP] Keep Case\n" + "\n".join(
+                f"line {index} [APP]" for index in range(51)
+            ) + "\n"
+            (directory / "runtime.log").write_text(log)
+            before_metadata = (directory / "run.json").read_bytes()
+            before_log = (directory / "runtime.log").read_bytes()
+            console = RuntimeConsole(self.app, history_root=root)
+            memory_before = self.app.working_memory.snapshot()
+            state_before = self.app.runtime_state
+            shown = console.execute("run show r2")[0]
+            for value in ("schema:        1", "status:        completed",
+                          "exit_code:     0", "profile:       test",
+                          "hardware:      virtual", "config_source: none"):
+                self.assertIn(value, shown)
+            result = console.execute('run grep R2 "[app]"')[0]
+            self.assertIn("1: prefix [APP] Keep Case", result)
+            self.assertEqual(sum(line.startswith("  ") and ": " in line
+                                 for line in result.splitlines()), 50)
+            self.assertIn("more matches not shown", result)
+            self.assertEqual(before_metadata, (directory / "run.json").read_bytes())
+            self.assertEqual(before_log, (directory / "runtime.log").read_bytes())
+            self.assertEqual(self.app.working_memory.snapshot(), memory_before)
+            self.assertIs(self.app.runtime_state, state_before)
+
+    def test_run_browser_reports_safe_failures_and_usage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            console = RuntimeConsole(self.app, history_root=root)
+            self.assertEqual(console.execute("runs")[0], "Run history\n  none")
+            self.assertEqual(console.execute("run show R99")[0], "Run R99 not found.")
+            for identity in ("R0", "R-1", "foo", "../R2"):
+                self.assertEqual(console.execute(f"run show {identity}")[0],
+                                 "Usage: run show R<n>.")
+            self.assertEqual(console.execute("run grep R2")[0],
+                             "Usage: run grep R<n> <text>.")
+            self.assertEqual(console.execute("runs extra")[0], "Usage: runs.")
+            directory = root / "R7"
+            directory.mkdir()
+            self.assertEqual(console.execute("run show R7")[0],
+                             "Run R7 metadata unavailable.")
+            (directory / "run.json").write_text("not json")
+            self.assertEqual(console.execute("run show R7")[0],
+                             "Run R7 metadata is invalid.")
+            (directory / "run.json").write_text(json.dumps({"schema_version": 2}))
+            self.assertIn("unsupported schema version 2", console.execute("run show R7")[0])
+            self.assertEqual(console.execute("run grep R7 text")[0],
+                             "Run R7 runtime log unavailable.")
 
     def test_memory_metadata_and_clear_leave_runtime_state_untouched(self):
         self.app.working_memory.append("one", "answer", completed_at=TEST_INSTANT)

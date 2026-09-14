@@ -9,7 +9,101 @@ from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.cli import main
 from embodied_runtime.logging_config import configure_logging
-from embodied_runtime.run_history import RunHistory, start_run
+from embodied_runtime.run_history import (
+    MAX_METADATA_BYTES, RunDataUnavailable, RunHistory, RunMetadataError,
+    UnsupportedRunSchema, canonical_run_id, discover_run_ids, grep_run_log,
+    read_run_record, start_run,
+)
+
+
+class RunHistoryReaderTests(unittest.TestCase):
+    def write_record(self, root: Path, number: int, **changes) -> Path:
+        directory = root / f"R{number}"
+        directory.mkdir()
+        data = {
+            "schema_version": 1, "run_id": f"R{number}", "run_number": number,
+            "started_at": "2026-09-14T15:13:51.000-04:00",
+            "ended_at": "2026-09-14T15:14:55.999-04:00",
+            "status": "completed", "exit_code": 0, "profile": "mira",
+            "hardware": "fusion-hat", "config_source": "config/mira.toml",
+        }
+        data.update(changes)
+        (directory / "run.json").write_text(json.dumps(data))
+        return directory
+
+    def test_identity_discovery_is_exact_numeric_bounded_and_ignores_symlinks(self):
+        self.assertEqual([canonical_run_id(value) for value in
+                          ("R2", "r2", "R0", "R-1", "foo", "../R2")],
+                         ["R2", "R2", None, None, None, None])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for number in range(1, 23):
+                self.write_record(root, number)
+            (root / "other").mkdir()
+            (root / "R99").symlink_to(root / "R22", target_is_directory=True)
+            identities, older = discover_run_ids(root)
+            self.assertEqual(identities[0], "R22")
+            self.assertEqual(identities[-1], "R3")
+            self.assertEqual((len(identities), older), (20, 2))
+        self.assertEqual(discover_run_ids(Path(temporary) / "absent"), ((), 0))
+
+    def test_reader_validates_duration_schema_identity_and_final_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_record(root, 1)
+            self.assertEqual(read_run_record(root, "R1").duration, "00:01:04")
+            self.write_record(root, 2, status="interrupted", exit_code=130)
+            self.assertEqual(read_run_record(root, "R2").duration, "00:01:04")
+            self.write_record(root, 3, status="started", exit_code=None, ended_at=None)
+            record = read_run_record(root, "R3")
+            self.assertEqual((record.status, record.duration), ("started", "-"))
+            self.write_record(root, 4, schema_version=2)
+            with self.assertRaises(UnsupportedRunSchema):
+                read_run_record(root, "R4")
+            self.write_record(root, 5, run_number=9)
+            with self.assertRaises(RunMetadataError):
+                read_run_record(root, "R5")
+            self.write_record(root, 6, status="completed", exit_code=1)
+            with self.assertRaises(RunMetadataError):
+                read_run_record(root, "R6")
+
+    def test_reader_rejects_missing_oversized_malformed_and_symlink_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "R1").mkdir()
+            with self.assertRaises(RunDataUnavailable):
+                read_run_record(root, "R1")
+            (root / "R1" / "run.json").write_bytes(b"x" * (MAX_METADATA_BYTES + 1))
+            with self.assertRaises(RunDataUnavailable):
+                read_run_record(root, "R1")
+            (root / "R1" / "run.json").write_text("{")
+            with self.assertRaises(RunMetadataError):
+                read_run_record(root, "R1")
+            target = root / "metadata"
+            target.write_text("{}")
+            (root / "R1" / "run.json").unlink()
+            (root / "R1" / "run.json").symlink_to(target)
+            with self.assertRaises(RunDataUnavailable):
+                read_run_record(root, "R1")
+
+    def test_grep_streams_literal_lines_and_rejects_log_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.write_record(root, 1)
+            (directory / "runtime.log").write_text(
+                "one [APP]\nTwo app\nregex A only\n"
+            )
+            matches, truncated = grep_run_log(root, "R1", "[app]")
+            self.assertEqual(matches, ((1, "one [APP]"),))
+            self.assertFalse(truncated)
+            matches, _ = grep_run_log(root, "R1", "TWO APP")
+            self.assertEqual(matches, ((2, "Two app"),))
+            target = root / "outside.log"
+            target.write_text("secret")
+            (directory / "runtime.log").unlink()
+            (directory / "runtime.log").symlink_to(target)
+            with self.assertRaises(RunDataUnavailable):
+                grep_run_log(root, "R1", "secret")
 
 
 class RunAllocationTests(unittest.TestCase):
@@ -267,3 +361,11 @@ class HistoryLoggingTests(unittest.TestCase):
             metadata = json.loads((root / "R1" / "run.json").read_text())
             self.assertEqual(metadata["status"], "failed")
             self.assertEqual(metadata["exit_code"], 7)
+
+    def test_custom_history_root_reaches_application_console_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)
+        ) as run_application:
+            root = Path(temporary)
+            self.assertEqual(main(["--console"], history_root=root), 0)
+            self.assertEqual(run_application.await_args.args[2], root)

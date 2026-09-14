@@ -20,6 +20,11 @@ from embodied_runtime.interaction import (
 )
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
+from embodied_runtime.run_history import (
+    DEFAULT_HISTORY_ROOT, MAX_GREP_QUERY_LENGTH, RunDataUnavailable,
+    RunMetadataError, UnsupportedRunSchema, canonical_run_id, discover_run_ids,
+    grep_run_log, read_run_record,
+)
 
 
 class ConsoleTerminalError(RuntimeError):
@@ -34,9 +39,11 @@ class RuntimeConsole:
         application: RobotApplication,
         *,
         monotonic: Callable[[], float] = time.monotonic,
+        history_root: Path = DEFAULT_HISTORY_ROOT,
     ) -> None:
         self._application = application
         self._monotonic = monotonic
+        self._history_root = history_root
 
     @property
     def prompt(self) -> str:
@@ -93,6 +100,10 @@ class RuntimeConsole:
             return self._attention(), False
         if vocabulary == ["followup"]:
             return self._followup(), False
+        if vocabulary and vocabulary[0] == "runs":
+            return (self._runs() if len(words) == 1 else "Usage: runs."), False
+        if vocabulary and vocabulary[0] == "run":
+            return self._run_command(words), False
         if vocabulary == ["followup", "clear"]:
             cleared = self._application.clear_temporal_followup()
             return "Temporal follow-up\n  cleared:       " + str(cleared).lower(), False
@@ -218,11 +229,83 @@ class RuntimeConsole:
                 "  attention                      Show initiative attention state",
                 "  followup                       Show pending temporal follow-up",
                 "  followup clear                 Cancel pending temporal follow-up",
+                "  runs                           List recent recorded runs",
+                "  run show R<n>                  Show one recorded run",
+                "  run grep R<n> <text>           Search one run's runtime log",
                 "  help                           Show this help",
                 "  quit                           Stop the console and runtime",
                 "  exit                           Stop the console and runtime",
             )
         )
+
+    def _runs(self) -> str:
+        run_ids, older = discover_run_ids(self._history_root)
+        lines = ["Run history"]
+        if not run_ids:
+            lines.append("  none")
+        for run_id in run_ids:
+            try:
+                record = read_run_record(self._history_root, run_id)
+            except (OSError, RunMetadataError):
+                lines.append(f"  {run_id}   unavailable")
+            else:
+                lines.append(
+                    f"  {run_id}   {record.status:<12} {record.started_at}  {record.duration}"
+                )
+        if older:
+            lines.append(f"  {older} older runs not shown")
+        return "\n".join(lines)
+
+    def _run_command(self, words: list[str]) -> str:
+        action = words[1].lower() if len(words) > 1 else ""
+        usage = ("Usage: run show R<n>." if action == "show"
+                 else "Usage: run grep R<n> <text>.")
+        if action == "show" and len(words) == 3:
+            run_id = canonical_run_id(words[2])
+            if run_id is None:
+                return usage
+            try:
+                record = read_run_record(self._history_root, run_id)
+            except FileNotFoundError:
+                return f"Run {run_id} not found."
+            except UnsupportedRunSchema as error:
+                return f"Run {run_id} uses unsupported schema version {error.version}."
+            except RunDataUnavailable:
+                return f"Run {run_id} metadata unavailable."
+            except RunMetadataError:
+                return f"Run {run_id} metadata is invalid."
+            value = lambda item: "none" if item is None else str(item)
+            return "\n".join((
+                f"Run {run_id}",
+                f"  schema:        {record.schema_version}",
+                f"  status:        {record.status}",
+                f"  exit_code:     {value(record.exit_code)}",
+                f"  started_at:    {record.started_at}",
+                f"  ended_at:      {value(record.ended_at)}",
+                f"  duration:      {record.duration}",
+                f"  profile:       {record.profile}",
+                f"  hardware:      {record.hardware}",
+                f"  config_source: {value(record.config_source)}",
+            ))
+        if action == "grep" and len(words) >= 4:
+            run_id = canonical_run_id(words[2])
+            query = " ".join(words[3:])
+            if run_id is None or not query or len(query) > MAX_GREP_QUERY_LENGTH:
+                return usage
+            try:
+                matches, truncated = grep_run_log(self._history_root, run_id, query)
+            except FileNotFoundError:
+                return f"Run {run_id} not found."
+            except RunDataUnavailable:
+                return f"Run {run_id} runtime log unavailable."
+            lines = [f"Matches in {run_id} for {query!r}"]
+            lines.extend(f"  {number}: {line}" for number, line in matches)
+            if not matches:
+                lines.append("  none")
+            if truncated:
+                lines.append("  more matches not shown")
+            return "\n".join(lines)
+        return usage
 
     def _memory(self) -> str:
         memory = self._application.working_memory

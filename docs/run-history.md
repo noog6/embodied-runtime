@@ -48,3 +48,32 @@ History does not add conversation bodies, prompts, model request or response
 bodies, reasoning, memory payloads, images, audio, transcripts, credentials,
 or environment data. If history storage is unavailable, the runtime warns once
 and continues; observability failure does not determine the application result.
+
+## Read-only console browser (v2)
+
+Schema v1 files remain the authoritative storage and write layer. The local
+console merely derives bounded, read-only views from the same history root used
+by the CLI; it neither repairs nor rewrites historical artifacts:
+
+- `runs` lists the newest 20 direct run directories in descending numeric order
+  and reports how many older directories were omitted. Invalid or unavailable
+  metadata is shown as `unavailable` rather than crashing the browser.
+- `run show R<n>` validates and displays every bounded schema-v1 field plus a
+  duration. Finalized durations are truncated to whole seconds and formatted as
+  `HH:MM:SS`, or `Nd HH:MM:SS` for durations of at least one day. A stored
+  `started` run retains that label and a `-` duration; it does not imply either
+  running or crashed.
+- `run grep R<n> <text>` performs a case-insensitive literal substring search
+  of `runtime.log`, includes original line contents and line numbers, and shows
+  at most 50 matches plus a truncation notice. It is not regular-expression
+  search.
+
+Only exact `R<positive integer>` identities (case-insensitive at the console)
+are accepted. Arbitrary paths are never accepted. Direct run-directory
+symlinks and symlinked `run.json` or `runtime.log` files are not followed;
+metadata reads are limited to 64 KiB. Missing, malformed, oversized, or unsafe
+artifacts produce concise reports without changing any history file.
+
+These commands are process-level operator administration. They do not enter
+cognition, add WorkingMemory turns, expose run identity through self-inspection,
+or alter RuntimeState or persistent semantic memory.

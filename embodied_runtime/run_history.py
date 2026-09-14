@@ -12,6 +12,172 @@ from typing import Any
 
 DEFAULT_HISTORY_ROOT = Path("data/runs")
 _RUN_DIRECTORY = re.compile(r"R([1-9][0-9]*)\Z")
+MAX_METADATA_BYTES = 64 * 1024
+MAX_LISTED_RUNS = 20
+MAX_GREP_MATCHES = 50
+MAX_GREP_QUERY_LENGTH = 256
+
+
+class RunMetadataError(ValueError):
+    """Persisted metadata is not a valid schema-v1 record."""
+
+
+class UnsupportedRunSchema(RunMetadataError):
+    """Persisted metadata declares a schema this runtime cannot read."""
+
+    def __init__(self, version: object) -> None:
+        super().__init__(f"unsupported schema version {version}")
+        self.version = version
+
+
+class RunDataUnavailable(OSError):
+    """A historical run artifact cannot safely be read."""
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """Validated, read-only presentation model for schema-v1 metadata."""
+
+    schema_version: int
+    run_id: str
+    run_number: int
+    started_at: str
+    ended_at: str | None
+    status: str
+    exit_code: int | None
+    profile: str
+    hardware: str
+    config_source: str | None
+
+    @property
+    def duration(self) -> str:
+        if self.ended_at is None:
+            return "-"
+        seconds = int((datetime.fromisoformat(self.ended_at) -
+                       datetime.fromisoformat(self.started_at)).total_seconds())
+        days, remainder = divmod(seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        clock = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{days}d {clock}" if days else clock
+
+
+def canonical_run_id(identity: str) -> str | None:
+    """Return a canonical ID for one exact, case-insensitive run identity."""
+    match = re.fullmatch(r"[Rr]([1-9][0-9]*)", identity)
+    return f"R{int(match.group(1))}" if match is not None else None
+
+
+def discover_run_ids(root: Path) -> tuple[tuple[str, ...], int]:
+    """Return at most the newest 20 safe direct run directories and older count."""
+    try:
+        children = root.iterdir()
+        numbered = sorted(
+            ((int(match.group(1)), child.name) for child in children
+             if (match := _RUN_DIRECTORY.fullmatch(child.name)) is not None
+             and not child.is_symlink() and child.is_dir()),
+            reverse=True,
+        )
+    except OSError:
+        return (), 0
+    return (tuple(name for _, name in numbered[:MAX_LISTED_RUNS]),
+            max(0, len(numbered) - MAX_LISTED_RUNS))
+
+
+def _safe_run_directory(root: Path, run_id: str) -> Path | None:
+    directory = root / run_id
+    try:
+        return directory if not directory.is_symlink() and directory.is_dir() else None
+    except OSError:
+        return None
+
+
+def read_run_record(root: Path, run_id: str) -> RunRecord:
+    """Read and validate one bounded schema-v1 record without following links."""
+    if canonical_run_id(run_id) != run_id:
+        raise FileNotFoundError(run_id)
+    directory = _safe_run_directory(root, run_id)
+    if directory is None:
+        raise FileNotFoundError(run_id)
+    path = directory / "run.json"
+    try:
+        if (path.is_symlink() or not path.is_file()
+                or path.stat().st_size > MAX_METADATA_BYTES):
+            raise RunDataUnavailable(run_id)
+        with path.open("r", encoding="utf-8") as source:
+            raw = source.read(MAX_METADATA_BYTES + 1)
+    except (OSError, UnicodeError) as error:
+        raise RunDataUnavailable(run_id) from error
+    if len(raw.encode("utf-8")) > MAX_METADATA_BYTES:
+        raise RunDataUnavailable(run_id)
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise RunMetadataError(run_id) from error
+    if not isinstance(data, dict):
+        raise RunMetadataError(run_id)
+    version = data.get("schema_version")
+    if type(version) is not int:
+        raise RunMetadataError(run_id)
+    if version != 1:
+        raise UnsupportedRunSchema(version)
+    expected = int(run_id[1:])
+    scalar_types = (
+        type(data.get("run_id")) is str,
+        type(data.get("run_number")) is int,
+        type(data.get("started_at")) is str,
+        data.get("ended_at") is None or type(data.get("ended_at")) is str,
+        type(data.get("status")) is str,
+        data.get("exit_code") is None or type(data.get("exit_code")) is int,
+        type(data.get("profile")) is str,
+        type(data.get("hardware")) is str,
+        data.get("config_source") is None or type(data.get("config_source")) is str,
+    )
+    if not all(scalar_types) or data["run_id"] != run_id or data["run_number"] != expected:
+        raise RunMetadataError(run_id)
+    try:
+        started = datetime.fromisoformat(data["started_at"])
+        ended = datetime.fromisoformat(data["ended_at"]) if data["ended_at"] else None
+        if started.tzinfo is None or (ended is not None and
+                                     (ended.tzinfo is None or ended < started)):
+            raise ValueError
+    except ValueError as error:
+        raise RunMetadataError(run_id) from error
+    status, exit_code = data["status"], data["exit_code"]
+    valid_final = (
+        status == "started" and ended is None and exit_code is None
+        or status == "completed" and ended is not None and exit_code == 0
+        or status == "interrupted" and ended is not None and exit_code == 130
+        or status == "failed" and ended is not None and exit_code not in (None, 0, 130)
+    )
+    if not valid_final:
+        raise RunMetadataError(run_id)
+    return RunRecord(**{field: data[field] for field in RunRecord.__dataclass_fields__})
+
+
+def grep_run_log(root: Path, run_id: str, query: str) -> tuple[tuple[tuple[int, str], ...], bool]:
+    """Search one safe log line-by-line for a bounded literal query."""
+    if canonical_run_id(run_id) != run_id:
+        raise FileNotFoundError(run_id)
+    directory = _safe_run_directory(root, run_id)
+    if directory is None:
+        raise FileNotFoundError(run_id)
+    path = directory / "runtime.log"
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise RunDataUnavailable(run_id)
+        matches: list[tuple[int, str]] = []
+        needle = query.casefold()
+        with path.open("r", encoding="utf-8", errors="replace") as source:
+            for line_number, line in enumerate(source, 1):
+                line = line.rstrip("\r\n")
+                if needle in line.casefold():
+                    if len(matches) == MAX_GREP_MATCHES:
+                        return tuple(matches), True
+                    matches.append((line_number, line))
+    except OSError as error:
+        raise RunDataUnavailable(run_id) from error
+    return tuple(matches), False
 
 
 class RunHistorySetupError(OSError):

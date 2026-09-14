@@ -407,13 +407,16 @@ def format_platform(snapshot: PlatformSnapshot) -> str:
 async def _run_console_application(
     application: RobotApplication, terminal: AsyncLineTerminal,
     message_channel: ConsoleOperatorMessageChannel | None,
+    history_root: Path = DEFAULT_HISTORY_ROOT,
 ) -> int:
     """Own the console's interrupt and cleanup lifecycle in one boundary."""
     try:
         await application.start()
         LOGGER.info("[CONSOLE] mode=local status=ready")
         await run_console_session(
-            RuntimeConsole(application), terminal, message_channel,
+            RuntimeConsole(application, history_root=history_root),
+            terminal,
+            message_channel,
         )
     except (asyncio.CancelledError, KeyboardInterrupt):
         # SIGINT is translated to task cancellation by modern asyncio, while
@@ -425,7 +428,10 @@ async def _run_console_application(
     return 0
 
 
-async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> int:
+async def _run_application(
+    args: argparse.Namespace, profile: RobotProfile,
+    history_root: Path = DEFAULT_HISTORY_ROOT,
+) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
     cognition = build_cognition_backend(args)
@@ -492,7 +498,8 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
 
     if args.console:
         return await _run_console_application(
-            application, AsyncLineTerminal(no_color=args.no_color), message_channel
+            application, AsyncLineTerminal(no_color=args.no_color), message_channel,
+            history_root,
         )
 
     await application.run()
@@ -595,7 +602,9 @@ def main(
         LOGGER.info("[CONFIG] source=%s status=loaded", args.config)
 
     try:
-        result = _run_with_asyncio_cleanup(_run_application(args, profile))
+        result = _run_with_asyncio_cleanup(
+            _run_application(args, profile, history_root)
+        )
     except (
         FusionHatUnavailableError, Picamera2UnavailableError,
         PiperTTSUnavailableError,
