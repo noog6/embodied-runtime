@@ -13,7 +13,9 @@ from embodied_runtime.console import RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.interaction import (
     CONSOLE_ADMINISTRATIVE, CONSOLE_DELIVERY, CONSOLE_DIALOGUE, CONSOLE_NOTIFICATION,
-    VOICE_DIALOGUE, MAX_OPERATOR_MESSAGE_CHARS, ConsoleOperatorMessageChannel,
+    VOICE_DIALOGUE, MAX_OPERATOR_DELIVERY_DESTINATION_DESCRIPTION_CHARS,
+    MAX_OPERATOR_DELIVERY_DESTINATION_NAME_CHARS, MAX_OPERATOR_MESSAGE_CHARS,
+    ConsoleOperatorMessageChannel,
     InteractionChannel, InteractionContext, InteractionInitiator,
     InteractionMode, OperatorDeliveryDestination, OperatorDeliveryRoute,
     OperatorDeliveryRouteCatalog, OperatorMessage, OperatorMessageSink,
@@ -221,6 +223,87 @@ class VoiceRecordingSink(RecordingSink):
     @property
     def channel(self):
         return InteractionChannel.VOICE
+
+
+class OperatorDeliveryRouteCatalogTests(unittest.TestCase):
+    @staticmethod
+    def route(name="console", channel=InteractionChannel.CONSOLE,
+              description="local plain-text console", sink=None):
+        return OperatorDeliveryRoute(
+            OperatorDeliveryDestination(name, channel, description),
+            RecordingSink() if sink is None else sink,
+        )
+
+    def test_valid_console_route_and_empty_catalog(self):
+        route = self.route(sink=ConsoleOperatorMessageChannel())
+        empty = OperatorDeliveryRouteCatalog()
+        catalog = OperatorDeliveryRouteCatalog((route,))
+
+        self.assertEqual(empty.destinations, ())
+        self.assertIsNone(empty.resolve("console"))
+        self.assertEqual(catalog.destinations, (route.destination,))
+        self.assertEqual(route.destination.channel, InteractionChannel.CONSOLE)
+        self.assertEqual(route.destination.description, "local plain-text console")
+        self.assertIs(catalog.resolve("console"), route)
+
+    def test_duplicate_exact_name_is_rejected(self):
+        routes = (self.route(description="primary console"),
+                  self.route(description="another console"))
+        with self.assertRaisesRegex(
+            ValueError, "^duplicate operator delivery destination: console$"
+        ):
+            OperatorDeliveryRouteCatalog(routes)
+
+    def test_distinct_names_are_retained_and_sorted(self):
+        voice = self.route("voice", InteractionChannel.VOICE,
+                           "test voice", VoiceRecordingSink())
+        console = self.route()
+        catalog = OperatorDeliveryRouteCatalog((voice, console))
+
+        self.assertEqual(tuple(item.name for item in catalog.destinations),
+                         ("console", "voice"))
+        self.assertIs(catalog.resolve("console"), console)
+        self.assertIs(catalog.resolve("voice"), voice)
+        self.assertIsNone(catalog.resolve("Console"))
+
+    def test_route_channel_must_match_sink_channel(self):
+        matching = self.route(sink=RecordingSink())
+        self.assertIs(OperatorDeliveryRouteCatalog((matching,)).resolve("console"),
+                      matching)
+        with self.assertRaisesRegex(
+            ValueError,
+            "^operator delivery route channel mismatch for destination: console$",
+        ):
+            OperatorDeliveryRouteCatalog((self.route(sink=VoiceRecordingSink()),))
+
+    def test_destination_name_validation(self):
+        for invalid in ("", "   ", " console", "console "):
+            with self.subTest(name=invalid), self.assertRaises(ValueError):
+                self.route(name=invalid)
+        with self.assertRaisesRegex(ValueError, "name must be a string"):
+            self.route(name=7)
+        maximum = "n" * MAX_OPERATOR_DELIVERY_DESTINATION_NAME_CHARS
+        self.assertEqual(self.route(name=maximum).destination.name, maximum)
+        with self.assertRaisesRegex(ValueError, "name exceeds 64 characters"):
+            self.route(name=maximum + "n")
+
+    def test_destination_description_validation(self):
+        for invalid in ("", "   ", " description", "description "):
+            with self.subTest(description=invalid), self.assertRaises(ValueError):
+                self.route(description=invalid)
+        with self.assertRaisesRegex(ValueError, "description must be a string"):
+            self.route(description=7)
+        maximum = "d" * MAX_OPERATOR_DELIVERY_DESTINATION_DESCRIPTION_CHARS
+        self.assertEqual(self.route(description=maximum).destination.description,
+                         maximum)
+        with self.assertRaisesRegex(ValueError, "description exceeds 256 characters"):
+            self.route(description=maximum + "d")
+
+    def test_destination_channel_type_is_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError, "channel must be an InteractionChannel"
+        ):
+            self.route(channel="console")
 
 
 class ScriptedBackend(TextCognitionBackend):

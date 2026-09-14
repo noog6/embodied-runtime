@@ -68,6 +68,10 @@ With no route, the tool and its separate **Available operator delivery
 destinations** grounding are absent. Availability is permission, not obligation;
 cognition, rather than lexical intent parsing, interprets the request.
 
+Destination names and descriptions are bounded runtime-owned semantic metadata.
+Names are unique within a catalog, and every route's declared channel must match
+its sink channel, so ambiguous or inconsistent configuration fails at startup.
+
 Each operator cognition stage uses the same captured semantic authority set for
 its tool enum and grounding. Execution validates the captured name and then
 re-resolves the current route. Removal or channel incompatibility rejects without

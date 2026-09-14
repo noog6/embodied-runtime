@@ -8,6 +8,8 @@ from enum import StrEnum
 
 
 MAX_OPERATOR_MESSAGE_CHARS = 1000
+MAX_OPERATOR_DELIVERY_DESTINATION_NAME_CHARS = 64
+MAX_OPERATOR_DELIVERY_DESTINATION_DESCRIPTION_CHARS = 256
 
 
 class InteractionChannel(StrEnum):
@@ -199,6 +201,35 @@ class OperatorDeliveryDestination:
     channel: InteractionChannel
     description: str
 
+    def __post_init__(self) -> None:
+        self._validate_text(
+            self.name, "name", MAX_OPERATOR_DELIVERY_DESTINATION_NAME_CHARS
+        )
+        if not isinstance(self.channel, InteractionChannel):
+            raise ValueError(
+                "operator delivery destination channel must be an InteractionChannel"
+            )
+        self._validate_text(
+            self.description,
+            "description",
+            MAX_OPERATOR_DELIVERY_DESTINATION_DESCRIPTION_CHARS,
+        )
+
+    @staticmethod
+    def _validate_text(value: object, label: str, limit: int) -> None:
+        if not isinstance(value, str):
+            raise ValueError(f"operator delivery destination {label} must be a string")
+        if not value or not value.strip():
+            raise ValueError(f"operator delivery destination {label} must be non-empty")
+        if value != value.strip():
+            raise ValueError(
+                f"operator delivery destination {label} must not have surrounding whitespace"
+            )
+        if len(value) > limit:
+            raise ValueError(
+                f"operator delivery destination {label} exceeds {limit} characters"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class OperatorDeliveryRoute:
@@ -212,7 +243,16 @@ class OperatorDeliveryRouteCatalog:
     """Small exact-name catalog of currently authorized operator routes."""
 
     def __init__(self, routes: Sequence[OperatorDeliveryRoute] = ()) -> None:
-        self._routes = {route.destination.name: route for route in routes}
+        self._routes: dict[str, OperatorDeliveryRoute] = {}
+        for route in routes:
+            name = route.destination.name
+            if name in self._routes:
+                raise ValueError(f"duplicate operator delivery destination: {name}")
+            if route.destination.channel != route.sink.channel:
+                raise ValueError(
+                    f"operator delivery route channel mismatch for destination: {name}"
+                )
+            self._routes[name] = route
 
     @property
     def destinations(self) -> tuple[OperatorDeliveryDestination, ...]:
