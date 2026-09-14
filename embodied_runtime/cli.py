@@ -30,6 +30,9 @@ from embodied_runtime.hardware.fusion_hat import (
 )
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
+from embodied_runtime.run_history import (
+    DEFAULT_HISTORY_ROOT, RunHistory, RunHistorySetupError, start_run,
+)
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.interaction import (
     ConsoleOperatorMessageChannel, InteractionChannel,
@@ -496,7 +499,11 @@ async def _run_application(args: argparse.Namespace, profile: RobotProfile) -> i
     return 0
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    history_root: Path = DEFAULT_HISTORY_ROOT,
+) -> int:
     parser, args, _ = parse_launch_arguments(argv)
     if args.initiative_platform_attention and not args.initiative:
         parser.error("--initiative-platform-attention requires --initiative")
@@ -543,13 +550,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--camera-test requires --diagnostics")
     if args.camera_test is not None and args.camera == "none":
         parser.error("--camera-test requires a selected camera")
-    configure_logging(no_color=args.no_color)
-    if args.config is not None:
-        LOGGER.info("[CONFIG] source=%s status=loaded", args.config)
     try:
         profile = load_profile(args.profile)
     except ProfileLoadError as error:
         parser.error(str(error))
+
+    history: RunHistory | None = None
+    try:
+        history = start_run(
+            history_root,
+            profile=args.profile,
+            hardware=args.hardware,
+            config_source=str(args.config) if args.config is not None else None,
+        )
+    except OSError as error:
+        configure_logging(no_color=args.no_color)
+        cleanup = (
+            "complete" if error.cleanup_complete else "incomplete"
+        ) if isinstance(error, RunHistorySetupError) else "not_needed"
+        LOGGER.warning(
+            "[RUN] history=%s status=unavailable provisional_cleanup=%s",
+            history_root,
+            cleanup,
+        )
+    else:
+        if not configure_logging(
+            no_color=args.no_color, history_log=history.log_path,
+        ):
+            cleanup_complete = history.abort()
+            LOGGER.warning(
+                "[RUN] history=%s status=unavailable provisional_cleanup=%s",
+                history.directory,
+                "complete" if cleanup_complete else "incomplete",
+            )
+            history = None
+        else:
+            LOGGER.info(
+                "[RUN] id=%s history=%s status=started",
+                history.run_id,
+                history.directory,
+            )
+            history.mark_started()
+    if args.config is not None:
+        LOGGER.info("[CONFIG] source=%s status=loaded", args.config)
 
     try:
         result = _run_with_asyncio_cleanup(_run_application(args, profile))
@@ -563,5 +606,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = 2
     except KeyboardInterrupt:
         result = 130
+    if history is not None:
+        try:
+            status = history.finalize(result)
+        except OSError:
+            LOGGER.warning(
+                "[RUN] id=%s history=%s status=finalization_unavailable",
+                history.run_id,
+                history.directory,
+            )
+        else:
+            LOGGER.info(
+                "[RUN] id=%s status=%s exit_code=%s",
+                history.run_id,
+                status,
+                result,
+            )
     LOGGER.info("[PROCESS] main status=returning exit_code=%s", result)
     return result

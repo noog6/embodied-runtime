@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+from pathlib import Path
 from typing import TextIO
 
 from embodied_runtime.console_style import (
@@ -107,7 +108,8 @@ def _stable_stream(stream: TextIO) -> tuple[TextIO, bool]:
 
 def configure_logging(
     *, stream: TextIO = sys.stderr, no_color: bool = False,
-) -> None:
+    history_log: Path | None = None,
+) -> bool:
     """Configure runtime records for the command-line entry point."""
     handler_stream, owned = _stable_stream(stream)
     handler = (
@@ -115,13 +117,27 @@ def configure_logging(
         if owned
         else logging.StreamHandler(handler_stream)
     )
+    handlers: list[logging.Handler] = [handler]
+    history_available = history_log is None
     try:
         handler.addFilter(TransportNoiseFilter())
         handler.setFormatter(SemanticColourFormatter(
             "%(asctime)s %(message)s",
             colour=colour_enabled(stream, disabled=no_color),
         ))
-        logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+        if history_log is not None:
+            try:
+                file_handler = logging.FileHandler(history_log, encoding="utf-8")
+            except OSError:
+                history_available = False
+            else:
+                file_handler.addFilter(TransportNoiseFilter())
+                file_handler.setFormatter(LocalISO8601Formatter(
+                    "%(asctime)s %(message)s"
+                ))
+                handlers.append(file_handler)
+                history_available = True
+        logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
     except BaseException:
         handler.close()
         raise
@@ -135,3 +151,4 @@ def configure_logging(
         # logger rather than on ``httpx._client``.
         if not any(isinstance(item, TransportNoiseFilter) for item in logger.filters):
             logger.addFilter(TransportNoiseFilter())
+    return history_available

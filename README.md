@@ -62,6 +62,8 @@ timezone offset. A healthy run remains quiet between low-frequency heartbeats:
 Monitor cadence uses monotonic time, independently of wall-clock timestamps.
 The explicit `[DIAG]` and detailed `[PLATFORM]` report lines remain stable,
 untimestamped structured snapshot output; surrounding runtime logs are timestamped.
+Validated launches also create a local, sequential [run history](docs/run-history.md)
+under `data/runs/`; this records runtime-owned logs, not a terminal transcript.
 
 ## Bounded delayed initiative
 

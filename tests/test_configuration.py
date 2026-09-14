@@ -30,6 +30,15 @@ EXPLICIT_AGENTIC = [
 
 
 class ConfigurationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.history_patch = patch(
+            "embodied_runtime.cli.start_run", side_effect=OSError("unavailable")
+        )
+        self.history_patch.start()
+
+    def tearDown(self) -> None:
+        self.history_patch.stop()
+
     def write(self, contents: str) -> Path:
         temporary = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
         self.addCleanup(Path(temporary.name).unlink, missing_ok=True)

@@ -265,6 +265,15 @@ class ApplicationCameraTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CameraCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.history_patch = patch(
+            "embodied_runtime.cli.start_run", side_effect=OSError("unavailable")
+        )
+        self.history_patch.start()
+
+    def tearDown(self) -> None:
+        self.history_patch.stop()
+
     def test_default_is_none_and_physical_selection_is_explicit(self):
         args = build_parser().parse_args([])
         self.assertEqual(args.camera, "none")
