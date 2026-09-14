@@ -270,6 +270,17 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Individual history integration tests supply a temporary root. The
+        # pre-existing CLI tests must never write repository-local run data.
+        self.history_patch = patch(
+            "embodied_runtime.cli.start_run", side_effect=OSError("unavailable")
+        )
+        self.history_patch.start()
+
+    def tearDown(self) -> None:
+        self.history_patch.stop()
+
     def test_outer_finalization_follows_application_shutdown(self) -> None:
         logs: list[str] = []
 
