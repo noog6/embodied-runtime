@@ -7,7 +7,9 @@ import logging
 import math
 from pathlib import Path
 import sys
+import threading
 import time
+from typing import Any, Coroutine
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
 from embodied_runtime.body.virtual import VirtualBodyBackend
@@ -58,6 +60,48 @@ from embodied_runtime.voice import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _live_non_daemon_thread_names(
+    threads: Sequence[threading.Thread],
+    *,
+    current: threading.Thread,
+    main_thread: threading.Thread,
+) -> tuple[str, ...]:
+    """Return bounded process-exit-relevant thread metadata."""
+    return tuple(sorted(
+        thread.name for thread in threads
+        if thread is not current and thread is not main_thread
+        and thread.is_alive() and not thread.daemon
+    ))
+
+
+def _run_with_asyncio_cleanup(coroutine: Coroutine[Any, Any, int]) -> int:
+    """Run the application while exposing asyncio's otherwise hidden cleanup tail."""
+    runner = asyncio.Runner()
+    try:
+        result = runner.run(coroutine)
+        LOGGER.info("[PROCESS] application_coroutine status=completed")
+        return result
+    finally:
+        LOGGER.info("[PROCESS] asyncio_cleanup status=started")
+        started = time.perf_counter()
+        runner.close()
+        duration_ms = (time.perf_counter() - started) * 1000
+        LOGGER.info(
+            "[PROCESS] asyncio_cleanup status=completed duration_ms=%.1f",
+            duration_ms,
+        )
+        names = _live_non_daemon_thread_names(
+            threading.enumerate(),
+            current=threading.current_thread(),
+            main_thread=threading.main_thread(),
+        )
+        LOGGER.info(
+            "[PROCESS] threads non_daemon_alive=%s names=%s",
+            len(names),
+            ",".join(names) or "none",
+        )
 
 
 def build_parser(*, explicit_configurable_values: bool = False) -> argparse.ArgumentParser:
@@ -508,7 +552,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(error))
 
     try:
-        return asyncio.run(_run_application(args, profile))
+        result = _run_with_asyncio_cleanup(_run_application(args, profile))
     except (
         FusionHatUnavailableError, Picamera2UnavailableError,
         PiperTTSUnavailableError,
@@ -516,6 +560,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ElevenLabsTTSUnavailableError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
-        return 2
+        result = 2
     except KeyboardInterrupt:
-        return 130
+        result = 130
+    LOGGER.info("[PROCESS] main status=returning exit_code=%s", result)
+    return result
