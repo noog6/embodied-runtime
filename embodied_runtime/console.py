@@ -58,7 +58,7 @@ class RuntimeConsole:
     def execute(self, command: str) -> tuple[str, bool]:
         """Return report text and whether the session should terminate."""
         raw_parts = command.lstrip().split(maxsplit=1)
-        if raw_parts and raw_parts[0].lower() == "ask":
+        if raw_parts and raw_parts[0].lower() in {"ask", "voice"}:
             return "This command requires an active asynchronous console session.", False
         try:
             words = shlex.split(command)
@@ -206,11 +206,11 @@ class RuntimeConsole:
                 "  memory                         Show working-memory metadata",
                 "  memory clear                   Clear session working memory",
                 "  memory persistent              Show persistent-memory state",
-                "  memory entity add <type> <name> Create a durable entity",
+                "  memory entity add <entity_type> <canonical_name> Create a durable entity",
                 "  memory entity find <name>       Exact entity lookup alias",
                 "  memory alias add <ENTn> <alias> Add a durable entity alias",
                 "  memory find <name>              Exact entity and memory lookup",
-                "  memory add <kind> <summary> ... Create a durable text memory",
+                "  memory add <kind> <summary> [options] Create a durable text memory",
                 "  memory show <MEMn>              Show one durable memory",
                 "  memory list <ENTn>              List an entity's memories",
                 "  goal                           Show current active goal",
@@ -427,7 +427,7 @@ class RuntimeConsole:
     def _followup(self) -> str:
         status = self._application.temporal_followup_status()
         lines = ["Temporal follow-up", f"  state:         {status.state}"]
-        if status.state == "pending":
+        if status.state in {"pending", "due_pending"}:
             lines.extend((
                 f"  delay_seconds: {status.delay_seconds}",
                 f"  remaining_s:   {status.remaining_seconds}",

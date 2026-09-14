@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import replace
 import io
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -125,11 +126,11 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  memory                         Show working-memory metadata\n"
             "  memory clear                   Clear session working memory\n"
             "  memory persistent              Show persistent-memory state\n"
-            "  memory entity add <type> <name> Create a durable entity\n"
+            "  memory entity add <entity_type> <canonical_name> Create a durable entity\n"
             "  memory entity find <name>       Exact entity lookup alias\n"
             "  memory alias add <ENTn> <alias> Add a durable entity alias\n"
             "  memory find <name>              Exact entity and memory lookup\n"
-            "  memory add <kind> <summary> ... Create a durable text memory\n"
+            "  memory add <kind> <summary> [options] Create a durable text memory\n"
             "  memory show <MEMn>              Show one durable memory\n"
             "  memory list <ENTn>              List an entity's memories\n"
             "  goal                           Show current active goal\n"
@@ -177,6 +178,14 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             )
             await first_app.start()
             first = RuntimeConsole(first_app)
+            self.assertEqual(
+                first.execute("memory entity add person")[0],
+                "Usage: memory entity add <entity_type> <canonical_name>.",
+            )
+            self.assertEqual(
+                first.execute("memory add fact")[0],
+                "Usage: memory add <kind> <summary> [options].",
+            )
             self.assertIn("ENT1", first.execute('memory entity add person "Nick"')[0])
             self.assertIn("ENT2", first.execute('memory entity add object "Gordon"')[0])
             first.execute('memory alias add ENT2 "stuffed seal"')
@@ -296,6 +305,31 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         report, stop = self.console.execute("ask What's happening?")
         self.assertIn("active asynchronous console session", report)
         self.assertFalse(stop)
+
+    def test_voice_requires_async_session(self):
+        self.assertEqual(
+            self.console.execute("voice"),
+            ("This command requires an active asynchronous console session.", False),
+        )
+
+    def test_due_pending_followup_retains_its_report_details(self):
+        self.app.temporal_followup_status = lambda: SimpleNamespace(
+            state="due_pending",
+            delay_seconds=30,
+            remaining_seconds=0,
+            purpose="check the room",
+        )
+        self.assertEqual(
+            self.console.execute("followup"),
+            (
+                "Temporal follow-up\n"
+                "  state:         due_pending\n"
+                "  delay_seconds: 30\n"
+                "  remaining_s:   0\n"
+                "  purpose:       check the room",
+                False,
+            ),
+        )
 
     def test_camera_status_without_configured_camera(self):
         self.assertEqual(
