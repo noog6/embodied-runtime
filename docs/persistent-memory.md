@@ -190,3 +190,28 @@ or vector behavior; ranking by a model; object-file retrieval; compaction;
 archival; supersession; contradiction reconciliation; background learning; or
 new attention trigger or budget. Schema version 1 and its lifecycle remain
 unchanged.
+
+The strict provider schema requires every object property to be listed as
+required. Consequently, `related_entity` and `related_role` remain required but
+nullable: facts and preferences pass `null` for both, while relationships pass
+both an exact existing entity reference and a simple role identifier. The
+`subject`, `value`, and shortest complete `evidence` clause are copied from the
+current operator utterance; `predicate` is a concise stable identifier. Making
+that proposal contract explicit does not relax exact entity resolution or
+verbatim grounding.
+
+The runtime result is authoritative for acknowledgement. `applied/created`
+confirms a new durable record; `applied/duplicate` means the knowledge was
+already stored and no new record was written; `rejected` confirms no write. If
+there is no `remember` result in the current turn, cognition must not infer a
+write from the request, intent, working memory, or a prior turn.
+
+Rejected results retain a bounded human-readable `error` and add one stable
+`reason`: `invalid_tool_arguments`, `invalid_proposal`,
+`evidence_not_in_utterance`, `value_not_supported`, `subject_not_supported`,
+`subject_not_found`, `subject_ambiguous`, `related_fields_incomplete`,
+`related_entity_invalid_for_kind`, `related_entity_not_supported`,
+`relationship_value_mismatch`, `related_entity_not_found`,
+`related_entity_ambiguous`, `conflict`, or `backend_failure`. Results never
+echo evidence, values, utterances, or full tool arguments; conflict results may
+include only the existing bounded memory identities.

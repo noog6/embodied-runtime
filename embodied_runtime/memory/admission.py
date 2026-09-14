@@ -30,10 +30,11 @@ class MemoryAdmissionResult:
     memory: str | None = None
     error: str | None = None
     conflicts: tuple[str, ...] = ()
+    reason: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {"status": self.status}
-        for key in ("admission", "entity", "memory", "error"):
+        for key in ("reason", "admission", "entity", "memory", "error"):
             value = getattr(self, key)
             if value is not None:
                 result[key] = value
@@ -64,26 +65,50 @@ class MemoryAdmission:
             evidence_key = _normalized(evidence, "evidence")
             value_key = _normalized(value, "value")
             if not _contains_grounded_phrase(utterance_key, evidence_key):
-                return _rejected("operator evidence was not found in current utterance")
+                return _rejected(
+                    "evidence_not_in_utterance",
+                    "operator evidence was not found in current utterance",
+                )
             if not _contains_grounded_phrase(evidence_key, value_key):
-                return _rejected("operator evidence does not support proposed value")
+                return _rejected(
+                    "value_not_supported",
+                    "operator evidence does not support proposed value",
+                )
             if not _contains_grounded_phrase(
                 evidence_key, _normalized(subject_name, "subject")
             ):
-                return _rejected("operator evidence does not support proposed subject")
+                return _rejected(
+                    "subject_not_supported",
+                    "operator evidence does not support proposed subject",
+                )
 
             has_entity = proposal.related_entity is not None
             has_role = proposal.related_role is not None
             if has_entity != has_role:
-                return _rejected("related_entity and related_role must appear together")
+                return _rejected(
+                    "related_fields_incomplete",
+                    "related_entity and related_role must appear together",
+                )
+            if kind == "relationship" and not has_entity:
+                return _rejected(
+                    "related_fields_incomplete",
+                    "relationship memories require related_entity and related_role",
+                )
             if has_entity and kind != "relationship":
-                return _rejected("related entity is allowed only for relationship memories")
+                return _rejected(
+                    "related_entity_invalid_for_kind",
+                    "related entity is allowed only for relationship memories",
+                )
 
             subjects = self._store.find_entities_exact(subject_name)
             if not subjects:
-                return _rejected("persistent-memory subject was not found")
+                return _rejected(
+                    "subject_not_found", "persistent-memory subject was not found"
+                )
             if len(subjects) != 1:
-                return _rejected("persistent-memory subject is ambiguous")
+                return _rejected(
+                    "subject_ambiguous", "persistent-memory subject is ambiguous"
+                )
             subject = subjects[0]
             links = [NewMemoryLink(subject.id, "subject")]
             if has_entity:
@@ -91,14 +116,26 @@ class MemoryAdmission:
                 related_role = _token(proposal.related_role, "related_role", 64).casefold()
                 related_key = _normalized(related_name, "related_entity")
                 if not _contains_grounded_phrase(evidence_key, related_key):
-                    return _rejected("operator evidence does not support related entity")
+                    return _rejected(
+                        "related_entity_not_supported",
+                        "operator evidence does not support related entity",
+                    )
                 if value_key != related_key:
-                    return _rejected("relationship value must equal related entity")
+                    return _rejected(
+                        "relationship_value_mismatch",
+                        "relationship value must equal related entity",
+                    )
                 related = self._store.find_entities_exact(related_name)
                 if not related:
-                    return _rejected("related persistent-memory entity was not found")
+                    return _rejected(
+                        "related_entity_not_found",
+                        "related persistent-memory entity was not found",
+                    )
                 if len(related) != 1:
-                    return _rejected("related persistent-memory entity is ambiguous")
+                    return _rejected(
+                        "related_entity_ambiguous",
+                        "related persistent-memory entity is ambiguous",
+                    )
                 links.append(NewMemoryLink(related[0].id, related_role))
 
             link_set = frozenset(
@@ -142,12 +179,14 @@ class MemoryAdmission:
                     conflicts.append(record.identity)
             if conflicts:
                 return MemoryAdmissionResult(
-                    "rejected", error="conflicting active persistent memory",
+                    "rejected", reason="conflict",
+                    error="conflicting active persistent memory",
                     conflicts=tuple(conflicts[:8]),
                 )
             if duplicate is not None:
                 return MemoryAdmissionResult(
-                    "applied", "duplicate", subject.identity, duplicate.identity
+                    "applied", admission="duplicate", entity=subject.identity,
+                    memory=duplicate.identity,
                 )
 
             stored = self._store.create_memory(
@@ -158,14 +197,15 @@ class MemoryAdmission:
                 ),
             )
             return MemoryAdmissionResult(
-                "applied", "created", subject.identity, stored.record.identity
+                "applied", admission="created", entity=subject.identity,
+                memory=stored.record.identity,
             )
         except (TypeError, ValueError) as error:
-            return _rejected(str(error))
+            return _rejected("invalid_proposal", str(error))
 
 
-def _rejected(error: str) -> MemoryAdmissionResult:
-    return MemoryAdmissionResult("rejected", error=error)
+def _rejected(reason: str, error: str) -> MemoryAdmissionResult:
+    return MemoryAdmissionResult("rejected", reason=reason, error=error)
 
 
 def _normalized(value: object, label: str) -> str:

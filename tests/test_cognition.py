@@ -396,6 +396,10 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
         properties = REMEMBER_TOOL.parameters["properties"]
         self.assertEqual(properties["related_entity"]["type"], ["string", "null"])
         self.assertEqual(properties["related_role"]["type"], ["string", "null"])
+        self.assertIn("canonical name or exact alias", properties["subject"]["description"])
+        self.assertIn("simple machine identifier", properties["predicate"]["description"])
+        self.assertIn("CURRENT operator utterance", properties["evidence"]["description"])
+        self.assertIn("Null for fact/preference", properties["related_entity"]["description"])
 
     async def test_remember_provider_request_uses_strict_nullable_schema(self):
         responses = FakeResponses()
