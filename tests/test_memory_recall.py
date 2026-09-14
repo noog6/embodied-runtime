@@ -270,6 +270,9 @@ class MemoryRecallIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recall_memory", backend.requests[0][0])
         self.assertIn("historical stored knowledge", RECALL_MEMORY_TOOL.description)
         self.assertIn("exact known entity name", RECALL_MEMORY_TOOL.description)
+        self.assertIn("yourself", RECALL_MEMORY_TOOL.description)
+        self.assertIn("exact current Robot name", RECALL_MEMORY_TOOL.description)
+        self.assertIn("name: Test", backend.requests[0][0])
         await app.stop()
 
     async def test_third_recall_is_rejected_by_existing_episode_budget(self):

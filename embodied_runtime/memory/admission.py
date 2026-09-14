@@ -8,6 +8,7 @@ from .model import NewMemoryLink, NewMemoryPayload
 from .store import PersistentMemoryStore
 
 _KINDS = frozenset(("fact", "preference", "relationship"))
+_OPERATOR_SELF_REFERENCES = frozenset(("you", "your", "yours", "yourself"))
 _TOKEN = re.compile(r"^[^\W\d][\w-]*$", re.UNICODE)
 
 
@@ -46,8 +47,11 @@ class MemoryAdmissionResult:
 class MemoryAdmission:
     """Validate and atomically write at most one bounded durable memory."""
 
-    def __init__(self, store: PersistentMemoryStore) -> None:
+    def __init__(
+        self, store: PersistentMemoryStore, *, runtime_self_name: str | None = None,
+    ) -> None:
         self._store = store
+        self._runtime_self_name = runtime_self_name
 
     def admit(
         self, proposal: MemoryAdmissionProposal, *, current_utterance: str,
@@ -74,13 +78,20 @@ class MemoryAdmission:
                     "value_not_supported",
                     "operator evidence does not support proposed value",
                 )
-            if not _contains_grounded_phrase(
-                evidence_key, _normalized(subject_name, "subject")
-            ):
+            subject_key = _normalized(subject_name, "subject")
+            if not _contains_grounded_phrase(evidence_key, subject_key):
                 return _rejected(
                     "subject_not_supported",
                     "operator evidence does not support proposed subject",
                 )
+
+            lookup_name = subject_name
+            if subject_key in _OPERATOR_SELF_REFERENCES:
+                if self._runtime_self_name is None:
+                    return _rejected(
+                        "subject_not_found", "persistent-memory subject was not found"
+                    )
+                lookup_name = self._runtime_self_name
 
             has_entity = proposal.related_entity is not None
             has_role = proposal.related_role is not None
@@ -100,7 +111,7 @@ class MemoryAdmission:
                     "related entity is allowed only for relationship memories",
                 )
 
-            subjects = self._store.find_entities_exact(subject_name)
+            subjects = self._store.find_entities_exact(lookup_name)
             if not subjects:
                 return _rejected(
                     "subject_not_found", "persistent-memory subject was not found"

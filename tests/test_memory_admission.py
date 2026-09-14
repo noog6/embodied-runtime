@@ -127,6 +127,135 @@ class MemoryAdmissionTests(unittest.TestCase):
         self.assertEqual(self.store.list_memories_for_entity(al.id), ())
         self.assertEqual(self.store.list_memories_for_entity(self.gordon.id), ())
 
+    def test_runtime_self_fact_preserves_operator_evidence_and_explicit_name(self):
+        runtime_self = self.store.create_entity("robot", "Current Robot")
+        admission = MemoryAdmission(
+            self.store, runtime_self_name="Current Robot"
+        )
+        self_referenced = proposal(
+            subject="your", predicate="indicator_color", value="blue",
+            evidence="your indicator color is blue",
+        )
+        created = admission.admit(
+            self_referenced,
+            current_utterance="Remember that your indicator color is blue.",
+            source_label="voice",
+        )
+        stored = self.store.get_memory(int(created.memory[3:]))
+        self.assertEqual((created.status, created.admission, created.entity),
+                         ("applied", "created", runtime_self.identity))
+        self.assertEqual([(link.entity_id, link.role) for link in stored.links],
+                         [(runtime_self.id, "subject")])
+        self.assertEqual(stored.record.summary, "your indicator color is blue")
+        self.assertEqual(stored.payloads[0].inline_text,
+                         "your indicator color is blue")
+        self.assertNotIn("Current Robot's", stored.record.summary)
+
+        explicit = admission.admit(
+            proposal(subject="Current Robot", predicate="shutdown_voltage",
+                     value="around 6.750 V",
+                     evidence="Current Robot's shutdown voltage is around 6.750 V"),
+            current_utterance=(
+                "Remember that Current Robot's shutdown voltage is around 6.750 V."
+            ),
+        )
+        self.assertEqual((explicit.status, explicit.admission, explicit.entity),
+                         ("applied", "created", runtime_self.identity))
+
+    def test_runtime_self_duplicate_conflict_and_channel_independence(self):
+        runtime_self = self.store.create_entity("robot", "Current Robot")
+        admission = MemoryAdmission(self.store, runtime_self_name="Current Robot")
+        original = self.store.create_memory(
+            "fact", "Current Robot voltage", predicate="shutdown_voltage",
+            value_text="around 6.750 V",
+            links=(NewMemoryLink(runtime_self.id, "subject"),),
+            payloads=(NewMemoryPayload("text", "text/plain", "original"),),
+        )
+        duplicate = admission.admit(
+            proposal(subject="your", predicate="shutdown_voltage",
+                     value="around 6.750 V",
+                     evidence="your shutdown voltage is around 6.750 V"),
+            current_utterance=(
+                "Remember that your shutdown voltage is around 6.750 V."
+            ), source_label="console",
+        )
+        conflict = admission.admit(
+            proposal(subject="yours", predicate="shutdown_voltage", value="7 V",
+                     evidence="yours is a shutdown voltage of 7 V"),
+            current_utterance="Remember that yours is a shutdown voltage of 7 V.",
+            source_label="voice",
+        )
+        self.assertEqual((duplicate.status, duplicate.admission, duplicate.memory),
+                         ("applied", "duplicate", original.record.identity))
+        self.assertEqual((conflict.status, conflict.reason, conflict.conflicts),
+                         ("rejected", "conflict", (original.record.identity,)))
+        self.assertEqual(len(self.store.list_memories_for_entity(runtime_self.id)), 1)
+
+    def test_runtime_self_vocabulary_is_bounded_and_excludes_operator_first_person(self):
+        self.store.create_entity("robot", "Current Robot")
+        admission = MemoryAdmission(self.store, runtime_self_name="Current Robot")
+        for reference in ("you", "your", "yours", "yourself"):
+            with self.subTest(reference=reference):
+                result = admission.admit(
+                    proposal(subject=reference, predicate=f"marker_{reference}",
+                             value="blue", evidence=f"{reference} marker is blue"),
+                    current_utterance=f"Remember that {reference} marker is blue.",
+                )
+                self.assertEqual(result.admission, "created")
+        for reference in ("I", "me", "my", "mine", "myself", "young", "yourselfish",
+                          "courtyard"):
+            with self.subTest(reference=reference):
+                result = admission.admit(
+                    proposal(subject="Current Robot", predicate="preferred_editor",
+                             value="vi", evidence=f"{reference} preferred editor is vi"),
+                    current_utterance=(
+                        f"Remember that {reference} preferred editor is vi."
+                    ),
+                )
+                self.assertEqual(result.reason, "subject_not_supported")
+
+    def test_runtime_self_requires_one_exact_persistent_entity(self):
+        missing = MemoryAdmission(
+            self.store, runtime_self_name="Absent Robot"
+        ).admit(
+            proposal(subject="your", value="blue", evidence="your color is blue"),
+            current_utterance="Remember that your color is blue.",
+        )
+        first = self.store.create_entity("robot", "First")
+        second = self.store.create_entity("robot", "Second")
+        self.store.add_entity_alias(first.id, "Shared Runtime")
+        self.store.add_entity_alias(second.id, "Shared Runtime")
+        ambiguous = MemoryAdmission(
+            self.store, runtime_self_name="Shared Runtime"
+        ).admit(
+            proposal(subject="yourself", value="blue",
+                     evidence="yourself has color blue"),
+            current_utterance="Remember that yourself has color blue.",
+        )
+        self.assertEqual(missing.reason, "subject_not_found")
+        self.assertEqual(ambiguous.reason, "subject_ambiguous")
+        self.assertEqual(self.store.find_entities_exact("Absent Robot"), ())
+        self.assertEqual(self.store.list_memories_for_entity(first.id), ())
+        self.assertEqual(self.store.list_memories_for_entity(second.id), ())
+
+    def test_runtime_self_can_be_relationship_subject_only(self):
+        runtime_self = self.store.create_entity("robot", "Current Robot")
+        hardware = self.store.create_entity("hardware", "Example HAT")
+        result = MemoryAdmission(
+            self.store, runtime_self_name="Current Robot"
+        ).admit(
+            proposal(subject="you", kind="relationship", predicate="paired_with",
+                     value="Example HAT", evidence="you are paired with Example HAT",
+                     related_entity="Example HAT", related_role="paired_device"),
+            current_utterance="Remember that you are paired with Example HAT.",
+        )
+        stored = self.store.get_memory(int(result.memory[3:]))
+        self.assertEqual(result.admission, "created")
+        self.assertEqual(set((link.entity_id, link.role) for link in stored.links),
+                         {(runtime_self.id, "subject"),
+                          (hardware.id, "paired_device")})
+        self.assertEqual(stored.record.summary, "you are paired with Example HAT")
+
     def test_relationship_resolves_related_entity_and_requires_pair(self):
         item = proposal(
             kind="relationship", predicate="owner", value="Nick",
@@ -403,6 +532,26 @@ class MemoryAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(memories[0].record.source_label, "voice")
         self.assertEqual(len(app.working_memory.snapshot()), 1)
         self.assertEqual(app.episode_coordinator.last.id, 1)
+        await app.stop()
+
+    async def test_application_uses_profile_name_for_runtime_self_admission(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = SQLiteMemoryStore(Path(temporary.name) / "memory.sqlite3")
+        runtime_self = store.create_entity("robot", "Test")
+        app, _ = self.make_app(store, [])
+        await app.start()
+        arguments = asdict(proposal(
+            subject="your", predicate="indicator_color", value="blue",
+            evidence="your indicator color is blue",
+        ))
+        result = app._execute_memory_admission(
+            CognitionToolCall("remember", json.dumps(arguments)),
+            "Remember that your indicator color is blue.", "console",
+        )
+        outcome = json.loads(result.output)
+        self.assertEqual((outcome["status"], outcome["admission"], outcome["entity"]),
+                         ("applied", "created", runtime_self.identity))
         await app.stop()
 
     async def test_episode_trigger_source_is_durable_provenance(self):

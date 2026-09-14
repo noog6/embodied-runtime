@@ -225,7 +225,9 @@ RECALL_MEMORY_TOOL = CognitionToolDefinition(
         "Recall durable long-term memories associated with one exact known entity name "
         "or alias when remembered knowledge may help the current concern. Persistent "
         "memory is available only through this deliberate lookup. Supply a concise name "
-        "or alias, not the whole question. Results are historical stored knowledge, not "
+        "or alias, not the whole question. When an operator asks what you remember about "
+        "yourself, use the exact current Robot name from runtime context; do not pass a "
+        "pronoun as an alias. Results are historical stored knowledge, not "
         "current sensor evidence; no match and ambiguous matches are legitimate and "
         "must not be silently collapsed."
     ),
@@ -245,8 +247,12 @@ REMEMBER_TOOL = CognitionToolDefinition(
         "Persist one durable fact, preference, or simple relationship that the operator "
         "directly stated in the current utterance and that is likely useful beyond this "
         "session. The subject must already exist in persistent memory by exact canonical "
-        "name or alias. Copy the exact subject reference used in the current operator "
-        "utterance; never invent or create an entity. Select kind by meaning, not to "
+        "name or alias. In an operator turn, you, your, yours, or yourself may be the "
+        "subject reference for the current embodied runtime self; copy that exact reference "
+        "and let the runtime resolve it from the current Robot name. Never rewrite it as "
+        "the Robot name. Operator I, me, my, mine, and myself are not runtime-self "
+        "references. Otherwise copy the exact subject name or alias used in the current "
+        "operator utterance; never invent or create an entity. Select kind by meaning, not to "
         "bypass admission. Use a concise stable identifier for predicate. Copy value "
         "from the operator's wording rather than paraphrasing it. Copy evidence verbatim "
         "from the CURRENT operator utterance: use the shortest complete clause containing "
@@ -267,7 +273,8 @@ REMEMBER_TOOL = CognitionToolDefinition(
                 "type": "string", "minLength": 1, "maxLength": 256,
                 "description": (
                     "Existing canonical name or exact alias copied from the current "
-                    "operator utterance; never create or invent an entity."
+                    "operator utterance, or its exact bounded runtime-self reference "
+                    "(you, your, yours, yourself); never create or invent an entity."
                 ),
             },
             "kind": {
@@ -460,7 +467,7 @@ class RobotApplication:
             if persistent_memory_store is not None else None
         )
         self._memory_admission = (
-            MemoryAdmission(persistent_memory_store)
+            MemoryAdmission(persistent_memory_store, runtime_self_name=profile.name)
             if persistent_memory_store is not None else None
         )
         self._persistent_memory_closed = False
