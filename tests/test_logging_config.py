@@ -1,7 +1,9 @@
 import importlib.util
 import io
 import logging
+import os
 import re
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -80,6 +82,50 @@ class LoggingFormatterTests(unittest.TestCase):
         logging.getLogger("embodied_runtime.test").info("[BODY] status=ready")
         self.assertNotIn("\x1b[", stream.getvalue())
         self.assertIn("[BODY] status=ready", stream.getvalue())
+
+    def test_os_backed_logging_survives_process_stderr_redirection(self):
+        saved_stderr = os.dup(2)
+        configured_stream = os.fdopen(2, "w", closefd=False)
+        try:
+            with tempfile.TemporaryFile(mode="w+") as destination:
+                os.dup2(destination.fileno(), 2)
+                configure_logging(stream=configured_stream, no_color=True)
+
+                logger = logging.getLogger("embodied_runtime.test")
+                logger.info("[BODY] phase=before")
+                with open(os.devnull, "w") as devnull:
+                    redirected_stderr = os.dup(2)
+                    try:
+                        os.dup2(devnull.fileno(), 2)
+                        logger.info("[ATTENTION] phase=during")
+                    finally:
+                        os.dup2(redirected_stderr, 2)
+                        os.close(redirected_stderr)
+                logger.info("[COGNITION] phase=after")
+
+                destination.seek(0)
+                output = destination.read()
+                self.assertIn("[BODY] phase=before", output)
+                self.assertIn("[ATTENTION] phase=during", output)
+                self.assertIn("[COGNITION] phase=after", output)
+
+                # Close the handler-owned duplicate before the destination.
+                configure_logging(stream=io.StringIO(), no_color=True)
+        finally:
+            os.dup2(saved_stderr, 2)
+            os.close(saved_stderr)
+            configured_stream.close()
+
+    def test_reconfiguration_closes_owned_descriptor(self):
+        with tempfile.TemporaryFile(mode="w+") as destination:
+            configure_logging(stream=destination, no_color=True)
+            handler = logging.getLogger().handlers[0]
+            owned_descriptor = handler.stream.fileno()
+
+            configure_logging(stream=io.StringIO(), no_color=True)
+
+            with self.assertRaises(OSError):
+                os.fstat(owned_descriptor)
 
     def test_transport_filter_suppresses_only_namespaced_info(self):
         stream = io.StringIO()

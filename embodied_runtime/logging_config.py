@@ -2,6 +2,7 @@
 
 from datetime import datetime
 import logging
+import os
 import re
 import sys
 from typing import TextIO
@@ -73,17 +74,57 @@ class SemanticColourFormatter(LocalISO8601Formatter):
         return f"{prefix}{ansi}{rendered[start:end]}{RESET}{rendered[end:]}"
 
 
+class _OwnedStreamHandler(logging.StreamHandler):
+    """A stream handler that closes a stream created solely for its use."""
+
+    def close(self) -> None:
+        try:
+            self.stream.close()
+        finally:
+            super().close()
+
+
+def _stable_stream(stream: TextIO) -> tuple[TextIO, bool]:
+    """Duplicate an OS-backed stream so later ``dup2`` calls cannot retarget it."""
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, OSError):
+        return stream, False
+
+    duplicate = os.dup(descriptor)
+    try:
+        stable = os.fdopen(
+            duplicate,
+            "w",
+            encoding=getattr(stream, "encoding", None),
+            errors=getattr(stream, "errors", None),
+        )
+    except BaseException:
+        os.close(duplicate)
+        raise
+    return stable, True
+
+
 def configure_logging(
     *, stream: TextIO = sys.stderr, no_color: bool = False,
 ) -> None:
     """Configure runtime records for the command-line entry point."""
-    handler = logging.StreamHandler(stream)
-    handler.addFilter(TransportNoiseFilter())
-    handler.setFormatter(SemanticColourFormatter(
-        "%(asctime)s %(message)s",
-        colour=colour_enabled(stream, disabled=no_color),
-    ))
-    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    handler_stream, owned = _stable_stream(stream)
+    handler = (
+        _OwnedStreamHandler(handler_stream)
+        if owned
+        else logging.StreamHandler(handler_stream)
+    )
+    try:
+        handler.addFilter(TransportNoiseFilter())
+        handler.setFormatter(SemanticColourFormatter(
+            "%(asctime)s %(message)s",
+            colour=colour_enabled(stream, disabled=no_color),
+        ))
+        logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    except BaseException:
+        handler.close()
+        raise
     for logger_name in _TRANSPORT_LOG_NAMESPACES:
         logger = logging.getLogger(logger_name)
         logger.setLevel(logging.WARNING)
