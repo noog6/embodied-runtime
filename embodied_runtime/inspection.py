@@ -1,6 +1,7 @@
 """Bounded provider-neutral semantic self-inspection."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import shutil
 import socket
@@ -21,6 +22,12 @@ class SelfInspectionFact:
 class SelfInspectionResult:
     area: str
     facts: tuple[SelfInspectionFact, ...]
+    observed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if (self.observed_at is not None and
+                (self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None)):
+            raise ValueError("inspection observed_at must be an offset-aware datetime")
 
 
 class SelfInspector(Protocol):

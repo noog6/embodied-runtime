@@ -61,6 +61,13 @@ bounded and volatile; historical text is quoted as data, while the current
 operator request, operator instructions, and fresh Runtime context have
 precedence. Clearing memory or restarting the process removes this continuity.
 The provider still has no cross-request conversation or retained session.
+Each retained turn carries its application-captured completion time. A small
+bounded observation projection separately retains acquisition/sample time for
+time-sensitive evidence such as battery voltage; completion and observation
+times are explicitly different facts, and no complete runtime snapshot is kept.
+At most three observations with at most sixteen facts each are retained per turn;
+observation metadata and values have fixed character limits and are deterministically
+truncated. All observation strings are JSON-quoted when rendered as historical data.
 
 Each ask also receives the current application-owned `ActiveGoal`, separately
 rendered from Runtime context and Working memory. The provider has no goal,

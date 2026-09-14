@@ -68,16 +68,24 @@ class SemanticObservationTests(unittest.TestCase):
             facts[0].value = "changed"
         rendered = AttentionStimulus(observation).render()
         self.assertLess(rendered.index("first: 1"), rendered.index("second: 2"))
-        self.assertEqual(observation.__slots__, ("kind", "source", "facts"))
+        self.assertEqual(
+            observation.__slots__, ("kind", "source", "facts", "occurred_at_ns")
+        )
 
     def test_body_event_maps_values_without_retaining_event(self):
         event = BodyOrientationChanged(
             source="reflex:test", previous_yaw_degrees=12.0,
             previous_pitch_degrees=-3.0, yaw_degrees=0.0, pitch_degrees=1.0,
+            timestamp_ns=123456,
         )
         observation = observation_from_body_orientation(event)
         self.assertEqual((observation.kind, observation.source),
                          ("body_orientation_changed", "reflex:test"))
+        self.assertEqual(observation.occurred_at_ns, 123456)
+        self.assertIn(
+            "occurred_at_monotonic_ns: 123456",
+            AttentionStimulus(observation).render(),
+        )
         self.assertEqual(
             tuple((fact.name, fact.value) for fact in observation.facts),
             (("previous_yaw_deg", "12.0"), ("previous_pitch_deg", "-3.0"),

@@ -512,7 +512,9 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
     async def test_temporal_grounding_is_fresh_across_operator_acquisition(self):
         backend = ScriptedBackend((("inspect_self", {"area": "runtime"}),))
         instants = iter((datetime(2026, 9, 10, 22, 0, 1, tzinfo=UTC),
-                         datetime(2026, 9, 10, 22, 0, 5, tzinfo=UTC)))
+                         datetime(2026, 9, 10, 22, 0, 2, tzinfo=UTC),
+                         datetime(2026, 9, 10, 22, 0, 5, tzinfo=UTC),
+                         datetime(2026, 9, 10, 22, 0, 6, tzinfo=UTC)))
         app = self.app(backend, timezone_name="America/Toronto",
                        wall_clock=lambda: next(instants))
         await app.start()

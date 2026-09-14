@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 import json
 import unittest
 
@@ -127,11 +128,12 @@ class Inspector:
 
 
 class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
-    def app(self, camera=None, vision=None, cognition=None):
+    def app(self, camera=None, vision=None, cognition=None, **kwargs):
         return RobotApplication(
             RobotProfile("test", "Test"), VirtualHardwareBackend(),
             platform_provider=Platform(), camera_backend=camera,
             cognition_backend=cognition, visual_perception_backend=vision,
+            **kwargs,
         )
 
     def initiative_app(self, backend, camera, vision, *, sink=None, inspector=None):
@@ -166,6 +168,26 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(OBSERVE_SCENE_TOOL, app.cognition_tools())
         camera.running = False
         self.assertNotIn(OBSERVE_SCENE_TOOL, app.cognition_tools())
+        await app.stop()
+
+    async def test_observed_at_is_capture_time_not_interpretation_completion(self):
+        capture_time = datetime(2026, 9, 13, 20, 0, tzinfo=UTC)
+        later = datetime(2026, 9, 13, 20, 0, 2, tzinfo=UTC)
+        current = [capture_time]
+
+        class DelayedVision(Vision):
+            async def interpret(inner, frame, focus):
+                current[0] = later
+                return await super().interpret(frame, focus)
+
+        camera, vision = Camera(), DelayedVision()
+        app = self.app(camera, vision, wall_clock=lambda: current[0])
+        await app.start()
+        _, result = await app._execute_visual_perception(
+            CognitionToolCall("observe_scene", '{"focus":"look"}')
+        )
+        self.assertEqual(result.observed_at, capture_time)
+        self.assertNotEqual(result.observed_at, later)
         await app.stop()
 
     async def test_operator_request_captures_and_interprets_once_without_state_change(self):

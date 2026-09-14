@@ -25,6 +25,7 @@ class SemanticObservation:
     kind: str
     source: str
     facts: tuple[SemanticObservationFact, ...]
+    occurred_at_ns: int | None = None
 
 
 def observation_from_temporal_followup(event: TemporalFollowupDue) -> SemanticObservation:
@@ -33,7 +34,7 @@ def observation_from_temporal_followup(event: TemporalFollowupDue) -> SemanticOb
         (
             SemanticObservationFact("purpose", event.purpose),
             SemanticObservationFact("delay_seconds", str(event.delay_seconds)),
-        ),
+        ), event.timestamp_ns,
     )
 
 
@@ -48,7 +49,7 @@ def observation_from_body_orientation(
             SemanticObservationFact("previous_pitch_deg", str(event.previous_pitch_degrees)),
             SemanticObservationFact("yaw_deg", str(event.yaw_degrees)),
             SemanticObservationFact("pitch_deg", str(event.pitch_degrees)),
-        ),
+        ), event.timestamp_ns,
     )
 
 
@@ -74,5 +75,5 @@ def observation_from_platform_transition(
         (
             SemanticObservationFact("condition", condition),
             SemanticObservationFact("transition", transition),
-        ),
+        ), event.timestamp_ns,
     )

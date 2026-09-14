@@ -35,6 +35,11 @@ class EpisodeAcquisitionOutcome:
                 "facts for the inspected area"
             )
             lines.append(f"  acquisition_{index}_area: {result.area}")
+            if result.observed_at is not None:
+                lines.append(
+                    f"  acquisition_{index}_observed_at: "
+                    f"{result.observed_at.isoformat(timespec='seconds')}"
+                )
             lines.extend(
                 f"  acquisition_{index}.{fact.name}: {fact.value}"
                 for fact in result.facts
@@ -45,6 +50,13 @@ class EpisodeAcquisitionOutcome:
                 f"  acquisition_{index}_authority: model-generated visual interpretation; "
                 "may be incomplete or uncertain; not authoritative Runtime state",
                 f"  acquisition_{index}_visual_focus: {result.focus}",
+            ))
+            if result.observed_at is not None:
+                lines.append(
+                    f"  acquisition_{index}_observed_at: "
+                    f"{result.observed_at.isoformat(timespec='seconds')}"
+                )
+            lines.extend((
                 f"  acquisition_{index}_visual_description: {result.description}",
                 f"  acquisition_{index}_visual_description_truncated: "
                 f"{str(result.truncated).lower()}",

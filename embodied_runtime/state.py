@@ -1,6 +1,7 @@
 """Small immutable snapshots of authoritative runtime state."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 from embodied_runtime.platform import PlatformSnapshot
@@ -29,6 +30,12 @@ class PresenceState:
 @dataclass(frozen=True, slots=True)
 class PowerState:
     battery_voltage_v: float | None
+    observed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if (self.observed_at is not None and
+                (self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None)):
+            raise ValueError("power observed_at must be an offset-aware datetime")
 
 
 @dataclass(frozen=True, slots=True)

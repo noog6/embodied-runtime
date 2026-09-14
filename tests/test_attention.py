@@ -19,6 +19,8 @@ from embodied_runtime.state import BodyState, LifecycleState
 from tests.test_platform import snapshot
 
 
+TEST_INSTANT = datetime(2026, 1, 1, tzinfo=UTC)
+
 class Platform:
     def snapshot(self):
         return snapshot()
@@ -111,7 +113,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         await app.set_body_orientation(yaw_degrees=35, pitch_degrees=-10)
         goal = app.set_goal("Keep body at 35/-10")
-        app.working_memory.append("prior operator", "prior response")
+        app.working_memory.append("prior operator", "prior response", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         await app.observe_presence(present=True, source="test")
         await asyncio.wait_for(backend.started.wait(), 1)
@@ -292,7 +294,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.set_body_orientation(yaw_degrees=35, pitch_degrees=-10,
                                        source="cognition")
         goal = app.set_goal("Keep body at 35/-10")
-        app.working_memory.append("operator", "history")
+        app.working_memory.append("operator", "history", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         with self.assertLogs("embodied_runtime", level="INFO") as captured:
             await app.observe_presence(present=True, source="test")

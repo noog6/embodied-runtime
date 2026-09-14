@@ -66,9 +66,10 @@ the lifecycle and latest platform snapshot, it owns:
   and is replaced only after a body capability succeeds; and
 - `PresenceState(present, source)`, which is `None` until a semantic presence
   observation is received; and
-- `PowerState(battery_voltage_v)`, whose optional voltage is read from a
+- `PowerState(battery_voltage_v, observed_at)`, whose optional voltage is read from a
   battery-capable hardware backend at startup and immediately before cognition
-  context is composed. Hardware without that capability records `None`; the
+  context is composed. A running application's sample receives an aware wall-clock
+  observation time for model-facing provenance. Hardware without that capability records `None`; the
   runtime does not synthesize a battery reading.
 
 Backends, the console, and events do not independently own these facts.

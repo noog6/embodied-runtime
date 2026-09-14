@@ -570,7 +570,7 @@ class CognitionContextTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             context.profile_name = "changed"  # type: ignore[misc]
         names = {field.name for field in fields(CognitionContext)}
-        self.assertEqual(len(names), 29)
+        self.assertEqual(len(names), 30)
         self.assertFalse(names & {"environment", "api_key", "captured_monotonic"})
         with patch.dict(os.environ, {"OPENAI_API_KEY": "secret"}):
             self.assertNotIn("secret", self.make_context().render())

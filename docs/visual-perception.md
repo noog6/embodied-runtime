@@ -15,11 +15,13 @@ before any provider request, and neither capture nor interpretation is retried.
 ## Authority and lifetime
 
 `CameraFrame` is a transient authoritative sensor payload.
-`VisualPerceptionResult` is a transient, model-generated interpretation of one
-frame and may be incomplete, uncertain, or wrong. `RuntimeState` remains the
-authority for runtime facts. A visual result is request-local grounding only:
-it is never copied into runtime state or working memory and is not an initiative
-effect. Image bytes are discarded after the request; they are not written,
+`VisualPerceptionResult` is a model-generated interpretation of one frame and
+may be incomplete, uncertain, or wrong. Its `observed_at` is sampled immediately
+after capture, before interpretation, so model latency does not become scene time.
+`RuntimeState` remains the authority for runtime facts. A bounded textual projection
+may enter a completed operator turn's volatile working memory; it is never copied
+into runtime state and is not an initiative effect. Image bytes are discarded after
+the request; they are not written,
 logged, published, cached, or retained as history.
 
 ## Configuration and availability

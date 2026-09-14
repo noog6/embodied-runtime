@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import asyncio
 from dataclasses import replace
 import io
@@ -17,6 +18,8 @@ from embodied_runtime.profile import RobotProfile
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from tests.test_platform import snapshot
 
+
+TEST_INSTANT = datetime(2026, 1, 1, tzinfo=UTC)
 
 class CountingProvider:
     def __init__(self, samples):
@@ -142,8 +145,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.console.execute("?"), (expected, False))
 
     def test_memory_metadata_and_clear_leave_runtime_state_untouched(self):
-        self.app.working_memory.append("one", "answer")
-        self.app.working_memory.append("two", "answer")
+        self.app.working_memory.append("one", "answer", completed_at=TEST_INSTANT)
+        self.app.working_memory.append("two", "answer", completed_at=TEST_INSTANT)
         state = self.app.runtime_state
         report, stop = self.console.execute("memory")
         self.assertFalse(stop)
@@ -225,7 +228,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
 
     def test_goal_show_and_clear_preserve_state_and_memory(self):
         state = self.app.runtime_state
-        self.app.working_memory.append("old", "history")
+        self.app.working_memory.append("old", "history", completed_at=TEST_INSTANT)
         memory = self.app.working_memory.snapshot()
         self.assertEqual(self.console.execute("goal"), (
             "Active goal\n  state:         none", False
