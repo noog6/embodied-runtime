@@ -47,6 +47,10 @@ class TextCognitionBackend(ABC):
 
     identifier: str
 
+    async def prepare(self) -> None:
+        """Perform optional backend-specific preparation before runtime readiness."""
+        return None
+
     @abstractmethod
     async def respond(
         self,

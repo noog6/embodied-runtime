@@ -13,13 +13,15 @@ from embodied_runtime.cognition.base import (
     CognitionToolExecutor,
     CognitionUnavailableError,
     InstructionsProvider,
+    TextCognitionBackend,
 )
 
 DEFAULT_MODEL = "gpt-5.6-luna"
+PREWARM_INPUT = "Reply ready."
 LOGGER = logging.getLogger(__name__)
 
 
-class OpenAIResponsesBackend:
+class OpenAIResponsesBackend(TextCognitionBackend):
     """A lazy, asynchronous OpenAI Responses text adapter."""
 
     identifier = "openai-responses"
@@ -29,6 +31,23 @@ class OpenAIResponsesBackend:
         self._client = client
         self._client_init_measured = client is not None
         self._provider_request_ordinal = 0
+        self._preparation_attempted = False
+
+    async def prepare(self) -> None:
+        """Initialize the client and make one tool-free provider prewarm request."""
+        if self._preparation_attempted:
+            return
+        self._preparation_attempted = True
+        self._get_client()
+        try:
+            await self._provider_request(
+                "prewarm", {"model": self.model, "input": PREWARM_INPUT},
+                message_chars=len(PREWARM_INPUT), instruction_chars=0, tools=0,
+            )
+        except CognitionError:
+            raise
+        except Exception as error:
+            raise CognitionError("OpenAI Responses preparation failed") from error
 
     def _get_client(self) -> Any:
         if self._client is not None:

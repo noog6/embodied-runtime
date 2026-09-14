@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import sys
@@ -5,7 +6,7 @@ from dataclasses import FrozenInstanceError, fields
 from types import ModuleType, SimpleNamespace
 import unittest
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import embodied_runtime.app as app_module
 from embodied_runtime.app import REMEMBER_TOOL, ApplicationOptions, RobotApplication
@@ -22,11 +23,13 @@ from embodied_runtime.cognition import (
 from embodied_runtime.cognition.openai_responses import (
     DEFAULT_MODEL,
     OpenAIResponsesBackend,
+    PREWARM_INPUT,
 )
-from embodied_runtime.events import EventBus
+from embodied_runtime.events import ApplicationStarted, EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
+from embodied_runtime.state import LifecycleState
 from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
 from tests.test_platform import snapshot
 
@@ -85,6 +88,31 @@ class FakeCognition(TextCognitionBackend):
         return self.response
 
 
+class PreparingCognition(FakeCognition):
+    def __init__(self, preparation_error=None):
+        super().__init__("later response")
+        self.preparation_error = preparation_error
+        self.prepare_calls = 0
+        self.prepared = False
+
+    async def prepare(self):
+        self.prepare_calls += 1
+        if self.preparation_error is not None:
+            raise self.preparation_error
+        self.prepared = True
+
+
+class BlockingPreparingCognition(FakeCognition):
+    def __init__(self):
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def prepare(self):
+        self.entered.set()
+        await self.release.wait()
+
+
 class MutableBatteryHardware(VirtualHardwareBackend):
     capabilities = ("battery_voltage",)
 
@@ -119,6 +147,98 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
             camera_backend=camera,
             cognition_backend=backend,
         )
+
+    async def test_default_backend_preparation_is_a_no_op(self):
+        backend = FakeCognition()
+        self.assertIsNone(await backend.prepare())
+
+    async def test_preparation_precedes_readiness_without_cognition_semantics(self):
+        backend = PreparingCognition()
+        events = EventBus()
+        prepared_at_started = []
+        original_publish = events.publish
+
+        async def record_started(event):
+            if isinstance(event, ApplicationStarted):
+                prepared_at_started.append(backend.prepared)
+            await original_publish(event)
+
+        events.publish = record_started
+        app = self.make_application(backend, events=events)
+        with self.assertLogs("embodied_runtime.app", "INFO") as logs:
+            await app.start()
+        self.assertEqual(backend.prepare_calls, 1)
+        self.assertEqual(prepared_at_started, [True])
+        rendered = "\n".join(logs.output)
+        self.assertLess(rendered.index("preparation=started"),
+                        rendered.index("preparation=ready"))
+        self.assertLess(rendered.index("preparation=ready"),
+                        rendered.index("[APP] running"))
+        self.assertEqual(app.working_memory.snapshot(), ())
+        self.assertIsNone(app.active_goal)
+        self.assertEqual(backend.requests, [])
+        await app.stop()
+
+    async def test_blocked_preparation_remains_starting_before_attention(self):
+        backend = BlockingPreparingCognition()
+        events = EventBus()
+        published = []
+        original_publish = events.publish
+
+        async def record(event):
+            published.append(event)
+            await original_publish(event)
+
+        events.publish = record
+        app = self.make_application(backend, events=events)
+        attention_start = app.attention.start
+        app.attention.start = AsyncMock(side_effect=attention_start)
+        with self.assertLogs("embodied_runtime.app", "INFO") as logs:
+            start_task = asyncio.create_task(app.start())
+            await backend.entered.wait()
+            self.assertEqual(app.state, LifecycleState.STARTING)
+            app.attention.start.assert_not_awaited()
+            self.assertNotIn("[APP] running", "\n".join(logs.output))
+            self.assertFalse(any(isinstance(event, ApplicationStarted)
+                                 for event in published))
+            backend.release.set()
+            await start_task
+        self.assertEqual(app.state, LifecycleState.RUNNING)
+        app.attention.start.assert_awaited_once_with(events)
+        self.assertIn("[APP] running", "\n".join(logs.output))
+        self.assertTrue(any(isinstance(event, ApplicationStarted)
+                            for event in published))
+        await app.stop()
+
+    async def test_expected_preparation_failure_is_degraded_and_retry_is_allowed(self):
+        backend = PreparingCognition(CognitionUnavailableError("private detail"))
+        app = self.make_application(backend)
+        with self.assertLogs("embodied_runtime.app", "INFO") as logs:
+            await app.start()
+        rendered = "\n".join(logs.output)
+        self.assertIn("preparation=failed status=degraded", rendered)
+        self.assertIn("[APP] running", rendered)
+        self.assertNotIn("private detail", rendered)
+        self.assertEqual(app.state, LifecycleState.RUNNING)
+        self.assertEqual(await app.request_cognition("try normally"), "later response")
+        self.assertEqual(len(backend.requests), 1)
+        await app.stop()
+
+    async def test_unexpected_preparation_failure_stops_startup(self):
+        backend = PreparingCognition(RuntimeError("programming defect"))
+        app = self.make_application(backend)
+        with self.assertRaisesRegex(RuntimeError, "programming defect"):
+            await app.start()
+        self.assertEqual(app.state, LifecycleState.STOPPED)
+        self.assertFalse(app.hardware.is_running)
+
+    async def test_preparation_cancellation_propagates_and_stops_startup(self):
+        backend = PreparingCognition(asyncio.CancelledError())
+        app = self.make_application(backend)
+        with self.assertRaises(asyncio.CancelledError):
+            await app.start()
+        self.assertEqual(app.state, LifecycleState.STOPPED)
+        self.assertFalse(app.hardware.is_running)
 
     async def test_request_is_single_turn_and_propagates_text_and_instructions(self):
         backend = FakeCognition()
@@ -379,6 +499,106 @@ class FakeResponses:
 
 
 class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_eagerly_initializes_once_and_prewarm_is_minimal(self):
+        responses = FakeResponses(results=[SimpleNamespace(
+            output_text="discard me", output=[], id="do-not-retain",
+            usage=SimpleNamespace(
+                input_tokens=3, output_tokens=1, total_tokens=4,
+                input_tokens_details=SimpleNamespace(cached_tokens=0),
+            ),
+        )])
+        client = SimpleNamespace(responses=responses)
+        openai = ModuleType("openai")
+        constructions = []
+
+        def construct():
+            constructions.append(True)
+            return client
+
+        openai.AsyncOpenAI = construct
+        backend = OpenAIResponsesBackend(model="configured-model")
+        with (
+            patch.dict(sys.modules, {"openai": openai}),
+            self.assertLogs(
+                "embodied_runtime.cognition.openai_responses", "INFO"
+            ) as logs,
+        ):
+            await backend.prepare()
+            await backend.prepare()
+        self.assertIs(backend._client, client)
+        self.assertEqual(constructions, [True])
+        self.assertEqual(responses.calls, [{
+            "model": "configured-model", "input": PREWARM_INPUT,
+        }])
+        rendered = "\n".join(logs.output)
+        self.assertEqual(rendered.count("component=client_init"), 1)
+        self.assertIn(
+            "provider_request=prewarm ordinal=1 cold=true status=completed",
+            rendered,
+        )
+        self.assertIn("message_chars=12 instruction_chars=0 tools=0", rendered)
+        self.assertIn("cached_input_tokens=0", rendered)
+        for excluded in (
+            "tools", "instructions", "previous_response_id", "tool_choice",
+            "parallel_tool_calls",
+        ):
+            self.assertNotIn(excluded, responses.calls[0])
+
+    async def test_real_request_after_prewarm_is_second_and_warm(self):
+        responses = FakeResponses()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        with self.assertLogs(
+            "embodied_runtime.cognition.openai_responses", "INFO"
+        ) as logs:
+            await backend.prepare()
+            result = await backend.respond("real operator request", instructions="runtime")
+        self.assertEqual(result, "provider text")
+        self.assertEqual(responses.calls, [
+            {"model": DEFAULT_MODEL, "input": PREWARM_INPUT},
+            {"model": DEFAULT_MODEL, "input": "real operator request",
+             "instructions": "runtime"},
+        ])
+        self.assertIn("provider_request=prewarm ordinal=1 cold=true", logs.output[0])
+        self.assertIn("provider_request=initial ordinal=2 cold=false", logs.output[1])
+
+    async def test_prepare_client_failure_does_not_attempt_provider(self):
+        openai = ModuleType("openai")
+
+        def fail():
+            raise RuntimeError("secret configuration")
+
+        openai.AsyncOpenAI = fail
+        backend = OpenAIResponsesBackend()
+        with patch.dict(sys.modules, {"openai": openai}):
+            with self.assertRaises(CognitionUnavailableError) as caught:
+                await backend.prepare()
+            await backend.prepare()
+        self.assertNotIn("secret", str(caught.exception))
+        self.assertIsNone(backend._client)
+        self.assertEqual(backend._provider_request_ordinal, 0)
+
+    async def test_failed_prewarm_is_not_retried_and_real_request_can_retry(self):
+        responses = FakeResponses(RuntimeError("secret provider detail"))
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        with (
+            self.assertLogs(
+                "embodied_runtime.cognition.openai_responses", "INFO"
+            ) as logs,
+            self.assertRaisesRegex(CognitionError, "preparation failed") as caught,
+        ):
+            await backend.prepare()
+        self.assertNotIn("secret", str(caught.exception))
+        await backend.prepare()
+        self.assertEqual(len(responses.calls), 1)
+        self.assertIn(
+            "provider_request=prewarm ordinal=1 cold=true status=failed",
+            logs.output[0],
+        )
+        responses.error = None
+        self.assertEqual(await backend.respond("later real request"), "provider text")
+        self.assertEqual(len(responses.calls), 2)
+        self.assertEqual(backend._provider_request_ordinal, 2)
+
     def test_lazy_client_initialization_is_measured_once(self):
         client = SimpleNamespace(responses=FakeResponses())
         openai = ModuleType("openai")

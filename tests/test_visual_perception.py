@@ -11,7 +11,9 @@ from embodied_runtime.attention import (
     ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST, AttentionStimulus,
 )
 from embodied_runtime.body.virtual import VirtualBodyBackend
-from embodied_runtime.cognition import CognitionError, CognitionToolCall
+from embodied_runtime.cognition import (
+    CognitionError, CognitionToolCall, TextCognitionBackend,
+)
 from embodied_runtime.inspection import SelfInspectionFact, SelfInspectionResult
 from embodied_runtime.interaction import InteractionChannel, OperatorMessageSink
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
@@ -68,7 +70,7 @@ class Vision(VisualPerceptionBackend):
         return VisualPerceptionResult(focus, "A bounded scene.")
 
 
-class Cognition:
+class Cognition(TextCognitionBackend):
     identifier = "fake-cognition"
 
     async def respond(self, message, *, tools=(), tool_executor=None, **kwargs):
@@ -80,7 +82,7 @@ class Cognition:
         return "done"
 
 
-class SequenceCognition:
+class SequenceCognition(TextCognitionBackend):
     identifier = "sequence"
 
     def __init__(self, handlers):

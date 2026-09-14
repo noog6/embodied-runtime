@@ -23,6 +23,7 @@ from embodied_runtime.attention import (
 )
 from embodied_runtime.cognition import (
     ActiveGoal,
+    CognitionError,
     CognitionContext,
     CognitionToolCall,
     CognitionToolDefinition,
@@ -686,6 +687,22 @@ class RobotApplication:
                 # is still offered cleanup if start raises.
                 self._started_reflexes.append(reflex)
                 await reflex.start(self.events, self)
+            if self._cognition_backend is not None:
+                backend = self._cognition_backend
+                LOGGER.info(
+                    "[COGNITION] backend=%s preparation=started", backend.identifier
+                )
+                try:
+                    await backend.prepare()
+                except CognitionError:
+                    LOGGER.info(
+                        "[COGNITION] backend=%s preparation=failed status=degraded",
+                        backend.identifier,
+                    )
+                else:
+                    LOGGER.info(
+                        "[COGNITION] backend=%s preparation=ready", backend.identifier
+                    )
         except BaseException:
             await self._stop_reflexes_for_cleanup()
             if camera_start_attempted:
