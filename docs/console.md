@@ -73,6 +73,9 @@ The supported commands are exactly:
 - `attention` to show the latest volatile initiative and outcome diagnostics;
 - `followup` to show the pending temporal follow-up and `followup clear` to
   cancel it;
+- `runs` to list at most the newest 20 recorded runs, `run show R<n>` to inspect
+  validated metadata, and `run grep R<n> <text>` for at most 50
+  case-insensitive literal (not regex) log matches with line numbers;
 - `help` (or `?`), `quit`, and `exit`.
 
 Only the `simulate` namespace denotes synthetic input. It translates to the
@@ -82,6 +85,13 @@ tokens and reports malformed quoting without a traceback. EOF also ends cleanly.
 The text following `ask` is instead treated as raw natural-language payload, so
 apostrophes and punctuation do not require shell quoting. Cognition errors are
 reported without ending the console session.
+
+Run browsing reads only exact identities beneath the CLI-selected history root;
+it accepts no arbitrary paths and does not follow run or artifact symlinks.
+Malformed history is reported without a traceback. A persisted `started` status
+is displayed as historical fact, never inferred to mean running or crashed.
+These administrative commands do not enter cognition, WorkingMemory, runtime
+state, persistent memory, or self-inspection. See [Run history](run-history.md).
 
 During shutdown, `[APP] stopped` means that application-owned resources have
 finished stopping. The subsequent `[PROCESS] asyncio_cleanup` duration measures
