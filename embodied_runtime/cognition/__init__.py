@@ -24,6 +24,7 @@ from embodied_runtime.cognition.outcome import (
 )
 from embodied_runtime.cognition.working_memory import (
     WorkingMemory,
+    WorkingMemoryObservation,
     WorkingMemoryToolOutcome,
     WorkingMemoryTurn,
     render_working_memory,
@@ -44,6 +45,7 @@ __all__ = [
     "CognitionUnavailableError",
     "TextCognitionBackend",
     "WorkingMemory",
+    "WorkingMemoryObservation",
     "WorkingMemoryToolOutcome",
     "WorkingMemoryTurn",
     "compose_cognition_instructions",

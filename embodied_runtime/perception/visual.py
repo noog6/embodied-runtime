@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 import base64
 from dataclasses import dataclass
+from datetime import datetime
 import os
 from typing import Any
 
@@ -26,6 +27,12 @@ class VisualPerceptionResult:
     focus: str
     description: str
     truncated: bool = False
+    observed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if (self.observed_at is not None and
+                (self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None)):
+            raise ValueError("visual observed_at must be an offset-aware datetime")
 
 
 class VisualPerceptionBackend(ABC):

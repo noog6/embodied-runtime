@@ -226,6 +226,8 @@ class AttentionStimulus:
             f"  kind: {self.kind}",
             f"  source: {self.source}",
         ))
+        if self.observation.occurred_at_ns is not None:
+            lines.append(f"  occurred_at_monotonic_ns: {self.observation.occurred_at_ns}")
         lines.extend(f"  {fact.name}: {fact.value}" for fact in self.observation.facts)
         if self.kind == "temporal_followup_due":
             lines.extend((

@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from embodied_runtime.cognition.working_memory import (
     WorkingMemoryTurn,
@@ -20,6 +21,7 @@ class CognitionContext:
     profile_description: str
     lifecycle: str
     battery_voltage_v: float | None
+    battery_observed_at: datetime | None
     platform_hostname: str | None
     platform_model: str | None
     platform_system: str | None
@@ -45,6 +47,12 @@ class CognitionContext:
     camera_is_physical: bool | None
     camera_is_running: bool | None
 
+    def __post_init__(self) -> None:
+        if (self.battery_observed_at is not None and
+                (self.battery_observed_at.tzinfo is None or
+                 self.battery_observed_at.utcoffset() is None)):
+            raise ValueError("battery_observed_at must be an offset-aware datetime")
+
     def render(self) -> str:
         """Render a stable provider-neutral instruction block."""
         lines = [
@@ -66,6 +74,10 @@ class CognitionContext:
             "Power",
             f"  battery_available: {_boolean(self.battery_voltage_v is not None)}",
             f"  battery_voltage_v: {_voltage(self.battery_voltage_v)}",
+            "  battery_observed_at: " + (
+                "unavailable" if self.battery_observed_at is None else
+                self.battery_observed_at.isoformat(timespec="seconds")
+            ),
             "",
             "Platform",
         ]

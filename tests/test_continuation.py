@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import asyncio
 import json
 import unittest
@@ -15,6 +16,8 @@ from embodied_runtime.profile import RobotProfile
 from embodied_runtime.state import BodyState, LifecycleState
 from tests.test_platform import snapshot
 
+
+TEST_INSTANT = datetime(2026, 1, 1, tzinfo=UTC)
 
 class Platform:
     def snapshot(self):
@@ -90,7 +93,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         await app.set_body_orientation(yaw_degrees=33, pitch_degrees=-15)
         goal = app.set_goal("notify then restore")
-        app.working_memory.append("prior", "history")
+        app.working_memory.append("prior", "history", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         await app.set_body_orientation(yaw_degrees=0, pitch_degrees=0, source="reflex:test")
         while app.attention.status().state == "in_flight":
@@ -125,7 +128,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         app, sink = self.make_app(backend, platform_attention=True)
         await app.start()
         goal = app.set_goal("monitor platform health")
-        app.working_memory.append("operator context", "remembered context")
+        app.working_memory.append("operator context", "remembered context", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
 
         await app.events.publish(ThermalWarningRaised(
@@ -295,7 +298,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         await app.set_body_orientation(yaw_degrees=45, pitch_degrees=-20)
         goal = app.set_goal("Keep 45/-20; notify and restore after every reflex move")
-        app.working_memory.append("operator", "maintenance history")
+        app.working_memory.append("operator", "maintenance history", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
 
         await app.set_body_orientation(

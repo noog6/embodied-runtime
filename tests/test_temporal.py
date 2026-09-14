@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import asyncio
 import json
 import unittest
@@ -20,6 +21,8 @@ from embodied_runtime.profile import RobotProfile
 from embodied_runtime.sensing.camera import CameraFrame
 from tests.test_platform import snapshot
 
+
+TEST_INSTANT = datetime(2026, 1, 1, tzinfo=UTC)
 
 class Platform:
     def snapshot(self):
@@ -258,7 +261,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_schedule_is_one_effect_and_changes_neither_state_nor_memory(self):
         app = self.make_app(); await app.start(); goal = app.set_goal("goal")
-        app.working_memory.append("old", "turn")
+        app.working_memory.append("old", "turn", completed_at=TEST_INSTANT)
         state, memory = app.runtime_state, app.working_memory.snapshot()
         with self.assertLogs("embodied_runtime", level="INFO") as captured:
             result = await self.schedule(
@@ -290,7 +293,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         events = []
         app.events.subscribe(TemporalFollowupDue, lambda event: self._record(events, event))
         await app.start(); goal = app.set_goal("goal")
-        app.working_memory.append("history", "unchanged")
+        app.working_memory.append("history", "unchanged", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         await self.schedule(app)
         app._replace_platform_state(snapshot(hostname="fresh-runtime"))
@@ -585,7 +588,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         ])
         app = self.make_app(backend=backend)
         await app.start(); goal = app.set_goal("Maintenance")
-        app.working_memory.append("operator", "history")
+        app.working_memory.append("operator", "history", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         outcome = await app._request_initiative(AttentionStimulus(
             SemanticObservation("test", "test", ())
@@ -609,7 +612,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         ])
         app = self.make_app(backend=backend, camera=camera, vision=vision)
         await app.start(); goal = app.set_goal("Visual maintenance")
-        app.working_memory.append("operator", "history")
+        app.working_memory.append("operator", "history", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         outcome = await app._request_initiative(AttentionStimulus(
             SemanticObservation("test", "test", ())
@@ -638,13 +641,13 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         due_events = []
         app.events.subscribe(TemporalFollowupDue, lambda event: self._record(due_events, event))
         await app.start(); goal = app.set_goal("Ongoing maintenance")
-        app.working_memory.append("before schedule", "old snapshot")
+        app.working_memory.append("before schedule", "old snapshot", completed_at=TEST_INSTANT)
         await app._request_initiative(AttentionStimulus(
             SemanticObservation("initial", "test", ())
         ))
         self.assertIs(app.temporal.pending.goal, goal)
         self.assertEqual(len(backend.requests), 1)
-        app.working_memory.append("after schedule", "fresh snapshot")
+        app.working_memory.append("after schedule", "fresh snapshot", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         app._replace_platform_state(snapshot(hostname="due-time-host"))
         await self.timer.advance()

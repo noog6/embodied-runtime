@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import asyncio
 from dataclasses import FrozenInstanceError
 import json
@@ -14,6 +15,8 @@ from embodied_runtime.profile import RobotProfile
 from embodied_runtime.reflexes import PresenceCenteringReflex
 from tests.test_platform import snapshot
 
+
+TEST_INSTANT = datetime(2026, 1, 1, tzinfo=UTC)
 
 class StaticPlatform:
     def snapshot(self):
@@ -226,9 +229,9 @@ class GoalApplicationTests(unittest.IsolatedAsyncioTestCase):
                             reflexes=(PresenceCenteringReflex(),))
         await app.start()
         app.set_goal("Keep 35/-10")
-        memory.append("created goal", "yes")
-        memory.append("one", "one")
-        memory.append("two", "two")
+        memory.append("created goal", "yes", completed_at=TEST_INSTANT)
+        memory.append("one", "one", completed_at=TEST_INSTANT)
+        memory.append("two", "two", completed_at=TEST_INSTANT)
         self.assertNotIn("created goal", app._cognition_instructions())
         self.assertEqual(app.active_goal.description, "Keep 35/-10")
         memory.clear()

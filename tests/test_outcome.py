@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import asyncio
 import json
 import unittest
@@ -12,6 +13,8 @@ from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
 from tests.test_platform import snapshot
 
+
+TEST_INSTANT = datetime(2026, 1, 1, tzinfo=UTC)
 
 class Platform:
     def snapshot(self):
@@ -62,7 +65,7 @@ class OutcomeTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         await app.set_body_orientation(yaw_degrees=35, pitch_degrees=-10)
         goal = app.set_goal("opaque goal")
-        app.working_memory.append("operator", "history")
+        app.working_memory.append("operator", "history", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         await app.set_body_orientation(
             yaw_degrees=0, pitch_degrees=0, source="reflex:test"

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import asyncio
 import json
 import unittest
@@ -20,6 +21,8 @@ from embodied_runtime.profile import RobotProfile
 from embodied_runtime.state import LifecycleState
 from tests.test_platform import snapshot
 
+
+TEST_INSTANT = datetime(2026, 1, 1, tzinfo=UTC)
 
 class StaticPlatform:
     def snapshot(self):
@@ -109,6 +112,21 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.areas, ["storage"])
         self.assertEqual(before, (app.runtime_state, app.active_goal,
                                   app.working_memory.snapshot()))
+        await app.stop()
+
+    async def test_inspection_result_records_when_facts_were_obtained(self):
+        observed = datetime(2026, 9, 13, 20, 0, tzinfo=UTC)
+        app = RobotApplication(
+            RobotProfile("test", "Test"), VirtualHardwareBackend(),
+            platform_provider=StaticPlatform(), self_inspector=FakeInspector(),
+            wall_clock=lambda: observed,
+        )
+        await app.start()
+        tool, result = app._execute_self_inspection(
+            CognitionToolCall("inspect_self", '{"area":"storage"}')
+        )
+        self.assertEqual(result.observed_at, observed)
+        self.assertEqual(json.loads(tool.output)["observed_at"], observed.isoformat())
         await app.stop()
 
     def make_initiative_app(self, backend, *, inspector=None, sink=None,
@@ -212,7 +230,7 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_initiative_app(backend, inspector=fake)
         await app.start()
         goal = app.set_goal("Compare runtime and storage")
-        app.working_memory.append("operator", "fixed history")
+        app.working_memory.append("operator", "fixed history", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         await app._request_initiative(AttentionStimulus(
             "body_orientation_changed", "reflex:test", 1, 1, 0, 0
@@ -270,7 +288,7 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_initiative_app(backend, inspector=fake)
         app_holder["app"] = app
         await app.start(); goal = app.set_goal("fresh grounding")
-        app.working_memory.append("operator", "episode snapshot")
+        app.working_memory.append("operator", "episode snapshot", completed_at=TEST_INSTANT)
         memory = app.working_memory.snapshot()
         await app._request_initiative(AttentionStimulus(
             "body_orientation_changed", "reflex:test", 1, 1, 0, 0

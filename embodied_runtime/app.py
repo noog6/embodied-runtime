@@ -32,6 +32,7 @@ from embodied_runtime.cognition import (
     InitiativeEffectOutcome,
     TextCognitionBackend,
     WorkingMemory,
+    WorkingMemoryObservation,
     WorkingMemoryToolOutcome,
     compose_cognition_instructions,
     validate_goal_description,
@@ -475,12 +476,17 @@ class RobotApplication:
 
     def temporal_context(self) -> TemporalContext:
         """Build fresh local wall-clock grounding for one cognition boundary."""
-        instant = self._wall_clock()
-        if instant.tzinfo is None or instant.utcoffset() is None:
-            raise ValueError("wall clock must return an offset-aware datetime")
+        instant = self._aware_wall_clock()
         return TemporalContext(
             instant.astimezone(self._timezone), self._timezone_name
         )
+
+    def _aware_wall_clock(self) -> datetime:
+        """Read and validate the application-owned model-facing clock."""
+        instant = self._wall_clock()
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            raise ValueError("wall clock must return an offset-aware datetime")
+        return instant
 
     def temporal_situation(self) -> TemporalSituation:
         """Build fresh elapsed-time grounding from the shared monotonic clock."""
@@ -557,8 +563,13 @@ class RobotApplication:
         power = PowerState(battery_voltage_v=None)
         if "battery_voltage" in self.hardware.capabilities:
             try:
+                voltage = self.hardware.read_battery_voltage_v()
                 power = PowerState(
-                    battery_voltage_v=self.hardware.read_battery_voltage_v()
+                    battery_voltage_v=voltage,
+                    observed_at=(
+                        self._aware_wall_clock() if self.state is LifecycleState.RUNNING
+                        else None
+                    ),
                 )
             except Exception:
                 self._runtime_state = replace(self._runtime_state, power=power)
@@ -965,7 +976,31 @@ class RobotApplication:
         if self.state is not LifecycleState.RUNNING:
             await self._finish_operator_episode(episode, "cancelled")
             raise asyncio.CancelledError
-        self.working_memory.append(message, response, tool_outcomes)
+        observations: list[WorkingMemoryObservation] = []
+        power = self._runtime_state.power
+        if power.battery_voltage_v is not None and power.observed_at is not None:
+            observations.append(WorkingMemoryObservation(
+                "power", self.hardware.identifier, power.observed_at,
+                (("battery_voltage_v", f"{power.battery_voltage_v:.3f}"),),
+            ))
+        for acquisition in acquisitions:
+            if acquisition.inspection_result is not None:
+                result = acquisition.inspection_result
+                observations.append(WorkingMemoryObservation(
+                    "self_inspection", result.area, result.observed_at,
+                    tuple((fact.name, fact.value) for fact in result.facts[:16]),
+                ))
+            elif acquisition.perception_result is not None:
+                result = acquisition.perception_result
+                observations.append(WorkingMemoryObservation(
+                    "visual_interpretation", self.camera_backend.identifier,
+                    result.observed_at,
+                    (("focus", result.focus), ("description", result.description)),
+                ))
+        self.working_memory.append(
+            message, response, tool_outcomes,
+            completed_at=self._aware_wall_clock(), observations=observations,
+        )
         self._last_operator_turn_completed_monotonic = self._monotonic()
         await self._finish_operator_episode(episode, "handled")
         return response
@@ -2029,6 +2064,7 @@ class RobotApplication:
                 raise RuntimeError("expected active goal is no longer current")
             LOGGER.info("[PERCEPTION] modality=visual status=capture_requested")
             frame = self.camera_backend.capture_frame()  # type: ignore[union-attr]
+            observed_at = self._aware_wall_clock()
             if len(frame.data) > MAX_CAMERA_FRAME_BYTES:
                 raise ValueError(
                     f"camera frame exceeds {MAX_CAMERA_FRAME_BYTES} byte limit"
@@ -2046,7 +2082,9 @@ class RobotApplication:
             if not description:
                 raise ValueError("visual description must be non-empty")
             truncated = result.truncated or len(description) > 2000
-            result = VisualPerceptionResult(focus, description[:2000], truncated)
+            result = VisualPerceptionResult(
+                focus, description[:2000], truncated, observed_at
+            )
         except Exception as error:
             LOGGER.info("[PERCEPTION] modality=visual status=rejected")
             if autonomous:
@@ -2065,6 +2103,7 @@ class RobotApplication:
         return CognitionToolResult(json.dumps({
             "status": "applied", "focus": result.focus,
             "description": result.description, "truncated": result.truncated,
+            "observed_at": result.observed_at.isoformat(timespec="seconds"),
         }, sort_keys=True)), result
 
     def _execute_self_inspection(
@@ -2083,7 +2122,9 @@ class RobotApplication:
                 raise RuntimeError("self-inspection requires a running application")
             if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
                 raise RuntimeError("expected active goal is no longer current")
-            result = self._inspect_area(area)
+            result = replace(
+                self._inspect_area(area), observed_at=self._aware_wall_clock()
+            )
         except Exception as error:
             LOGGER.info("[INSPECTION] area=%s status=rejected", area)
             if autonomous:
@@ -2099,6 +2140,7 @@ class RobotApplication:
             self.attention.record_inspection(state="completed", area=area, status="applied")
         return CognitionToolResult(json.dumps({
             "status": "applied", "area": result.area,
+            "observed_at": result.observed_at.isoformat(timespec="seconds"),
             "facts": [{"name": fact.name, "value": fact.value} for fact in result.facts],
         }, sort_keys=True)), result
 
@@ -2442,6 +2484,7 @@ class RobotApplication:
             profile_description=self.profile.description,
             lifecycle=state.lifecycle.value,
             battery_voltage_v=state.power.battery_voltage_v,
+            battery_observed_at=state.power.observed_at,
             platform_hostname=None if platform is None else platform.hostname,
             platform_model=None if platform is None else platform.model,
             platform_system=None if platform is None else platform.system,
