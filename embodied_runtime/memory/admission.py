@@ -168,9 +168,13 @@ class MemoryAdmission:
                     record.value_text is not None and
                     _normalized(record.value_text, "stored value") == value_key
                 )
-                if ((same_relationship or (
-                        record.kind == kind and existing_predicate == predicate and
-                        same_value)) and existing_links == link_set):
+                same_scalar = (
+                    kind in ("fact", "preference") and
+                    record.kind in ("fact", "preference") and
+                    existing_predicate == predicate and same_value
+                )
+                if ((same_relationship or same_scalar) and
+                        existing_links == link_set):
                     duplicate = duplicate or record
                 if (kind in ("fact", "preference") and
                         record.kind in ("fact", "preference") and

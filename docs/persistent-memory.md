@@ -32,9 +32,12 @@ active status, normal store creation time, and exactly one inline `text/plain`
 payload. Both the durable summary and payload are the normalized display form
 of the verbatim evidence clause, never model-authored prose. The subject link
 always has role `subject`; cognition may name
-only the optional related link role. Identical kind/predicate/value/direct-link
-sets are successful no-op duplicates. A fact or preference with the same
-predicate but a different value is conservatively rejected. Admission never
+only the optional related link role. Facts and preferences share one conservative
+predicate/value slot for duplicate and conflict detection: matching normalized
+predicate/value/direct-link sets are successful no-op duplicates across either
+kind, while the same predicate with a different value is conservatively rejected.
+Relationship duplicate semantics continue to require their existing relationship
+identity and direct-link rules. Admission never
 updates, deletes, supersedes, adjusts confidence, or reconciles existing memory.
 The durable evidence text and entity/value anchors are operator-grounded.
 Predicate and related-role fields are model-proposed structured metadata over
