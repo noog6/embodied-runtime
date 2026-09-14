@@ -18,7 +18,8 @@ python main.py --cognition openai-responses --console
 ```
 
 Add `--initiative` for bounded goal-directed initiative. It may provide one
-read-only `inspect_self` or `observe_scene` acquisition where available, plus
+read-only `inspect_self`, `observe_scene`, `recall_memory`, or
+`inspect_run_history` acquisition where available, plus
 the single bounded `schedule_followup` semantic effect. Historically initiative
 used exactly `tools=()`; that description is no longer current.
 `--initiative-actions` independently offers `orient_body` on a nonphysical body.

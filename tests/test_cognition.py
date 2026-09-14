@@ -2,6 +2,8 @@ import asyncio
 import os
 import json
 import sys
+import tempfile
+from pathlib import Path
 from dataclasses import FrozenInstanceError, fields
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -28,6 +30,7 @@ from embodied_runtime.cognition.openai_responses import (
 from embodied_runtime.events import ApplicationStarted, EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.run_history import RunHistoryEvidenceReader
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.state import LifecycleState
 from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
@@ -136,6 +139,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         body=None,
         camera=None,
         hardware=None,
+        history=None,
     ):
         return RobotApplication(
             RobotProfile("test", "Test Robot", "A test robot."),
@@ -146,6 +150,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
             body_backend=body,
             camera_backend=camera,
             cognition_backend=backend,
+            run_history_evidence=history,
         )
 
     async def test_default_backend_preparation_is_a_no_op(self):
@@ -405,6 +410,35 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(result.output)["status"], "rejected")
         self.assertEqual(physical.runtime_state.body.yaw_degrees, 0.0)
         await physical.stop()
+
+    async def test_run_history_is_only_offered_with_injected_read_only_provider(self):
+        self.assertNotIn(
+            "inspect_run_history",
+            [tool.name for tool in self.make_application(FakeCognition()).cognition_tools()],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            reader = RunHistoryEvidenceReader(Path(temporary), "R3")
+            app = self.make_application(FakeCognition(), history=reader)
+            tool = next(tool for tool in app.cognition_tools()
+                        if tool.name == "inspect_run_history")
+            self.assertEqual(tool.parameters["properties"]["operation"]["enum"],
+                             ["recent", "overview", "search"])
+            self.assertFalse(tool.parameters["additionalProperties"])
+            self.assertIn("inspect_run_history", app._acquisition_tool_names())
+            self.assertEqual(app.acquisition_tools(), ())
+            await app.start()
+            self.assertNotIn("inspect_run_history",
+                             [item.name for item in app.acquisition_tools()])
+            app.options = ApplicationOptions(initiative_enabled=True)
+            app.set_goal("inspect evidence")
+            self.assertIn("inspect_run_history",
+                          [item.name for item in app.acquisition_tools()])
+            result = await app._execute_cognition_tool(CognitionToolCall(
+                "inspect_run_history",
+                '{"operation":"recent","run":null,"query":null}',
+            ))
+            self.assertEqual(json.loads(result.output)["status"], "applied")
+            await app.stop()
 
     async def test_dispatch_validation_success_and_rejection_preserve_state(self):
         app = self.make_application(FakeCognition(), body=VirtualBodyBackend())

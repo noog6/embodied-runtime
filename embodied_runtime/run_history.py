@@ -16,6 +16,17 @@ MAX_METADATA_BYTES = 64 * 1024
 MAX_LISTED_RUNS = 20
 MAX_GREP_MATCHES = 50
 MAX_GREP_QUERY_LENGTH = 256
+MAX_COGNITION_RUNS = 5
+MAX_COGNITION_MATCHES = 20
+MAX_COGNITION_LINE_CHARS = 800
+_CONTENT_FIELDS = (
+    "text=", "message=", "purpose=", "description=", "summary=", "evidence=",
+    "focus=", "query=", "prompt=", "utterance=", "response=", "heard=", "words=",
+)
+_STRUCTURED_LOG_RECORD = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}"
+    r"(?:Z|[+-]\d{2}:\d{2}) \[([A-Z][A-Z0-9_-]*)\](?: |$)"
+)
 
 
 class RunMetadataError(ValueError):
@@ -178,6 +189,176 @@ def grep_run_log(root: Path, run_id: str, query: str) -> tuple[tuple[tuple[int, 
     except OSError as error:
         raise RunDataUnavailable(run_id) from error
     return tuple(matches), False
+
+
+def _record_dict(record: RunRecord) -> dict[str, object]:
+    return {
+        "run_id": record.run_id, "status": record.status,
+        "started_at": record.started_at, "ended_at": record.ended_at,
+        "exit_code": record.exit_code, "duration": record.duration,
+        "profile": record.profile, "hardware": record.hardware,
+        "config_source": record.config_source,
+    }
+
+
+class RunHistoryEvidenceReader:
+    """Read-only, bounded, model-safe projection of persisted run evidence."""
+
+    def __init__(self, root: Path, current_run_id: str | None = None) -> None:
+        self._root = root
+        self.current_run_id = (
+            current_run_id if current_run_id is not None
+            and canonical_run_id(current_run_id) == current_run_id else None
+        )
+
+    def inspect(self, operation: object, run: object = None,
+                query: object = None) -> dict[str, object]:
+        if operation not in ("recent", "overview", "search"):
+            return self._rejected("invalid_tool_arguments")
+        if operation == "recent":
+            if run is not None or query is not None:
+                return self._rejected("invalid_tool_arguments")
+            return self._recent()
+        if type(run) is not str or (operation == "overview" and query is not None):
+            return self._rejected("invalid_tool_arguments")
+        if operation == "search" and (type(query) is not str or not query.strip()
+                                      or len(query) > MAX_GREP_QUERY_LENGTH):
+            return self._rejected("invalid_tool_arguments")
+        resolved, reason = self._resolve(run)
+        if resolved is None:
+            return self._rejected(reason or "invalid_run_selector")
+        record, reason = self._record(resolved)
+        if record is None:
+            return self._rejected(reason, run_id=resolved)
+        if operation == "overview":
+            evidence, reason = self._overview_log(resolved)
+            if evidence is None:
+                return self._rejected(reason, run_id=resolved)
+            return {"status": "applied", "operation": operation,
+                    "selector": run, "run": _record_dict(record),
+                    "evidence": evidence}
+        matches, truncated, reason = self._search_log(resolved, query)
+        if matches is None:
+            return self._rejected(reason, run_id=resolved)
+        return {"status": "applied", "operation": operation, "run_id": resolved,
+                "query": query, "matches": matches, "truncated": truncated}
+
+    @staticmethod
+    def _rejected(reason: str, **extra: object) -> dict[str, object]:
+        return {"status": "rejected", "reason": reason, **extra}
+
+    def _safe_ids(self) -> list[str]:
+        try:
+            numbered = []
+            for child in self._root.iterdir():
+                match = _RUN_DIRECTORY.fullmatch(child.name)
+                if match and not child.is_symlink() and child.is_dir():
+                    numbered.append((int(match.group(1)), child.name))
+            return [name for _, name in sorted(numbered, reverse=True)]
+        except OSError:
+            return []
+
+    def _resolve(self, selector: str) -> tuple[str | None, str | None]:
+        if selector == "current":
+            return ((self.current_run_id, None) if self.current_run_id else
+                    (None, "current_run_unavailable"))
+        if selector == "previous":
+            if self.current_run_id is None:
+                return None, "previous_run_unavailable"
+            current = int(self.current_run_id[1:])
+            lower = [item for item in self._safe_ids() if int(item[1:]) < current]
+            return ((lower[0], None) if lower else
+                    (None, "previous_run_unavailable"))
+        canonical = canonical_run_id(selector)
+        return ((canonical, None) if canonical else (None, "invalid_run_selector"))
+
+    def _record(self, run_id: str) -> tuple[RunRecord | None, str]:
+        try:
+            return read_run_record(self._root, run_id), ""
+        except FileNotFoundError:
+            return None, "run_not_found"
+        except UnsupportedRunSchema:
+            return None, "unsupported_schema"
+        except RunMetadataError:
+            return None, "metadata_invalid"
+        except RunDataUnavailable:
+            return None, "metadata_unavailable"
+
+    def _recent(self) -> dict[str, object]:
+        runs: list[dict[str, object]] = []
+        for run_id in self._safe_ids()[:MAX_COGNITION_RUNS]:
+            record, reason = self._record(run_id)
+            runs.append(_record_dict(record) if record else
+                        {"run_id": run_id, "status": "unavailable", "reason": reason})
+        return {"status": "applied", "operation": "recent",
+                "current_run_id": self.current_run_id, "runs": runs}
+
+    @staticmethod
+    def _safe_line(line: str) -> bool:
+        folded = line.casefold()
+        return (_STRUCTURED_LOG_RECORD.match(line) is not None
+                and not any(marker in folded for marker in _CONTENT_FIELDS))
+
+    @staticmethod
+    def _bounded_line(line_number: int, line: str) -> dict[str, object]:
+        if len(line) <= MAX_COGNITION_LINE_CHARS:
+            return {"line_number": line_number, "text": line}
+        suffix = "…<truncated>"
+        return {"line_number": line_number,
+                "text": line[:MAX_COGNITION_LINE_CHARS - len(suffix)] + suffix,
+                "truncated": True}
+
+    def _complete_lines(self, run_id: str):
+        directory = _safe_run_directory(self._root, run_id)
+        if directory is None:
+            raise FileNotFoundError(run_id)
+        path = directory / "runtime.log"
+        if path.is_symlink() or not path.is_file():
+            raise RunDataUnavailable(run_id)
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as source:
+            for number, line in enumerate(source, 1):
+                if not line.endswith(("\n", "\r")):
+                    break
+                yield number, line.rstrip("\r\n")
+
+    def _overview_log(self, run_id: str):
+        from collections import Counter, deque
+        categories: Counter[str] = Counter()
+        first: list[dict[str, object]] = []
+        last = deque(maxlen=16)
+        safe_count = 0
+        try:
+            for number, line in self._complete_lines(run_id):
+                if not self._safe_line(line):
+                    continue
+                safe_count += 1
+                match = _STRUCTURED_LOG_RECORD.match(line)
+                if match:
+                    categories[match.group(1)] += 1
+                item = self._bounded_line(number, line)
+                if len(first) < 8:
+                    first.append(item)
+                last.append(item)
+        except (OSError, FileNotFoundError):
+            return None, "runtime_log_unavailable"
+        by_number = {item["line_number"]: item for item in (*first, *last)}
+        lines = [by_number[key] for key in sorted(by_number)]
+        return {"category_counts": dict(sorted(categories.items())), "lines": lines,
+                "truncated": safe_count > len(lines)}, ""
+
+    def _search_log(self, run_id: str, query: str):
+        matches: list[dict[str, object]] = []
+        needle = query.casefold()
+        try:
+            for number, line in self._complete_lines(run_id):
+                if not self._safe_line(line) or needle not in line.casefold():
+                    continue
+                if len(matches) == MAX_COGNITION_MATCHES:
+                    return matches, True, ""
+                matches.append(self._bounded_line(number, line))
+        except (OSError, FileNotFoundError):
+            return None, False, "runtime_log_unavailable"
+        return matches, False, ""
 
 
 class RunHistorySetupError(OSError):

@@ -10,13 +10,18 @@ from unittest.mock import AsyncMock, patch
 from embodied_runtime.cli import main
 from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.run_history import (
-    MAX_METADATA_BYTES, RunDataUnavailable, RunHistory, RunMetadataError,
-    UnsupportedRunSchema, canonical_run_id, discover_run_ids, grep_run_log,
-    read_run_record, start_run,
+    MAX_METADATA_BYTES, RunDataUnavailable, RunHistory, RunHistoryEvidenceReader,
+    RunMetadataError, UnsupportedRunSchema, canonical_run_id, discover_run_ids,
+    grep_run_log, read_run_record, start_run,
 )
 
 
 class RunHistoryReaderTests(unittest.TestCase):
+    timestamp = "2026-09-14T21:00:00.000+00:00"
+
+    def log_line(self, body: str) -> str:
+        return f"{self.timestamp} {body}\n"
+
     def write_record(self, root: Path, number: int, **changes) -> Path:
         directory = root / f"R{number}"
         directory.mkdir()
@@ -104,6 +109,110 @@ class RunHistoryReaderTests(unittest.TestCase):
             (directory / "runtime.log").symlink_to(target)
             with self.assertRaises(RunDataUnavailable):
                 grep_run_log(root, "R1", "secret")
+
+    def test_cognition_selectors_recent_and_metadata_failures_are_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for number in (1, 3, 5, 6, 7, 99):
+                directory = self.write_record(
+                    root, number, status="started", ended_at=None, exit_code=None)
+                (directory / "runtime.log").write_text(self.log_line("[APP] ready"))
+            reader = RunHistoryEvidenceReader(root, "R5")
+            self.assertEqual([item["run_id"] for item in reader.inspect("recent")["runs"]],
+                             ["R99", "R7", "R6", "R5", "R3"])
+            self.assertEqual(reader.inspect("overview", "current")["run"]["run_id"], "R5")
+            self.assertEqual(reader.inspect("overview", "previous")["run"]["run_id"], "R3")
+            self.assertEqual(reader.inspect("overview", "r1")["run"]["run_id"], "R1")
+            (root / "R3" / "run.json").write_text("{")
+            failed = reader.inspect("overview", "previous")
+            self.assertEqual((failed["status"], failed["reason"], failed["run_id"]),
+                             ("rejected", "metadata_invalid", "R3"))
+            unavailable = RunHistoryEvidenceReader(root)
+            self.assertEqual(unavailable.inspect("overview", "current")["reason"],
+                             "current_run_unavailable")
+            self.assertEqual(unavailable.inspect("overview", "previous")["reason"],
+                             "previous_run_unavailable")
+            for selector in ("R0", "../R1", "/tmp/R1", "last Tuesday"):
+                self.assertEqual(reader.inspect("overview", selector)["reason"],
+                                 "invalid_run_selector")
+
+    def test_cognition_projection_filters_bounds_searches_and_ignores_partial_line(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.write_record(root, 1)
+            log = directory / "runtime.log"
+            with log.open("w") as output:
+                output.write(self.log_line("[VOICE] session_started source=wake_word"))
+                output.write(self.log_line(
+                    '[VOICE] heard turn=1 text="SECRET OPERATOR WORDS"'))
+                output.write(self.log_line(
+                    "[VOICE] wake_detected heard='SECRET WAKE BODY'"))
+                output.write(self.log_line("[VOICE] listening turn=1"))
+                output.write(self.log_line("[VOICE] thinking turn=1"))
+                output.write(self.log_line("[VOICE] speaking turn=1"))
+                output.write(self.log_line(
+                    "[VOICE] session_closed reason=followup_timeout"))
+                output.write(self.log_line("[APP] " + "x" * 900))
+                for number in range(22):
+                    output.write(self.log_line(f"[COGNITION] request={number}"))
+                output.write(f"{self.timestamp} [CAMERA] incomplete")
+                output.flush()
+                reader = RunHistoryEvidenceReader(root, "R1")
+                overview = reader.inspect("overview", "current")
+                texts = [item["text"] for item in overview["evidence"]["lines"]]
+                self.assertTrue(any("session_started" in text for text in texts))
+                self.assertFalse(any("SECRET" in text for text in texts))
+                self.assertFalse(any("incomplete" in text for text in texts))
+                long_line = next(item for item in overview["evidence"]["lines"]
+                                 if "[APP]" in item["text"])
+                self.assertLessEqual(len(long_line["text"]), 800)
+                self.assertTrue(long_line["truncated"])
+                hidden = reader.inspect("search", "R1", "SECRET OPERATOR WORDS")
+                self.assertEqual(hidden["matches"], [])
+                self.assertEqual(
+                    reader.inspect("search", "R1", "SECRET WAKE BODY")["matches"], [])
+                matches = reader.inspect("search", "R1", "[cognition]")
+                self.assertEqual(len(matches["matches"]), 20)
+                self.assertTrue(matches["truncated"])
+                self.assertEqual(matches["matches"][0]["line_number"], 9)
+                output.write("\n" + self.log_line("[CAMERA] complete"))
+                output.flush()
+                later = reader.inspect("search", "current", "camera")
+                self.assertEqual([item["line_number"] for item in later["matches"]], [31, 32])
+
+    def test_cognition_overview_deduplicates_first_and_last_windows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.write_record(root, 1)
+            (directory / "runtime.log").write_text(
+                "".join(self.log_line(f"[APP] event={number}") for number in range(30)))
+            evidence = RunHistoryEvidenceReader(root).inspect("overview", "R1")["evidence"]
+            numbers = [item["line_number"] for item in evidence["lines"]]
+            self.assertEqual(numbers, list(range(1, 9)) + list(range(15, 31)))
+            self.assertTrue(evidence["truncated"])
+            self.assertEqual(evidence["category_counts"], {"APP": 30})
+
+    def test_cognition_projection_rejects_traceback_and_unstructured_continuations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.write_record(root, 1)
+            (directory / "runtime.log").write_text(
+                self.log_line("[CAMERA] cleanup_failed")
+                + "Traceback (most recent call last):\n"
+                + '  File "/private/path.py", line 1, in secret\n'
+                + "    leaked_source_code()\n"
+                + "RuntimeError: SECRET TRACEBACK BODY\n"
+                + self.log_line("[APP] stopped")
+            )
+            reader = RunHistoryEvidenceReader(root, "R1")
+            overview = reader.inspect("overview", "current")
+            texts = [item["text"] for item in overview["evidence"]["lines"]]
+            self.assertEqual(len(texts), 2)
+            self.assertTrue(any("[CAMERA] cleanup_failed" in text for text in texts))
+            self.assertTrue(any("[APP] stopped" in text for text in texts))
+            self.assertFalse(any("Traceback" in text or "SECRET" in text for text in texts))
+            self.assertEqual(
+                reader.inspect("search", "R1", "SECRET TRACEBACK BODY")["matches"], [])
 
 
 class RunAllocationTests(unittest.TestCase):

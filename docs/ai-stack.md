@@ -66,7 +66,8 @@ a provider-neutral attention stimulus. Initiative now has independent capability
 
 - without `--initiative`, cognition occurs only for explicit operator asks;
 - `--initiative` enables bounded goal-directed initiative, may receive up to two
-  read-only `inspect_self` or `observe_scene` attempts where available, and
+  read-only `inspect_self`, `observe_scene`, `recall_memory`, or
+  `inspect_run_history` attempts where available, and
   permits the single bounded `schedule_followup` semantic effect;
 - `--initiative-actions` permits `orient_body` only on a nonphysical body;
 - `--initiative-messages` permits `address_operator` only with a configured sink;
