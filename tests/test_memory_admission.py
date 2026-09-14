@@ -192,6 +192,83 @@ class MemoryAdmissionTests(unittest.TestCase):
         self.assertEqual(conflict.conflicts, (created.memory,))
         self.assertEqual(len(self.store.list_memories_for_entity(self.nick.id)), 1)
 
+    def _assert_cross_kind_duplicate(self, existing_kind, proposed_kind):
+        existing = self.store.create_memory(
+            existing_kind, "Nick prefers vi", predicate="preferred_editor",
+            value_text="vi", source_kind="import", source_label="fixture",
+            links=(NewMemoryLink(self.nick.id, "subject"),),
+            payloads=(NewMemoryPayload("text", "text/plain", "original"),),
+        )
+        before = self.store.get_memory(existing.record.id)
+        result = self.admit(
+            proposal(subject="Nick", kind=proposed_kind,
+                     predicate="preferred_editor", value="vi",
+                     evidence="Nick prefers vi"),
+            "Remember that Nick prefers vi.",
+        )
+        self.assertEqual(
+            (result.status, result.admission, result.entity, result.memory),
+            ("applied", "duplicate", self.nick.identity, existing.record.identity),
+        )
+        self.assertEqual(self.store.list_memories_for_entity(self.nick.id), (before,))
+
+    def test_existing_fact_is_duplicate_of_proposed_preference(self):
+        self._assert_cross_kind_duplicate("fact", "preference")
+
+    def test_existing_preference_is_duplicate_of_proposed_fact(self):
+        self._assert_cross_kind_duplicate("preference", "fact")
+
+    def _assert_cross_kind_conflict(self, existing_kind, proposed_kind):
+        existing = self.store.create_memory(
+            existing_kind, "Nick prefers vi", predicate="preferred_editor",
+            value_text="vi", links=(NewMemoryLink(self.nick.id, "subject"),),
+            payloads=(NewMemoryPayload("text", "text/plain", "original"),),
+        )
+        result = self.admit(
+            proposal(subject="Nick", kind=proposed_kind,
+                     predicate="preferred_editor", value="emacs",
+                     evidence="Nick prefers emacs"),
+            "Remember that Nick prefers emacs.",
+        )
+        self.assertEqual((result.status, result.reason, result.conflicts),
+                         ("rejected", "conflict", (existing.record.identity,)))
+        self.assertEqual(len(self.store.list_memories_for_entity(self.nick.id)), 1)
+
+    def test_existing_fact_conflicts_with_proposed_preference(self):
+        self._assert_cross_kind_conflict("fact", "preference")
+
+    def test_existing_preference_conflicts_with_proposed_fact(self):
+        self._assert_cross_kind_conflict("preference", "fact")
+
+    def test_cross_kind_duplicate_requires_same_predicate(self):
+        self.store.create_memory(
+            "fact", "Nick prefers vi", predicate="default_editor", value_text="vi",
+            links=(NewMemoryLink(self.nick.id, "subject"),),
+            payloads=(NewMemoryPayload("text", "text/plain", "original"),),
+        )
+        result = self.admit(
+            proposal(subject="Nick", kind="preference", predicate="preferred_editor",
+                     value="vi", evidence="Nick prefers vi"),
+            "Remember that Nick prefers vi.",
+        )
+        self.assertEqual(result.admission, "created")
+
+    def test_cross_kind_duplicate_requires_same_direct_links(self):
+        extra_link = self.store.create_memory(
+            "fact", "Nick prefers vi", predicate="preferred_editor", value_text="vi",
+            links=(NewMemoryLink(self.nick.id, "subject"),
+                   NewMemoryLink(self.gordon.id, "context")),
+            payloads=(NewMemoryPayload("text", "text/plain", "original"),),
+        )
+        result = self.admit(
+            proposal(subject="Nick", kind="preference", predicate="preferred_editor",
+                     value="vi", evidence="Nick prefers vi"),
+            "Remember that Nick prefers vi.",
+        )
+        self.assertEqual(result.admission, "created")
+        self.assertEqual(len(self.store.list_memories_for_entity(self.nick.id)), 2)
+        self.assertEqual(self.store.get_memory(extra_link.record.id), extra_link)
+
     def test_machine_identifiers_are_casefolded(self):
         created = self.admit(proposal(predicate="FAVORITE_SNACK"))
         duplicate = self.admit(proposal(predicate="favorite_snack"))
