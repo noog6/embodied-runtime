@@ -397,6 +397,10 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(properties["related_entity"]["type"], ["string", "null"])
         self.assertEqual(properties["related_role"]["type"], ["string", "null"])
         self.assertIn("canonical name or exact alias", properties["subject"]["description"])
+        for reference in ("you", "your", "yours", "yourself"):
+            self.assertIn(reference, REMEMBER_TOOL.description)
+        self.assertIn("I, me, my, mine, and myself", REMEMBER_TOOL.description)
+        self.assertIn("bounded runtime-self reference", properties["subject"]["description"])
         self.assertIn("simple machine identifier", properties["predicate"]["description"])
         self.assertIn("CURRENT operator utterance", properties["evidence"]["description"])
         self.assertIn("Null for fact/preference", properties["related_entity"]["description"])

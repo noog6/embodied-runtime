@@ -27,6 +27,16 @@ thing exists. Entity administration remains a supervised console operation.
 There is no fuzzy, semantic, typo-correcting, lexical, embedding, or vector
 fallback.
 
+For an operator dialogue turn, the bounded subject references `you`, `your`,
+`yours`, and `yourself` can denote the current runtime self. The application
+derives that identity from the active robot profile name and still requires one
+exact persistent entity match; a missing or ambiguous match rejects admission
+without creating an entity. This resolution changes only who the subject link
+denotes. Evidence retains the operator's wording, including the second-person
+reference. Operator-side `I`, `me`, `my`, `mine`, and `myself` are not mapped to
+runtime self. This is not general pronoun or coreference resolution, and it does
+not apply to a relationship's related-entity/value position.
+
 Every accepted write receives a runtime-owned `operator_statement` source,
 active status, normal store creation time, and exactly one inline `text/plain`
 payload. Both the durable summary and payload are the normalized display form
