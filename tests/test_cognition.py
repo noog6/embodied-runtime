@@ -421,9 +421,28 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
             app = self.make_application(FakeCognition(), history=reader)
             tool = next(tool for tool in app.cognition_tools()
                         if tool.name == "inspect_run_history")
-            self.assertEqual(tool.parameters["properties"]["operation"]["enum"],
-                             ["recent", "overview", "search"])
-            self.assertFalse(tool.parameters["additionalProperties"])
+            self.assertEqual(tool.parameters, {
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": (
+                            "Run selection: recent, current, previous, or "
+                            "R<positive integer>."
+                        ),
+                    },
+                    "query": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "description": (
+                            "Null for metadata/overview; otherwise a literal log search."
+                        ),
+                    },
+                },
+                "required": ["selector", "query"],
+                "additionalProperties": False,
+            })
             self.assertIn("inspect_run_history", app._acquisition_tool_names())
             self.assertEqual(app.acquisition_tools(), ())
             await app.start()
@@ -435,7 +454,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
                           [item.name for item in app.acquisition_tools()])
             result = await app._execute_cognition_tool(CognitionToolCall(
                 "inspect_run_history",
-                '{"operation":"recent","run":null,"query":null}',
+                '{"selector":"recent","query":null}',
             ))
             self.assertEqual(json.loads(result.output)["status"], "applied")
             await app.stop()

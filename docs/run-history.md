@@ -88,8 +88,15 @@ the application the writable history object. If creation fails, explicit IDs
 and recent discovery remain usable but `current` and `previous` are unavailable.
 Direct `RobotApplication` construction has no history provider by default.
 
-`inspect_run_history(operation, run?, query?)` supports `recent`, `overview`,
-and `search`. Run selectors are only `current`, `previous`, and an exact
+`inspect_run_history(selector, query)` exposes two required fields. `selector`
+accepts `recent`, `current`, `previous`, or an exact case-insensitive
+`R<positive integer>`; `query` is null for metadata/overview mode or a non-blank
+literal search string of at most 256 characters. Blank or whitespace-only
+queries are rejected rather than treated as an overview. The adapter maps
+`recent, null` to `reader.inspect("recent")`; every other null query to
+`reader.inspect("overview", selector)`; and a non-null query to
+`reader.inspect("search", selector, query)`. `recent` with a query is rejected.
+Run selectors are only `current`, `previous`, and an exact
 case-insensitive `R<positive integer>`. `current` uses only the explicitly
 injected ID, never the newest directory. `previous` is the highest safe direct
 ID below that explicit current ID (gaps are allowed); malformed evidence in that
@@ -124,6 +131,10 @@ cache behavior. It is offered to operator cognition whenever the reader is
 configured, and to initiative only through the existing running, enabled, and
 active-goal gates. Nothing inspects history automatically at boot or while idle.
 Evidence is temporary grounding: it adds neither a separate WorkingMemory turn
-nor automatic persistent memory. Current Runtime context remains authoritative,
+nor automatic persistent memory. A history result alone is not evidence that
+its information was remembered: when asked whether something is remembered,
+the response must distinguish remembered knowledge from what the run record
+shows. Persistent-memory evidence may independently support a memory claim.
+Current Runtime context remains authoritative,
 and a current `started` record is only a partial snapshot—not proof of final
 health, success, abandonment, or failure.

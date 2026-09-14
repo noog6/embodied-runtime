@@ -254,12 +254,17 @@ INSPECT_RUN_HISTORY_TOOL = CognitionToolDefinition(
     parameters={
         "type": "object",
         "properties": {
-            "operation": {"type": "string", "enum": ["recent", "overview", "search"]},
-            "run": {"type": ["string", "null"]},
-            "query": {"type": ["string", "null"], "minLength": 1,
-                      "maxLength": MAX_GREP_QUERY_LENGTH},
+            "selector": {
+                "type": "string",
+                "description": "Run selection: recent, current, previous, or R<positive integer>.",
+            },
+            "query": {
+                "type": ["string", "null"], "minLength": 1,
+                "maxLength": MAX_GREP_QUERY_LENGTH,
+                "description": "Null for metadata/overview; otherwise a literal log search.",
+            },
         },
-        "required": ["operation", "run", "query"],
+        "required": ["selector", "query"],
         "additionalProperties": False,
     },
 )
@@ -976,7 +981,13 @@ class RobotApplication:
                             "[ATTENTION] episode=E%s acquisition=%s/2 tool=%s status=requested",
                             episode.id, number, call.name,
                         )
-                        acquisition_key = (call.name, call.arguments)
+                        acquisition_arguments: object = call.arguments
+                        if call.name == INSPECT_RUN_HISTORY_TOOL.name:
+                            try:
+                                acquisition_arguments = self._normalize_run_history_arguments(call)
+                            except (json.JSONDecodeError, TypeError, ValueError):
+                                pass
+                        acquisition_key = (call.name, acquisition_arguments)
                         if acquisition_key in acquisition_requests:
                             # Re-present already accumulated evidence without
                             # repeating I/O or consuming another acquisition.
@@ -1289,7 +1300,12 @@ class RobotApplication:
     def _run_history_grounding() -> str:
         return (
             "Run history is deliberate, content-filtered operational evidence, not "
-            "automatically remembered semantic knowledge. Previous evidence may be stale; "
+            "automatically remembered semantic knowledge. An inspect_run_history result is "
+            "not evidence that the information was remembered. If the operator asks whether "
+            "you remember something and it is available only from run history, do not answer "
+            "yes, I remember; explicitly say you do not have it as remembered knowledge, but "
+            "the run record shows it. Persistent-memory evidence may independently support a "
+            "memory claim. Previous evidence may be stale; "
             "fresh Runtime context is authoritative for current state. The current selector "
             "is only a partial snapshot persisted so far. A stored started status alone does "
             "not prove running, crashed, or abandoned. Attribute acquired facts to the run "
@@ -2176,18 +2192,9 @@ class RobotApplication:
                 raise RuntimeError("run history inspection is not available")
             if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
                 raise RuntimeError("expected active goal is no longer current")
-            arguments = json.loads(call.arguments)
-            if not isinstance(arguments, dict) or not set(arguments) <= {
-                    "operation", "run", "query"} or "operation" not in arguments:
-                raise ValueError("invalid arguments")
-            operation = arguments["operation"] if type(arguments["operation"]) is str else "invalid"
-            raw_selector = arguments.get("run")
-            selector = (
-                raw_selector if raw_selector in ("current", "previous") else
-                canonical_run_id(raw_selector) if type(raw_selector) is str else "none"
-            ) or "invalid"
-            result = self._run_history_evidence.inspect(
-                arguments["operation"], arguments.get("run"), arguments.get("query"))
+            operation, selector, query = self._normalize_run_history_arguments(call)
+            run = None if operation == "recent" else selector
+            result = self._run_history_evidence.inspect(operation, run, query)
         except (json.JSONDecodeError, TypeError, ValueError, RuntimeError):
             result = {"status": "rejected", "reason": "invalid_tool_arguments"}
         status = str(result.get("status", "rejected"))
@@ -2199,6 +2206,32 @@ class RobotApplication:
             selector, status, count, reason or "none",
         )
         return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    @staticmethod
+    def _normalize_run_history_arguments(
+        call: CognitionToolCall,
+    ) -> tuple[str, str, str | None]:
+        arguments = json.loads(call.arguments)
+        if (not isinstance(arguments, dict)
+                or set(arguments) != {"selector", "query"}):
+            raise ValueError("invalid arguments")
+        raw_selector = arguments["selector"]
+        query = arguments["query"]
+        if type(raw_selector) is not str or (query is not None and type(query) is not str):
+            raise ValueError("invalid arguments")
+        selector = (
+            raw_selector if raw_selector in ("recent", "current", "previous")
+            else canonical_run_id(raw_selector)
+        )
+        if selector is None:
+            raise ValueError("invalid selector")
+        if query is not None and (not query.strip() or len(query) > MAX_GREP_QUERY_LENGTH):
+            raise ValueError("invalid query")
+        if selector == "recent":
+            if query is not None:
+                raise ValueError("recent does not support search")
+            return "recent", selector, None
+        return ("overview" if query is None else "search"), selector, query
 
     def _execute_memory_recall(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,

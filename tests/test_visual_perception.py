@@ -291,7 +291,7 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
 
         backend = SequenceCognition([
             invoke("inspect_run_history", {
-                "operation": "recent", "run": None, "query": None,
+                "selector": "recent", "query": None,
             }),
             no_tool,
         ])

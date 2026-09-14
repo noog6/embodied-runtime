@@ -557,7 +557,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
     async def test_history_mixes_with_self_and_is_not_offered_as_third_acquisition(self):
         history = CountingHistoryReader()
         backend = ScriptedBackend((
-            ("inspect_run_history", {"operation": "recent", "run": None, "query": None}),
+            ("inspect_run_history", {"selector": "recent", "query": None}),
             ("inspect_self", {"area": "runtime"}),
         ))
         app = self.app(backend, run_history_evidence=history)
@@ -574,10 +574,52 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         )
         await app.stop()
 
+    async def test_history_model_arguments_map_to_reader_operations(self):
+        history = CountingHistoryReader()
+        app = self.app(ScriptedBackend(()), run_history_evidence=history)
+        await app.start()
+        cases = (
+            ({"selector": "recent", "query": None}, ("recent", None, None)),
+            ({"selector": "current", "query": None}, ("overview", "current", None)),
+            ({"selector": "previous", "query": None}, ("overview", "previous", None)),
+            ({"selector": "R2", "query": None}, ("overview", "R2", None)),
+            ({"selector": "current", "query": "CAMERA"},
+             ("search", "current", "CAMERA")),
+            ({"selector": "R2", "query": "COGNITION"},
+             ("search", "R2", "COGNITION")),
+        )
+        for arguments, expected in cases:
+            result = await app._execute_cognition_tool(CognitionToolCall(
+                "inspect_run_history", json.dumps(arguments)))
+            self.assertEqual(json.loads(result.output)["status"], "applied")
+            self.assertEqual(history.calls[-1], expected)
+        await app.stop()
+
+    async def test_history_model_arguments_reject_invalid_combinations(self):
+        history = CountingHistoryReader()
+        app = self.app(ScriptedBackend(()), run_history_evidence=history)
+        await app.start()
+        invalid = (
+            {"selector": "recent", "query": "CAMERA"},
+            {"selector": "R2", "query": ""},
+            {"selector": "R2", "query": "   "},
+            {"selector": "../R2", "query": None},
+            {"selector": "R0", "query": None},
+            {"selector": "/tmp/R2", "query": None},
+        )
+        for arguments in invalid:
+            result = await app._execute_cognition_tool(CognitionToolCall(
+                "inspect_run_history", json.dumps(arguments)))
+            self.assertEqual(json.loads(result.output), {
+                "reason": "invalid_tool_arguments", "status": "rejected",
+            })
+        self.assertEqual(history.calls, [])
+        await app.stop()
+
     async def test_history_mixes_with_visual_acquisition(self):
         history = CountingHistoryReader()
         backend = ScriptedBackend((
-            ("inspect_run_history", {"operation": "recent", "run": None, "query": None}),
+            ("inspect_run_history", {"selector": "recent", "query": None}),
             ("observe_scene", {"focus": "desk"}),
         ))
         app = self.app(
@@ -596,7 +638,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
     async def test_identical_history_acquisition_is_cached_and_id_is_not_preexposed(self):
         history = CountingHistoryReader("R37")
         call = ("inspect_run_history", {
-            "operation": "overview", "run": "current", "query": None,
+            "selector": "current", "query": None,
         })
         backend = ScriptedBackend((call, call))
         app = self.app(backend, run_history_evidence=history)
@@ -607,10 +649,29 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(backend.requests), 2)
         await app.stop()
 
+    async def test_equivalent_history_acquisition_is_cached_by_normalized_request(self):
+        history = CountingHistoryReader()
+        backend = ScriptedBackend((
+            ("inspect_run_history", {"selector": "r2", "query": None}),
+            ("inspect_run_history", {"query": None, "selector": "R2"}),
+        ))
+        app = self.app(backend, run_history_evidence=history)
+        await app.start()
+        await app.request_cognition("inspect once")
+        self.assertEqual(history.calls, [("overview", "R2", None)])
+        self.assertEqual(len(backend.requests), 2)
+        await app.stop()
+
+    def test_history_grounding_separates_record_evidence_from_memory(self):
+        grounding = RobotApplication._run_history_grounding()
+        self.assertIn("not evidence that the information was remembered", grounding)
+        self.assertIn("do not answer yes, I remember", grounding)
+        self.assertIn("Persistent-memory evidence may independently support", grounding)
+
     async def test_history_log_omits_search_query_and_returned_evidence(self):
         history = CountingHistoryReader()
         backend = ScriptedBackend((("inspect_run_history", {
-            "operation": "search", "run": "R1", "query": "SECRET QUERY BODY",
+            "selector": "R1", "query": "SECRET QUERY BODY",
         }),))
         app = self.app(backend, run_history_evidence=history)
         await app.start()
