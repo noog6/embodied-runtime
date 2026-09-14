@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import FrozenInstanceError
 import math
 import unittest
+from unittest.mock import patch
 
 from embodied_runtime.app import RobotApplication
 from embodied_runtime.body.base import BodyBackend
@@ -287,6 +288,78 @@ class ApplicationBodyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.state, LifecycleState.STOPPED)
         self.assertFalse(app.events.is_running)
         self.assertFalse(app._platform_monitor.is_running)
+
+    async def test_repeated_startup_cancellation_is_not_reflex_failure(self):
+        calls: list[str] = []
+        handler_started = asyncio.Event()
+        handler_cancelled = asyncio.Event()
+        release_handler = asyncio.Event()
+        startup_waiting = asyncio.Event()
+
+        class SubscriptionReflex:
+            identifier = "subscription"
+
+            async def start(self, events, _capabilities):
+                async def handler(_event):
+                    handler_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        handler_cancelled.set()
+                        await release_handler.wait()
+                        raise
+
+                self.subscription = events.subscribe(ApplicationStarted, handler)
+                calls.append("subscription.start")
+
+            async def stop(self):
+                calls.append("subscription.stop")
+                await self.subscription.close()
+
+        class BlockingStartReflex:
+            identifier = "blocking_start"
+
+            async def start(self, _events, _capabilities):
+                calls.append("blocking.start")
+                startup_waiting.set()
+                await asyncio.Event().wait()
+
+            async def stop(self):
+                calls.append("blocking.stop")
+
+        hardware = RecordingHardware(calls)
+        body = RecordingBody(calls)
+        app = application(
+            hardware, body,
+            reflexes=(SubscriptionReflex(), BlockingStartReflex()),
+        )
+        start_task = asyncio.create_task(app.start())
+        await startup_waiting.wait()
+        await app.events.publish(ApplicationStarted(source="test"))
+        await handler_started.wait()
+
+        with patch("embodied_runtime.app.LOGGER.exception") as log_exception:
+            start_task.cancel()
+            await handler_cancelled.wait()
+            start_task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(start_task.done())
+            release_handler.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await start_task
+
+        self.assertFalse(any(
+            call.args and "[REFLEX]" in call.args[0]
+            for call in log_exception.call_args_list
+        ))
+        self.assertEqual(
+            calls,
+            ["hardware.start", "body.start", "subscription.start", "blocking.start",
+             "blocking.stop", "subscription.stop", "body.stop", "hardware.stop"],
+        )
+        self.assertEqual(app.state, LifecycleState.STOPPED)
+        self.assertFalse(hardware.is_running)
+        self.assertFalse(app.events.is_running)
 
     async def test_event_cleanup_failure_preserves_reflex_start_failure(self):
         calls: list[str] = []

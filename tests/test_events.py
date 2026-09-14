@@ -123,6 +123,41 @@ class EventBusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received, [])
         await bus.stop()
 
+    async def test_cancelled_close_still_joins_delivery_worker(self) -> None:
+        bus = EventBus()
+        handler_started = asyncio.Event()
+        handler_cancelled = asyncio.Event()
+        release_handler = asyncio.Event()
+
+        async def handler(event: SampleEvent) -> None:
+            handler_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                handler_cancelled.set()
+                await release_handler.wait()
+                raise
+
+        subscription = bus.subscribe(SampleEvent, handler)
+        await bus.start()
+        await bus.publish(SampleEvent(source="test", value=1))
+        await handler_started.wait()
+        delivery_task = subscription._task
+        assert delivery_task is not None
+
+        close_task = asyncio.create_task(subscription.close())
+        await handler_cancelled.wait()
+        close_task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(close_task.done())
+
+        release_handler.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await close_task
+        self.assertTrue(delivery_task.done())
+        self.assertIsNone(subscription._task)
+        await bus.stop()
+
     async def test_publish_requires_running_bus(self) -> None:
         bus = EventBus()
         with self.assertRaisesRegex(RuntimeError, "not running"):

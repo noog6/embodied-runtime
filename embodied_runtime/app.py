@@ -2668,6 +2668,9 @@ class RobotApplication:
             reflex = self._started_reflexes.pop()
             try:
                 await reflex.stop()
+            except asyncio.CancelledError as error:
+                # Cancellation is cleanup control flow, not a reflex failure.
+                failure = failure or error
             except BaseException as error:
                 LOGGER.exception("[REFLEX] name=%s stop_failed", reflex.identifier)
                 failure = failure or error

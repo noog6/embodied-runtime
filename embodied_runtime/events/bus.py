@@ -39,9 +39,19 @@ class Subscription(Generic[EventT]):
         self._closed_event.set()
         self._bus._remove(self)
         if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
+            task = self._task
+            task.cancel()
+            joined = asyncio.gather(task, return_exceptions=True)
+            try:
+                await asyncio.shield(joined)
+            except asyncio.CancelledError:
+                # Closing owns this worker even when its caller is cancelled.
+                # Finish the join before forwarding that cancellation.
+                await joined
+                raise
+            finally:
+                if task.done():
+                    self._task = None
 
     def _start(self) -> None:
         if not self._closed and self._task is None:
