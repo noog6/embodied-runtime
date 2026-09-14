@@ -2,7 +2,7 @@ import os
 import json
 import sys
 from dataclasses import FrozenInstanceError, fields
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -13,6 +13,7 @@ from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import (
     CognitionContext,
     CognitionError,
+    CognitionUnavailableError,
     CognitionToolCall,
     CognitionToolResult,
     TextCognitionBackend,
@@ -378,6 +379,54 @@ class FakeResponses:
 
 
 class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
+    def test_lazy_client_initialization_is_measured_once(self):
+        client = SimpleNamespace(responses=FakeResponses())
+        openai = ModuleType("openai")
+        openai.AsyncOpenAI = lambda: client
+        backend = OpenAIResponsesBackend()
+        with (
+            patch.dict(sys.modules, {"openai": openai}),
+            patch("embodied_runtime.cognition.openai_responses.time.perf_counter",
+                  side_effect=[1.0, 1.125]),
+            self.assertLogs("embodied_runtime.cognition.openai_responses", "INFO") as logs,
+        ):
+            self.assertIs(backend._get_client(), client)
+            self.assertIs(backend._get_client(), client)
+        self.assertEqual(logs.output, [
+            "INFO:embodied_runtime.cognition.openai_responses:"
+            "[COGNITION] backend=openai-responses component=client_init "
+            "status=completed cold=true duration_ms=125"
+        ])
+
+    def test_injected_client_emits_no_client_initialization_measurement(self):
+        backend = OpenAIResponsesBackend(client=object())
+        with self.assertNoLogs("embodied_runtime.cognition.openai_responses", "INFO"):
+            backend._get_client()
+
+    def test_client_initialization_failure_is_bounded_and_preserved(self):
+        openai = ModuleType("openai")
+
+        def fail():
+            raise RuntimeError("secret client configuration")
+
+        openai.AsyncOpenAI = fail
+        backend = OpenAIResponsesBackend()
+        with (
+            patch.dict(sys.modules, {"openai": openai}),
+            patch("embodied_runtime.cognition.openai_responses.time.perf_counter",
+                  side_effect=[2.0, 2.02]),
+            self.assertLogs("embodied_runtime.cognition.openai_responses", "INFO") as logs,
+            self.assertRaises(CognitionError) as caught,
+        ):
+            backend._get_client()
+        self.assertIsInstance(caught.exception, CognitionUnavailableError)
+        self.assertNotIn("secret", str(caught.exception))
+        self.assertEqual(logs.output, [
+            "INFO:embodied_runtime.cognition.openai_responses:"
+            "[COGNITION] backend=openai-responses component=client_init "
+            "status=failed cold=true duration_ms=20"
+        ])
+
     def test_all_provider_tools_have_compatible_strict_object_schemas(self):
         tool_definitions = (
             value for value in vars(app_module).values()
@@ -452,6 +501,50 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
             [{"model": "test-model", "input": "operator text", "instructions": "startup"}],
         )
 
+    async def test_initial_provider_timings_advance_and_omit_content(self):
+        responses = FakeResponses()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        with (
+            patch("embodied_runtime.cognition.openai_responses.time.perf_counter",
+                  side_effect=[1.0, 1.25, 2.0, 2.5]),
+            self.assertLogs("embodied_runtime.cognition.openai_responses", "INFO") as logs,
+        ):
+            await backend.respond("secret first", instructions="private")
+            await backend.respond("hidden", instructions="grounding")
+        self.assertIn(
+            "provider_request=initial ordinal=1 cold=true status=completed "
+            "duration_ms=250 message_chars=12 instruction_chars=7 tools=0",
+            logs.output[0],
+        )
+        self.assertIn(
+            "provider_request=initial ordinal=2 cold=false status=completed "
+            "duration_ms=500 message_chars=6 instruction_chars=9 tools=0",
+            logs.output[1],
+        )
+        self.assertNotIn("secret first", " ".join(logs.output))
+        self.assertNotIn("private", " ".join(logs.output))
+
+    async def test_public_usage_metadata_is_logged_and_absence_is_harmless(self):
+        usage = SimpleNamespace(
+            input_tokens=100, output_tokens=7, total_tokens=107,
+            input_tokens_details=SimpleNamespace(cached_tokens=80),
+        )
+        responses = FakeResponses(results=[
+            SimpleNamespace(output_text="one", output=[], id="one", usage=usage),
+            SimpleNamespace(output_text="two", output=[], id="two"),
+        ])
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        with self.assertLogs(
+            "embodied_runtime.cognition.openai_responses", "INFO"
+        ) as logs:
+            await backend.respond("first")
+            await backend.respond("second")
+        self.assertIn(
+            "input_tokens=100 output_tokens=7 total_tokens=107 "
+            "cached_input_tokens=80", logs.output[0],
+        )
+        self.assertNotIn("input_tokens=", logs.output[1])
+
     async def test_one_function_call_executes_once_and_continues_with_result(self):
         first = SimpleNamespace(
             id="response-1", output_text="", output=[SimpleNamespace(
@@ -471,10 +564,15 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
             return CognitionToolResult('{"status":"applied"}')
 
         tool = self._tool()
-        result = await backend.respond(
-            "move", instructions="before", tools=(tool,), tool_executor=execute,
-            refreshed_instructions=lambda: "after",
-        )
+        with (
+            patch("embodied_runtime.cognition.openai_responses.time.perf_counter",
+                  side_effect=[0.0, 1.0, 100.0, 101.0]),
+            self.assertLogs("embodied_runtime.cognition.openai_responses", "INFO") as logs,
+        ):
+            result = await backend.respond(
+                "move", instructions="before", tools=(tool,), tool_executor=execute,
+                refreshed_instructions=lambda: "after",
+            )
         self.assertEqual(result, "applied")
         self.assertEqual(calls, [CognitionToolCall(
             "orient_body", '{"yaw_degrees":35,"pitch_degrees":-10}'
@@ -490,6 +588,15 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
             "type": "function_call_output", "call_id": "call-7",
             "output": '{"status":"applied"}',
         }])
+        self.assertIn(
+            "provider_request=initial ordinal=1 cold=true status=completed "
+            "duration_ms=1000 message_chars=4 instruction_chars=6 tools=1",
+            logs.output[0],
+        )
+        self.assertIn(
+            "provider_request=continuation ordinal=2 cold=false status=completed "
+            "duration_ms=1000 instruction_chars=5 tools=0", logs.output[1],
+        )
 
     async def test_multiple_calls_execute_none(self):
         call = lambda identifier: SimpleNamespace(
@@ -543,9 +650,18 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
         backend = OpenAIResponsesBackend(
             client=SimpleNamespace(responses=FakeResponses(RuntimeError("secret detail")))
         )
-        with self.assertRaisesRegex(CognitionError, "OpenAI Responses request failed") as caught:
-            await backend.respond("hello")
+        with (
+            self.assertLogs("embodied_runtime.cognition.openai_responses", "INFO") as logs,
+            self.assertRaisesRegex(CognitionError, "OpenAI Responses request failed") as caught,
+        ):
+            await backend.respond("sensitive message")
         self.assertNotIn("secret detail", str(caught.exception))
+        self.assertIn(
+            "provider_request=initial ordinal=1 cold=true status=failed",
+            logs.output[0],
+        )
+        self.assertNotIn("secret detail", logs.output[0])
+        self.assertNotIn("sensitive message", logs.output[0])
 
     def test_default_and_environment_model(self):
         with patch.dict(os.environ, {}, clear=True):

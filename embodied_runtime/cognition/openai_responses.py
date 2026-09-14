@@ -2,7 +2,9 @@
 
 from collections.abc import Sequence
 from typing import Any
+import logging
 import os
+import time
 
 from embodied_runtime.cognition.base import (
     CognitionError,
@@ -14,6 +16,7 @@ from embodied_runtime.cognition.base import (
 )
 
 DEFAULT_MODEL = "gpt-5.6-luna"
+LOGGER = logging.getLogger(__name__)
 
 
 class OpenAIResponsesBackend:
@@ -24,23 +27,97 @@ class OpenAIResponsesBackend:
     def __init__(self, *, model: str | None = None, client: Any = None) -> None:
         self.model = model or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
         self._client = client
+        self._client_init_measured = client is not None
+        self._provider_request_ordinal = 0
 
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
+        started = time.perf_counter()
         try:
             from openai import AsyncOpenAI
         except ImportError as error:
+            self._log_client_init("failed", started)
             raise CognitionUnavailableError(
                 "OpenAI cognition is unavailable; install the 'openai' optional dependency"
             ) from error
         try:
             self._client = AsyncOpenAI()
         except Exception as error:
+            self._log_client_init("failed", started)
             raise CognitionUnavailableError(
                 "OpenAI cognition is unavailable; check OPENAI_API_KEY"
             ) from error
+        self._log_client_init("completed", started)
         return self._client
+
+    def _log_client_init(self, status: str, started: float) -> None:
+        if self._client_init_measured:
+            return
+        self._client_init_measured = True
+        LOGGER.info(
+            "[COGNITION] backend=%s component=client_init status=%s cold=true "
+            "duration_ms=%s",
+            self.identifier, status, int((time.perf_counter() - started) * 1_000),
+        )
+
+    async def _provider_request(
+        self, kind: str, arguments: dict[str, Any], *, message_chars: int | None,
+        instruction_chars: int, tools: int,
+    ) -> Any:
+        """Time exactly one outbound Responses call and log bounded metadata."""
+        client = self._get_client()
+        self._provider_request_ordinal += 1
+        ordinal = self._provider_request_ordinal
+        cold = ordinal == 1
+        started = time.perf_counter()
+        try:
+            response = await client.responses.create(**arguments)
+        except Exception:
+            self._log_provider_request(
+                kind, ordinal, cold, "failed", started, message_chars,
+                instruction_chars, tools,
+            )
+            raise
+        self._log_provider_request(
+            kind, ordinal, cold, "completed", started, message_chars,
+            instruction_chars, tools, response,
+        )
+        return response
+
+    def _log_provider_request(
+        self, kind: str, ordinal: int, cold: bool, status: str, started: float,
+        message_chars: int | None, instruction_chars: int, tools: int,
+        response: Any = None,
+    ) -> None:
+        fields = [
+            f"[COGNITION] backend={self.identifier}",
+            f"provider_request={kind}", f"ordinal={ordinal}",
+            f"cold={str(cold).lower()}", f"status={status}",
+            f"duration_ms={int((time.perf_counter() - started) * 1_000)}",
+        ]
+        if message_chars is not None:
+            fields.append(f"message_chars={message_chars}")
+        fields.extend((f"instruction_chars={instruction_chars}", f"tools={tools}"))
+        if response is not None:
+            fields.extend(self._usage_fields(response))
+        LOGGER.info(" ".join(fields))
+
+    @staticmethod
+    def _usage_fields(response: Any) -> list[str]:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return []
+        fields = []
+        for public_name in ("input_tokens", "output_tokens", "total_tokens"):
+            value = getattr(usage, public_name, None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                fields.append(f"{public_name}={value}")
+        details = getattr(usage, "input_tokens_details", None)
+        cached = getattr(details, "cached_tokens", None)
+        if isinstance(cached, int) and not isinstance(cached, bool):
+            fields.append(f"cached_input_tokens={cached}")
+        return fields
 
     async def respond(
         self,
@@ -65,7 +142,10 @@ class OpenAIResponsesBackend:
                 parallel_tool_calls=False,
             )
         try:
-            response = await self._get_client().responses.create(**arguments)
+            response = await self._provider_request(
+                "initial", arguments, message_chars=len(message),
+                instruction_chars=len(instructions or ""), tools=len(tools),
+            )
             calls = [item for item in response.output if item.type == "function_call"]
             if not calls:
                 return response.output_text
@@ -75,7 +155,7 @@ class OpenAIResponsesBackend:
             result = await tool_executor(
                 CognitionToolCall(name=call.name, arguments=call.arguments)
             )
-            final = await self._get_client().responses.create(
+            final_arguments = dict(
                 model=self.model,
                 previous_response_id=response.id,
                 input=[{
@@ -85,6 +165,10 @@ class OpenAIResponsesBackend:
                 }],
                 instructions=refreshed_instructions(),
                 tool_choice="none",
+            )
+            final = await self._provider_request(
+                "continuation", final_arguments, message_chars=None,
+                instruction_chars=len(final_arguments["instructions"]), tools=0,
             )
             if any(item.type == "function_call" for item in final.output):
                 raise CognitionError("Provider requested an additional cognition tool")

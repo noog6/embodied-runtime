@@ -94,10 +94,23 @@ retained nor reused and does not provide conversation memory.
 
 The adapter is initialized lazily on the first request. A missing SDK, missing
 key, or provider failure affects that request only and does not stop the runtime.
+The adapter logs content-free `[COGNITION]` elapsed timings for that first local
+client initialization and for each initial or tool-continuation Responses API
+call. Provider-call ordinals are local to one backend instance, and `cold=true`
+means only that the call is the instance's first outbound provider request.
+Request lines include character/tool counts and public numeric token usage when
+the SDK supplies it; they never include prompt, result, identifier, or tool
+content.
 Independent requests gain continuity only because the runtime explicitly
 supplies its working-memory snapshot. This phase adds no durable storage, task
 manager, planning, retries, physical autonomous action, images, perception,
 audio, streaming, or Realtime API integration.
+
+For a physical cold-start check, restart the runtime, ask
+`Say only: ready.` three times, quit, restart, and repeat. Compare the
+`component=client_init`, `provider_request=initial`, and (if a tool is selected)
+`provider_request=continuation` lines. This is a manual observation procedure,
+not a benchmark or prewarm.
 
 ## Bounded continuation
 
