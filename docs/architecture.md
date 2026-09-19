@@ -32,9 +32,28 @@ Task is not physical `RuntimeState`, EventBus history, an `asyncio.Task`, or a J
 Tasks are currently session-resident only because persistence has not been
 implemented, not because their identities or semantics are session-scoped.
 
-`ActiveGoal` remains the application-owned, volatile current intentional
-commitment. Tasks do not own or replace goals in this phase, and no Task executor,
-scheduler, persistence layer, or lifecycle event publisher exists yet.
+An optional immutable `TaskGoal` belongs to a Task and describes that bounded
+work's semantic desired outcome. It is plain validated text: it has no separate
+identity, session counter, runtime handle, provider state, or execution behavior.
+Task lifecycle transitions preserve it unchanged. Defining either value causes no
+execution or cognition wake.
+
+```text
+Runtime Session                    Task domain
+
+  ActiveGoal                       Task
+  volatile current                  |
+  intentional binding               +-- TaskGoal
+                                    semantic desired outcome
+
+          no Task <-> ActiveGoal binding exists yet
+```
+
+The diagram shows independent lifecycle domains. `ActiveGoal` remains the
+unchanged application-owned, volatile current intentional commitment. Future
+executor work may establish a relationship between a currently executing Task and
+that runtime intention, but no binding, current Task, executor, scheduler,
+persistence layer, or lifecycle event publisher exists.
 
 These boundaries are intended to keep the reusable runtime independent of a
 specific robot or vendor backend. Interaction and cognition implementations

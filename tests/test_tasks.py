@@ -5,7 +5,9 @@ from uuid import UUID, uuid4
 from embodied_runtime.tasks import (
     InvalidTaskTransitionError,
     MAX_TASK_DESCRIPTION_CHARS,
+    MAX_TASK_GOAL_DESCRIPTION_CHARS,
     Task,
+    TaskGoal,
     TaskStatus,
 )
 
@@ -17,6 +19,7 @@ class TaskTests(unittest.TestCase):
         self.assertIsInstance(task.id, UUID)
         self.assertEqual(task.description, "inspect the workshop")
         self.assertIs(task.status, TaskStatus.PENDING)
+        self.assertIsNone(task.goal)
         self.assertFalse(hasattr(task, "__dict__"))
 
     def test_explicit_identity_and_description_validation(self):
@@ -36,8 +39,30 @@ class TaskTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Task("x" * (MAX_TASK_DESCRIPTION_CHARS + 1))
 
+    def test_goal_is_normalized_value_object(self):
+        goal = TaskGoal("  determine whether anyone is present  ")
+        task = Task("inspect the workshop", goal=goal)
+
+        self.assertEqual(goal.description, "determine whether anyone is present")
+        self.assertEqual(goal, TaskGoal("determine whether anyone is present"))
+        self.assertIs(task.goal, goal)
+        self.assertFalse(hasattr(goal, "__dict__"))
+
+    def test_goal_validation_and_length_boundary(self):
+        for description in (None, 1, "", "   "):
+            with self.assertRaises((TypeError, ValueError)):
+                TaskGoal(description)  # type: ignore[arg-type]
+
+        maximum = "x" * MAX_TASK_GOAL_DESCRIPTION_CHARS
+        self.assertEqual(TaskGoal(maximum).description, maximum)
+        with self.assertRaises(ValueError):
+            TaskGoal("x" * (MAX_TASK_GOAL_DESCRIPTION_CHARS + 1))
+        with self.assertRaises(TypeError):
+            Task("work", goal="finish")  # type: ignore[arg-type]
+
     def test_pause_resume_and_complete_path(self):
-        pending = Task("work")
+        goal = TaskGoal("produce the result")
+        pending = Task("work", goal=goal)
         running = pending.transition_to(TaskStatus.RUNNING)
         paused = running.transition_to(TaskStatus.PAUSED)
         resumed = paused.transition_to(TaskStatus.RUNNING)
@@ -51,10 +76,35 @@ class TaskTests(unittest.TestCase):
         )
         self.assertEqual({snapshot.id for snapshot in (
             pending, running, paused, resumed, completed)}, {pending.id})
+        for snapshot in (pending, running, paused, resumed, completed):
+            self.assertEqual(snapshot.description, pending.description)
+            self.assertIs(snapshot.goal, goal)
 
     def test_running_can_fail(self):
         task = Task("work").transition_to(TaskStatus.RUNNING)
         self.assertIs(task.transition_to(TaskStatus.FAILED).status, TaskStatus.FAILED)
+
+    def test_every_allowed_transition_preserves_goal(self):
+        goal = TaskGoal("finish the work")
+        pending = Task("work", goal=goal)
+        running = pending.transition_to(TaskStatus.RUNNING)
+        paused = running.transition_to(TaskStatus.PAUSED)
+
+        transitions = (
+            (pending, TaskStatus.RUNNING),
+            (pending, TaskStatus.STOPPED),
+            (running, TaskStatus.PAUSED),
+            (running, TaskStatus.COMPLETED),
+            (running, TaskStatus.FAILED),
+            (running, TaskStatus.STOPPED),
+            (paused, TaskStatus.RUNNING),
+            (paused, TaskStatus.STOPPED),
+        )
+        for snapshot, target in transitions:
+            transitioned = snapshot.transition_to(target)
+            self.assertEqual(transitioned.id, snapshot.id)
+            self.assertEqual(transitioned.description, snapshot.description)
+            self.assertIs(transitioned.goal, goal)
 
     def test_stopping_from_nonterminal_states(self):
         pending = Task("pending")
@@ -99,6 +149,10 @@ class TaskTests(unittest.TestCase):
             pending.transition_to("running")  # type: ignore[arg-type]
 
     def test_snapshots_cannot_be_mutated(self):
-        task = Task("work")
+        task = Task("work", goal=TaskGoal("finish"))
         with self.assertRaises(FrozenInstanceError):
             task.status = TaskStatus.RUNNING  # type: ignore[misc]
+        with self.assertRaises(FrozenInstanceError):
+            task.goal = None  # type: ignore[misc]
+        with self.assertRaises(FrozenInstanceError):
+            task.goal.description = "changed"  # type: ignore[misc,union-attr]

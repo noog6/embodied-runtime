@@ -19,10 +19,14 @@ changes physical-state ownership.
 
 A domain `Task` is likewise not part of `RuntimeState`. It describes a bounded
 unit of meaningful work with its own lifecycle, independent of the runtime
-session lifecycle. Tasks are immutable, currently session-resident domain values;
-they neither own runtime machinery nor constitute EventBus history. `ActiveGoal`
-remains the existing application-owned intentional abstraction and is not yet
-scoped to a Task.
+session lifecycle. Its optional immutable `TaskGoal` is the semantic desired
+outcome of that work; a task goal is neither physical `RuntimeState` nor EventBus
+history. Tasks are immutable, currently session-resident domain values and own no
+runtime machinery. Defining a Task or TaskGoal causes neither execution nor a
+cognition wake. `ActiveGoal` remains the unchanged application-owned, volatile
+active-intention binding and is not yet scoped to a Task. Future executor work may
+bind the currently executing Task's goal to an active runtime intention, but that
+relationship is not implemented.
 
 An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
 or persistent history. It is one transient delivery effect through an
