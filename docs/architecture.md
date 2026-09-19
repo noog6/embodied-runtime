@@ -19,6 +19,23 @@ The runtime should keep these concerns distinct:
 - **Behaviour:** actions, coordination, and task-level control.
 - **Cognition:** decision-making, memory, and higher-level reasoning.
 
+## Runtime sessions and tasks
+
+A runtime session is one invocation of `embodied-runtime`. Its application
+lifecycle owns and coordinates runtime machinery such as the event bus, hardware
+adapters, attention, cognition infrastructure, and platform monitoring.
+
+A `Task` is instead one bounded semantic unit of meaningful work. Its immutable
+lifecycle snapshots move explicitly through `pending`, `running`, `paused`, and a
+terminal result. That lifecycle is independent of the application lifecycle: a
+Task is not physical `RuntimeState`, EventBus history, an `asyncio.Task`, or a Job.
+Tasks are currently session-resident only because persistence has not been
+implemented, not because their identities or semantics are session-scoped.
+
+`ActiveGoal` remains the application-owned, volatile current intentional
+commitment. Tasks do not own or replace goals in this phase, and no Task executor,
+scheduler, persistence layer, or lifecycle event publisher exists yet.
+
 These boundaries are intended to keep the reusable runtime independent of a
 specific robot or vendor backend. Interaction and cognition implementations
 may interpret runtime state and request semantic capabilities, but they do not

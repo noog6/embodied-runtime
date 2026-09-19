@@ -17,6 +17,13 @@ a physical fact. `WorkingMemory` remains historical context and may remember
 old goal discussions without owning the active goal. Neither abstraction
 changes physical-state ownership.
 
+A domain `Task` is likewise not part of `RuntimeState`. It describes a bounded
+unit of meaningful work with its own lifecycle, independent of the runtime
+session lifecycle. Tasks are immutable, currently session-resident domain values;
+they neither own runtime machinery nor constitute EventBus history. `ActiveGoal`
+remains the existing application-owned intentional abstraction and is not yet
+scoped to a Task.
+
 An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
 or persistent history. It is one transient delivery effect through an
 application-supplied interaction sink. Its text is not retained for reply
