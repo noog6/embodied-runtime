@@ -33,6 +33,10 @@ operator input, runtime facts, safety, or capability validation. Setting a goal
 does not perform it, and no goal wakes cognition, retries, monitors satisfaction,
 or resolves itself.
 
+A Task's optional `TaskGoal` is a separate semantic desired outcome belonging to
+that bounded work, not the volatile current intention. It has no cognition effect,
+and no Task-to-`ActiveGoal` activation or current-Task owner exists yet.
+
 It exists to test the responsibility boundary between the runtime and cognition;
 it does not select the reference robot's permanent AI architecture. The
 application creates an allow-listed immutable projection of its current state
