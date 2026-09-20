@@ -15,6 +15,7 @@ from embodied_runtime.cli import build_parser, build_platform_monitor_policy
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
+from embodied_runtime.jobs import SQLiteJobStore
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
@@ -110,6 +111,45 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.console.prompt, "test> ")
         self.assertEqual(self.console.heading, "Test Robot Runtime Console")
 
+    async def test_job_definition_and_manual_lifecycle_commands(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3")
+            app = RobotApplication(
+                RobotProfile("jobs", "Jobs Robot"), VirtualHardwareBackend(),
+                platform_provider=CountingProvider([self.first]), job_store=store,
+            )
+            await app.start()
+            console = RuntimeConsole(app)
+            self.assertEqual(
+                console.execute(
+                    'job add "Review logs" --description "Full description" '
+                    '--target agent:mira'
+                )[0],
+                "Added JOB1: Review logs.",
+            )
+            self.assertEqual(console.execute("job disable JOB1")[0], "JOB1 disabled.")
+            self.assertIn("disabled", console.execute("job start JOB1")[0])
+            self.assertEqual(console.execute("job enable JOB1")[0], "JOB1 enabled.")
+            self.assertIn("Started JOB1 as RUN1", console.execute("job start JOB1")[0])
+            current = console.execute("job current")[0]
+            self.assertIn("job:           JOB1", current)
+            self.assertIn("target:        agent:mira", current)
+            self.assertIn("task_status:   running", current)
+            self.assertEqual(console.execute('job complete "Reviewed logs"')[0],
+                             "Job RUN1 completed.")
+
+            console.execute('job add "Failure"')
+            console.execute("job start JOB2")
+            self.assertEqual(console.execute('job fail "sensor error"')[0],
+                             "Job RUN2 failed.")
+            console.execute('job add "Stop"')
+            console.execute("job start JOB3")
+            self.assertEqual(console.execute("job stop")[0], "Job RUN3 stopped.")
+            self.assertEqual(console.execute("job current")[0], "Current Job\n  none")
+            self.assertIn("invalid name, description, or target",
+                          console.execute('job add Bad --target malformed')[0])
+            await app.stop()
+
     def test_help_is_exact_and_alias_matches(self):
         expected = (
             "Commands\n"
@@ -128,6 +168,13 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  jobs                           List the entire durable Job catalog\n"
             "  job show JOB<n>                Show one Job and its assignment\n"
             "  job runs JOB<n>                List durable occurrences of one Job\n"
+            "  job add <name> [options]       Add an enabled Job definition\n"
+            "  job enable|disable JOB<n>      Change Job definition state\n"
+            "  job start JOB<n>               Start a JobRun and bounded Task\n"
+            "  job current                    Show current JobRun and Task\n"
+            "  job complete [summary]         Complete current JobRun\n"
+            "  job fail <error-summary>       Fail current JobRun\n"
+            "  job stop [summary]             Stop current JobRun\n"
             "  memory clear                   Clear session working memory\n"
             "  memory persistent              Show persistent-memory state\n"
             "  memory entity add <entity_type> <canonical_name> Create a durable entity\n"

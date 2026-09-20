@@ -53,7 +53,8 @@ from embodied_runtime.interaction import (
     render_notification_context, render_notification_policy,
     resolve_notification_route,
 )
-from embodied_runtime.jobs import JobStore
+from embodied_runtime.jobs import Job, JobRun, JobRunStatus, JobStore
+from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
 from embodied_runtime.memory import (
     MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
     MemoryRecallProjector, PersistentMemoryStore,
@@ -84,7 +85,7 @@ from embodied_runtime.platform import (
 from embodied_runtime.state import (
     BodyState, LifecycleState, PowerState, PresenceState, RuntimeState,
 )
-from embodied_runtime.tasks import Task, TaskStatus
+from embodied_runtime.tasks import Task, TaskGoal, TaskStatus
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
 from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
 from embodied_runtime.voice import (
@@ -512,6 +513,15 @@ class _CurrentTaskBinding:
     active_goal: ActiveGoal | None
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentJobRun:
+    """Read-only view of one session-local JobRun-to-Task association."""
+
+    job: Job
+    run: JobRun
+    task: Task
+
+
 class RobotApplication:
     def __init__(
         self,
@@ -601,6 +611,7 @@ class RobotApplication:
         )
         self._active_goal: ActiveGoal | None = None
         self._current_task_binding: _CurrentTaskBinding | None = None
+        self._current_job_run: CurrentJobRun | None = None
         self._monotonic = monotonic_clock or monotonic
         self._active_goal_started_monotonic: tuple[ActiveGoal, float] | None = None
         self._last_operator_turn_completed_monotonic: float | None = None
@@ -653,6 +664,137 @@ class RobotApplication:
         """Return the running or paused Task snapshot owned by this session."""
         binding = self._current_task_binding
         return None if binding is None else binding.task
+
+    @property
+    def current_job_run(self) -> CurrentJobRun | None:
+        """Return the current volatile JobRun association, if one exists."""
+        return self._current_job_run
+
+    def start_job_run(self, job_id: int) -> CurrentJobRun:
+        """Explicitly start one durable Job occurrence through Task coordination."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Starting a Job requires a running application")
+        if self.jobs is None:
+            raise RuntimeError("Jobs persistence is disabled")
+        job = self.jobs.get_job(job_id)
+        if job is None:
+            raise RuntimeError(f"Job not found: JOB{job_id}")
+        if not job.enabled:
+            raise RuntimeError(f"Job is disabled: JOB{job.id}")
+        if self._current_job_run is not None:
+            raise RuntimeError("another JobRun is already current")
+        if self._current_task_binding is not None:
+            raise RuntimeError("an unrelated Task is already current")
+        if self._active_goal is not None:
+            raise RuntimeError("an unrelated active goal prevents Task start")
+
+        run = self.jobs.create_run(job.id)
+        task = Task(
+            f"Run JOB{job.id}: {job.name}",
+            goal=TaskGoal(f"Complete JOB{job.id}: {job.name}"),
+        )
+        try:
+            running_task = self.start_task(task)
+        except BaseException:
+            current = self.current_task
+            if current is not None and current.id == task.id:
+                try:
+                    self.finish_task(TaskStatus.STOPPED)
+                except BaseException:
+                    LOGGER.exception(
+                        "[JOBS] job=JOB%s run=RUN%s task=%s "
+                        "compensation=task_cleanup_failed",
+                        job.id, run.id, task.id,
+                    )
+            self._stop_unstarted_job_run(run, "Task execution did not start")
+            raise
+        try:
+            running_run = self.jobs.transition_run(run.id, JobRunStatus.RUNNING)
+        except BaseException:
+            try:
+                if self.current_task is not None and self.current_task.id == running_task.id:
+                    self.finish_task(TaskStatus.STOPPED)
+            except BaseException:
+                LOGGER.exception(
+                    "[JOBS] job=JOB%s run=RUN%s task=%s compensation=task_cleanup_failed",
+                    job.id, run.id, running_task.id,
+                )
+            self._stop_unstarted_job_run(run, "Task execution did not start")
+            raise
+        binding = CurrentJobRun(job, running_run, running_task)
+        self._current_job_run = binding
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s task=%s status=started",
+            job.id, running_run.id, running_task.id,
+        )
+        return binding
+
+    def _stop_unstarted_job_run(self, run: JobRun, summary: str) -> None:
+        """Best-effort compensation for a pending occurrence that did not start."""
+        assert self.jobs is not None
+        try:
+            self.jobs.transition_run(
+                run.id, JobRunStatus.STOPPED, outcome_summary=summary
+            )
+        except BaseException:
+            LOGGER.exception("[JOBS] run=RUN%s compensation=stop_failed", run.id)
+
+    def finish_job_run(
+        self, status: JobRunStatus, summary: str | None = None,
+    ) -> CurrentJobRun:
+        """Terminalize the bound Task, then persist the matching JobRun result."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Finishing a Job requires a running application")
+        if not isinstance(status, JobRunStatus):
+            raise TypeError("status must be a JobRunStatus")
+        if status not in (
+            JobRunStatus.COMPLETED, JobRunStatus.FAILED, JobRunStatus.STOPPED
+        ):
+            raise ValueError("status must be completed, failed, or stopped")
+        if summary is not None:
+            if not isinstance(summary, str):
+                raise TypeError("summary must be a string or None")
+            summary = summary.strip()
+            if not summary:
+                raise ValueError("summary must not be empty")
+            if len(summary) > MAX_RUN_SUMMARY_CHARS:
+                raise ValueError(
+                    f"summary must be at most {MAX_RUN_SUMMARY_CHARS} characters"
+                )
+        binding = self._current_job_run
+        if binding is None:
+            raise RuntimeError("no current JobRun")
+        task_status = TaskStatus(status.value)
+        task = binding.task
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED):
+            if task.status is not task_status:
+                raise RuntimeError(
+                    f"JobRun terminal retry must remain {task.status.value}"
+                )
+            if self.current_task is not None:
+                raise RuntimeError("current JobRun Task binding is inconsistent")
+        else:
+            current = self.current_task
+            if current is None or current.id != task.id:
+                raise RuntimeError("current JobRun Task binding is inconsistent")
+            task = self.finish_task(task_status)
+            binding = CurrentJobRun(binding.job, binding.run, task)
+            self._current_job_run = binding
+
+        assert self.jobs is not None
+        kwargs = (
+            {"error_summary": summary}
+            if status is JobRunStatus.FAILED
+            else {"outcome_summary": summary}
+        )
+        run = self.jobs.transition_run(binding.run.id, status, **kwargs)
+        finished = CurrentJobRun(binding.job, run, task)
+        self._current_job_run = None
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s task=%s status=%s",
+            binding.job.id, run.id, task.id, status.value,
+        )
+        return finished
 
     def temporal_context(self) -> TemporalContext:
         """Build fresh local wall-clock grounding for one cognition boundary."""
@@ -816,6 +958,7 @@ class RobotApplication:
             raise RuntimeError("no current Task exists")
 
         terminal = binding.task.transition_to(status)
+        self._refresh_current_job_task(terminal)
         self._release_current_task_binding(binding)
         LOGGER.info("[TASK] task=%s status=%s", terminal.id, terminal.status.value)
         return terminal
@@ -835,6 +978,7 @@ class RobotApplication:
         self._release_task_resources(binding)
         self._release_task_active_goal(binding)
         self._current_task_binding = _CurrentTaskBinding(paused, None)
+        self._refresh_current_job_task(paused)
         LOGGER.info("[TASK] task=%s status=paused", paused.id)
         return paused
 
@@ -856,6 +1000,7 @@ class RobotApplication:
             else self._create_active_goal(running.goal.description)
         )
         self._current_task_binding = _CurrentTaskBinding(running, goal)
+        self._refresh_current_job_task(running)
         LOGGER.info(
             "[TASK] task=%s status=running goal=%s",
             running.id,
@@ -866,6 +1011,14 @@ class RobotApplication:
     def stop_task(self) -> Task:
         """Semantically stop and release the current running or paused Task."""
         return self.finish_task(TaskStatus.STOPPED)
+
+    def _refresh_current_job_task(self, task: Task) -> None:
+        """Keep the volatile Job view aligned with Task lifecycle snapshots."""
+        binding = self._current_job_run
+        if binding is not None:
+            if binding.task.id != task.id:
+                raise RuntimeError("current JobRun Task binding is inconsistent")
+            self._current_job_run = CurrentJobRun(binding.job, binding.run, task)
 
     def _validate_current_task_binding(self, binding: _CurrentTaskBinding) -> None:
         """Fail closed unless Task ownership matches the exact active intention."""
@@ -1085,6 +1238,13 @@ class RobotApplication:
             except BaseException as error:
                 failure = failure or error
             self._current_task_binding = None
+        if self._current_job_run is not None:
+            current = self._current_job_run
+            LOGGER.info(
+                "[JOBS] job=JOB%s run=RUN%s task=%s status=detached",
+                current.job.id, current.run.id, current.task.id,
+            )
+            self._current_job_run = None
         try:
             await self.attention.stop()
         except BaseException as error:
