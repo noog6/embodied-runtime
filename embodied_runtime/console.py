@@ -71,7 +71,9 @@ class RuntimeConsole:
     def execute(self, command: str) -> tuple[str, bool]:
         """Return report text and whether the session should terminate."""
         raw_parts = command.lstrip().split(maxsplit=1)
-        if raw_parts and raw_parts[0].lower() in {"ask", "voice"}:
+        if (raw_parts and raw_parts[0].lower() in {"ask", "voice"}) or (
+            command.strip().lower() == "job work"
+        ):
             return "This command requires an active asynchronous console session.", False
         try:
             words = shlex.split(command)
@@ -162,6 +164,23 @@ class RuntimeConsole:
         except ValueError as error:
             return f"Unable to parse command: {error}.", False
         lowered = [word.lower() for word in words]
+        if lowered[:2] == ["job", "work"]:
+            if len(words) != 2:
+                return "Usage: job work.", False
+            try:
+                outcome = await self._application.work_current_job_once()
+            except (CognitionError, RuntimeError, ValueError) as error:
+                return f"Unable to work current Job: {error}.", False
+            return "\n".join((
+                "Job work",
+                f"  job:           JOB{outcome.job_id}",
+                f"  run:           RUN{outcome.run_id}",
+                f"  episode:       E{outcome.episode_id}",
+                f"  disposition:   {outcome.disposition.value}",
+                f"  action:        {outcome.action or 'none'}",
+                f"  action_status: {outcome.action_status or 'none'}",
+                f"  summary:       {outcome.summary or 'none'}",
+            )), False
         if lowered[:2] == ["camera", "capture"]:
             if len(words) != 3:
                 return "Usage: camera capture <output_path>.", False
@@ -235,6 +254,7 @@ class RuntimeConsole:
                 "  job add <name> [options]       Add an enabled Job definition",
                 "  job enable|disable JOB<n>      Change Job definition state",
                 "  job start JOB<n>               Start a JobRun and bounded Task",
+                "  job work                       Perform one bounded Job work episode",
                 "  job current                    Show current JobRun and Task",
                 "  job complete [summary]         Complete current JobRun",
                 "  job fail <error-summary>       Fail current JobRun",
@@ -354,7 +374,7 @@ class RuntimeConsole:
                 return f"Unable to {action} Job: persistence operation failed."
             return f"Job RUN{binding.run.id} {binding.run.status.value}."
         return (
-            "Usage: job add|enable|disable|start|current|complete|fail|stop."
+            "Usage: job add|enable|disable|start|work|current|complete|fail|stop."
         )
 
     @staticmethod

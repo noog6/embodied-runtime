@@ -53,12 +53,15 @@ from embodied_runtime.interaction import (
     render_notification_context, render_notification_policy,
     resolve_notification_route,
 )
-from embodied_runtime.jobs import Job, JobRun, JobRunStatus, JobStore
+from embodied_runtime.jobs import (
+    Job, JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
+)
 from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
 from embodied_runtime.memory import (
     MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
     MemoryRecallProjector, PersistentMemoryStore,
 )
+from embodied_runtime.observations import SemanticObservation, SemanticObservationFact
 from embodied_runtime.inspection import (
     HostSelfInspector, SELF_INSPECTION_AREAS, SelfInspectionFact,
     SelfInspectionResult, SelfInspector,
@@ -253,6 +256,27 @@ COMPLETE_GOAL_TOOL = CognitionToolDefinition(
         "type": "object",
         "properties": {},
         "required": [],
+        "additionalProperties": False,
+    },
+)
+
+REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
+    name="report_job_outcome",
+    description=(
+        "Report the outcome of this exact Job occurrence. Complete only when the "
+        "evidence establishes its TaskGoal; fail only when authoritative evidence "
+        "establishes that it cannot reasonably proceed; otherwise continue."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "disposition": {
+                "type": "string", "enum": ["completed", "failed", "continue"],
+            },
+            "summary": {"type": "string", "minLength": 1,
+                        "maxLength": MAX_RUN_SUMMARY_CHARS},
+        },
+        "required": ["disposition", "summary"],
         "additionalProperties": False,
     },
 )
@@ -467,6 +491,14 @@ OUTCOME_EVALUATION_REQUEST = (
     "you may request it. Otherwise leave the goal active. Do not create, replace, "
     "reinterpret, or cancel goals. Do not request another body action."
 )
+JOB_OUTCOME_EVALUATION_REQUEST = (
+    "Evaluate this exact Job occurrence once using only the authoritative Job, Task, "
+    "acquisition, and effect evidence in the instructions. Request report_job_outcome "
+    "with completed only when the TaskGoal is established, failed only when current "
+    "authoritative evidence establishes the occurrence cannot reasonably proceed, and "
+    "continue otherwise. Insufficient information or one rejected optional capability "
+    "normally means continue. Do not infer an outcome from prose and do not request work."
+)
 
 
 @dataclass(frozen=True)
@@ -567,6 +599,7 @@ class RobotApplication:
         self.camera_backend = camera_backend
         self._cognition_backend = cognition_backend
         self._active_operator_cognition_task: asyncio.Task[object] | None = None
+        self._active_job_work_task: asyncio.Task[object] | None = None
         self._operator_message_sink = operator_message_sink
         self._operator_delivery_routes = (
             operator_delivery_routes or OperatorDeliveryRouteCatalog()
@@ -795,6 +828,223 @@ class RobotApplication:
             binding.job.id, run.id, task.id, status.value,
         )
         return finished
+
+    async def work_current_job_once(self) -> JobWorkOutcome:
+        """Perform one explicitly requested, finite episode for the current JobRun."""
+        binding, task_binding, goal = self._validate_job_work_preconditions()
+        episode = self.episode_coordinator.try_start(
+            "job_run", f"JOB{binding.job.id}/RUN{binding.run.id}",
+            f"Perform one bounded work episode for JOB{binding.job.id}/RUN{binding.run.id}",
+            goal.id,
+        )
+        if episode is None:
+            raise RuntimeError("another attention episode is already active or an operator is waiting")
+        current_async_task = asyncio.current_task()
+        if current_async_task is None:
+            self.episode_coordinator.close(episode, "error")
+            raise RuntimeError("Job work requires an asyncio task")
+        if self._active_job_work_task is not None:
+            self.episode_coordinator.close(episode, "error")
+            raise RuntimeError("another Job work episode is already active")
+        self._active_job_work_task = current_async_task
+        target = "unassigned" if binding.job.target is None else str(binding.job.target)
+        stimulus = AttentionStimulus(SemanticObservation(
+            "job_run_work", f"JOB{binding.job.id}/RUN{binding.run.id}", (
+                SemanticObservationFact("job_id", str(binding.job.id)),
+                SemanticObservationFact("run_id", str(binding.run.id)),
+                SemanticObservationFact("job_name", binding.job.name),
+                SemanticObservationFact("job_description", binding.job.description),
+                SemanticObservationFact("job_target", target),
+                SemanticObservationFact("task_id", str(binding.task.id)),
+                SemanticObservationFact("task_description", binding.task.description),
+                SemanticObservationFact("task_goal", binding.task.goal.description),
+                SemanticObservationFact(
+                    "authority",
+                    "This is one runtime-owned bounded work episode for an existing "
+                    "JobRun. The Job definition is durable responsibility context, not "
+                    "a new operator utterance.",
+                ),
+            )
+        ))
+        LOGGER.info("[JOBS] job=JOB%s run=RUN%s episode=E%s work=started",
+                    binding.job.id, binding.run.id, episode.id)
+        reason: EpisodeCompletionReason = "error"
+        try:
+            initiative = await self._request_initiative(
+                stimulus, episode, evaluate_goal_outcome=False, job_work=True
+            )
+            disposition, summary = await self._request_job_outcome(
+                binding, task_binding, goal, episode, stimulus, initiative
+            )
+            if (
+                disposition is JobWorkDisposition.CONTINUE
+                and not self._job_work_binding_matches(binding, task_binding, goal)
+            ):
+                reason = "stale_goal"
+            else:
+                reason = "handled" if initiative.action is not None else "no_action"
+            LOGGER.info(
+                "[JOBS] job=JOB%s run=RUN%s episode=E%s work=completed disposition=%s",
+                binding.job.id, binding.run.id, episode.id, disposition.value,
+            )
+            return JobWorkOutcome(
+                binding.job.id, binding.run.id, binding.task.id, episode.id,
+                disposition, summary, initiative.response,
+                initiative.action, initiative.action_status,
+            )
+        except asyncio.CancelledError:
+            reason = "cancelled"
+            LOGGER.info("[JOBS] job=JOB%s run=RUN%s episode=E%s work=cancelled",
+                        binding.job.id, binding.run.id, episode.id)
+            raise
+        except Exception:
+            LOGGER.warning("[JOBS] job=JOB%s run=RUN%s episode=E%s work=failed",
+                           binding.job.id, binding.run.id, episode.id)
+            raise
+        finally:
+            try:
+                await self._finish_job_work_episode(episode, reason)
+            finally:
+                if self._active_job_work_task is current_async_task:
+                    self._active_job_work_task = None
+
+    async def _finish_job_work_episode(
+        self, episode: AttentionEpisode, reason: EpisodeCompletionReason,
+    ) -> None:
+        """Close Job attention, then offer independently due temporal work."""
+        self.episode_coordinator.close(episode, reason)
+        if self.state is LifecycleState.RUNNING:
+            await self.attention.release_temporal_due()
+
+    def _validate_job_work_preconditions(
+        self,
+    ) -> tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal]:
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Job work requires a running application")
+        if self._cognition_backend is None:
+            raise RuntimeError("No cognition backend is configured")
+        if self.jobs is None:
+            raise RuntimeError("Jobs persistence is disabled")
+        binding = self._current_job_run
+        if binding is None:
+            raise RuntimeError("no current JobRun")
+        if binding.run.status is not JobRunStatus.RUNNING:
+            raise RuntimeError("current JobRun must be running")
+        task_binding = self._current_task_binding
+        if task_binding is None or task_binding.task is not binding.task:
+            raise RuntimeError("current JobRun Task binding is inconsistent")
+        if binding.task.status is TaskStatus.PAUSED:
+            raise RuntimeError("current JobRun Task is paused; resume it explicitly")
+        if binding.task.status is not TaskStatus.RUNNING:
+            raise RuntimeError("current JobRun Task must be running")
+        goal = task_binding.active_goal
+        if goal is None or self._active_goal is not goal:
+            raise RuntimeError("current JobRun Task ActiveGoal binding is inconsistent")
+        self._validate_current_task_binding(task_binding)
+        return binding, task_binding, goal
+
+    def _job_work_binding_matches(
+        self, binding: CurrentJobRun, task_binding: _CurrentTaskBinding,
+        goal: ActiveGoal,
+    ) -> bool:
+        current = self._current_job_run
+        return (
+            self.state is LifecycleState.RUNNING
+            and current is binding
+            and current.job.id == binding.job.id
+            and current.run.id == binding.run.id
+            and current.run.status is JobRunStatus.RUNNING
+            and self._current_task_binding is task_binding
+            and self.current_task is binding.task
+            and binding.task.status is TaskStatus.RUNNING
+            and task_binding.active_goal is goal
+            and self._active_goal is goal
+        )
+
+    async def _request_job_outcome(
+        self, binding: CurrentJobRun, task_binding: _CurrentTaskBinding,
+        goal: ActiveGoal, episode: AttentionEpisode, stimulus: AttentionStimulus,
+        initiative: InitiativeOutcome,
+    ) -> tuple[JobWorkDisposition, str | None]:
+        backend = self._cognition_backend
+        assert backend is not None
+        proposed_disposition: JobWorkDisposition | None = None
+        proposed_summary: str | None = None
+        consumed = False
+
+        def evidence_lines() -> list[str]:
+            lines = [
+                "Job outcome evaluation", stimulus.render(actions_enabled=None),
+                f"initiative_response: {initiative.response}",
+                "Ordered runtime-produced acquisition evidence:",
+            ]
+            lines.extend(
+                f"  {index}. {item.capability} status={item.status} result={item.runtime_result}"
+                for index, item in enumerate(initiative.acquisitions, 1)
+            )
+            lines.append("Ordered runtime-produced effect evidence:")
+            lines.extend(
+                f"  {index}. {item.name} status={item.status} result={item.runtime_result}"
+                for index, item in enumerate(initiative.effects, 1)
+            )
+            return lines
+
+        async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
+            nonlocal consumed, proposed_disposition, proposed_summary
+            if consumed:
+                return self._rejected_tool(call.name, "Job outcome request already consumed",
+                                           log_prefix="JOBS")
+            consumed = True
+            try:
+                if call.name != REPORT_JOB_OUTCOME_TOOL.name:
+                    raise RuntimeError("tool is not available")
+                arguments = self._tool_arguments(call, {"disposition", "summary"})
+                disposition = JobWorkDisposition(arguments["disposition"])
+                value = arguments["summary"]
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError("summary must be a non-empty string")
+                value = value.strip()
+                if len(value) > MAX_RUN_SUMMARY_CHARS:
+                    raise ValueError(f"summary must be at most {MAX_RUN_SUMMARY_CHARS} characters")
+                if not self._job_work_binding_matches(binding, task_binding, goal):
+                    raise RuntimeError("exact Job work binding is no longer current")
+                proposed_disposition, proposed_summary = disposition, value
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as error:
+                return self._rejected_tool(call.name, str(error), log_prefix="JOBS")
+            return CognitionToolResult(json.dumps({
+                "status": "accepted",
+                "disposition": proposed_disposition.value,
+                "commit": "after_outcome_evaluation",
+            }, sort_keys=True))
+
+        instructions = "\n\n".join((
+            compose_cognition_instructions(
+                self.cognition_context(), self.temporal_context(),
+                self.temporal_situation(), self.options.startup_prompt,
+                self.working_memory.snapshot(),
+                goal if self._active_goal is goal else None,
+            ), episode.render(), *evidence_lines(),
+        ))
+        await backend.respond(
+            JOB_OUTCOME_EVALUATION_REQUEST, instructions=instructions,
+            tools=(REPORT_JOB_OUTCOME_TOOL,), tool_executor=execute_tool,
+            refreshed_instructions=lambda: instructions,
+        )
+        if proposed_disposition is None:
+            return JobWorkDisposition.CONTINUE, None
+        assert proposed_summary is not None
+        if proposed_disposition in (
+            JobWorkDisposition.COMPLETED, JobWorkDisposition.FAILED,
+        ):
+            if not self._job_work_binding_matches(binding, task_binding, goal):
+                return JobWorkDisposition.CONTINUE, None
+            terminal = (
+                JobRunStatus.COMPLETED
+                if proposed_disposition is JobWorkDisposition.COMPLETED
+                else JobRunStatus.FAILED
+            )
+            self.finish_job_run(terminal, proposed_summary)
+        return proposed_disposition, proposed_summary
 
     def temporal_context(self) -> TemporalContext:
         """Build fresh local wall-clock grounding for one cognition boundary."""
@@ -1222,6 +1472,10 @@ class RobotApplication:
         except BaseException as error:
             failure = failure or error
         try:
+            await self._stop_job_work()
+        except BaseException as error:
+            failure = failure or error
+        try:
             await self.temporal.stop()
         except BaseException as error:
             failure = error
@@ -1297,6 +1551,15 @@ class RobotApplication:
             return
         self._persistent_memory_closed = True
         self.persistent_memory.close()
+
+    async def _stop_job_work(self) -> None:
+        """Cancel and join explicit Job cognition before volatile Task cleanup."""
+        task = self._active_job_work_task
+        if task is None or task is asyncio.current_task():
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     def _close_job_store(self) -> None:
         """Close Job persistence without changing any durable run state."""
@@ -1800,6 +2063,7 @@ class RobotApplication:
 
     async def _request_initiative(
         self, stimulus: AttentionStimulus, episode: AttentionEpisode | None = None,
+        *, evaluate_goal_outcome: bool = True, job_work: bool = False,
     ) -> InitiativeOutcome:
         backend = self._cognition_backend
         if backend is None:
@@ -1817,7 +2081,7 @@ class RobotApplication:
             raise RuntimeError("attention initiative requires an active goal")
         if expected_goal is None or expected_goal.id != episode.goal_id:
             raise RuntimeError("attention episode's bound goal is no longer current")
-        tools = self.initiative_tools()
+        tools = self._initiative_tools_for_episode(job_work=job_work)
         sink = self._operator_message_sink
         notification_interaction = (
             resolve_notification_route(sink.channel)
@@ -1895,7 +2159,9 @@ class RobotApplication:
                     )
                 else:
                     result = await self._execute_initiative_tool(
-                        call, notification_interaction=notification_interaction
+                        call, available=self._initiative_tools_for_episode(
+                            job_work=job_work
+                        ), notification_interaction=notification_interaction
                     )
             try:
                 result_status = json.loads(result.output).get("status", "rejected")
@@ -1966,7 +2232,7 @@ class RobotApplication:
                 and self._active_goal is expected_goal):
             followup_completed, followup_effect = await self._request_acquisition_followup(
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
-                notification_interaction,
+                notification_interaction, job_work=job_work,
             )
             continuation_completed = followup_completed
             if followup_effect is not None:
@@ -1980,17 +2246,20 @@ class RobotApplication:
             and expected_goal is not None
             and self.state is LifecycleState.RUNNING
             and self._active_goal is expected_goal
-            and self.continuation_tools(effects[0].name)
+            and self._continuation_tools_for_episode(
+                effects[0].name, job_work=job_work
+            )
         ):
             continuation_completed, continuation_effect = await self._request_continuation(
                 stimulus, episode, expected_goal, prior_memory, effects[0],
                 tuple(acquisitions),
-                notification_interaction,
+                notification_interaction, job_work=job_work,
             )
             if continuation_effect is not None:
                 effects.append(continuation_effect)
         if (
             continuation_completed
+            and evaluate_goal_outcome
             and self.options.initiative_goal_closure_enabled
             and effects
             and expected_goal is not None
@@ -2006,7 +2275,9 @@ class RobotApplication:
             await self._request_outcome_evaluation(
                 stimulus_outcome, stimulus, episode, expected_goal, prior_memory
             )
-        return InitiativeOutcome(response, action, action_status)
+        return InitiativeOutcome(
+            response, action, action_status, tuple(acquisitions), tuple(effects)
+        )
 
     def _acquisition_followup_instructions(
         self, followup: AcquisitionFollowupStimulus,
@@ -2039,13 +2310,16 @@ class RobotApplication:
         expected_goal: ActiveGoal, prior_memory,
         acquisitions: list[InitiativeAcquisitionOutcome],
         notification_interaction: InteractionContext | None = None,
+        *, job_work: bool = False,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
         # This helper is deliberately finite: one decision after acquisition #1,
         # followed by exactly one effect-only decision if #2 was attempted.
         followup = AcquisitionFollowupStimulus(tuple(acquisitions))
-        tools = (*self.acquisition_tools(), *self.effect_tools())
+        tools = (*self.acquisition_tools(), *self._effect_tools_for_episode(
+            job_work=job_work
+        ))
         log_prefix = "ACQUISITION"
         action = status = result_text = None
         second_acquisition: InitiativeAcquisitionOutcome | None = None
@@ -2064,7 +2338,9 @@ class RobotApplication:
                     log_prefix=log_prefix,
                 )
             consumed = True
-            available = (*self.acquisition_tools(), *self.effect_tools())
+            available = (*self.acquisition_tools(), *self._effect_tools_for_episode(
+                job_work=job_work
+            ))
             inspection = perception = None
             if call.name in self._acquisition_tool_names():
                 LOGGER.info(
@@ -2151,6 +2427,8 @@ class RobotApplication:
                 "backend=%s request=failed",
                 episode.id, expected_goal.id, backend.identifier,
             )
+            if job_work:
+                raise
             return False, (None if action is None else InitiativeEffectOutcome(
                 action, status or "rejected", result_text or '{"status": "rejected"}'
             ))
@@ -2163,6 +2441,7 @@ class RobotApplication:
             final_completed, final_effect = await self._request_final_effect_decision(
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
                 notification_interaction,
+                job_work=job_work,
             )
             return final_completed, final_effect
         return True, (None if action is None else InitiativeEffectOutcome(
@@ -2174,11 +2453,12 @@ class RobotApplication:
         expected_goal: ActiveGoal, prior_memory,
         acquisitions: list[InitiativeAcquisitionOutcome],
         notification_interaction: InteractionContext | None = None,
+        *, job_work: bool = False,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
         followup = AcquisitionFollowupStimulus(tuple(acquisitions))
-        tools = self.effect_tools()
+        tools = self._effect_tools_for_episode(job_work=job_work)
         action = status = result_text = None
         consumed = False
         LOGGER.info(
@@ -2193,7 +2473,7 @@ class RobotApplication:
                 return self._rejected_tool(call.name, "final effect decision already consumed",
                                            log_prefix="ACQUISITION")
             consumed = True
-            available = self.effect_tools()
+            available = self._effect_tools_for_episode(job_work=job_work)
             LOGGER.info(
                 "[ACQUISITION] episode=E%s goal=G%s tool=%s class=effect "
                 "status=requested", episode.id, expected_goal.id, call.name,
@@ -2242,6 +2522,8 @@ class RobotApplication:
                 "backend=%s request=failed",
                 episode.id, expected_goal.id, backend.identifier,
             )
+            if job_work:
+                raise
             return False, (None if action is None else InitiativeEffectOutcome(
                 action, status or "rejected", result_text or '{"status": "rejected"}'
             ))
@@ -2278,10 +2560,13 @@ class RobotApplication:
         first_effect: InitiativeEffectOutcome,
         acquisitions: tuple[InitiativeAcquisitionOutcome, ...] = (),
         notification_interaction: InteractionContext | None = None,
+        *, job_work: bool = False,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
-        tools = self.continuation_tools(first_effect.name)
+        tools = self._continuation_tools_for_episode(
+            first_effect.name, job_work=job_work
+        )
         if not tools:
             return True, None
         continuation = InitiativeContinuationStimulus(
@@ -2307,7 +2592,9 @@ class RobotApplication:
                 "status=requested",
                 episode.id, expected_goal.id, call.name,
             )
-            available = self.continuation_tools(first_effect.name)
+            available = self._continuation_tools_for_episode(
+                first_effect.name, job_work=job_work
+            )
             if (
                 first_effect.status != "applied"
                 or self.state is not LifecycleState.RUNNING
@@ -2363,6 +2650,8 @@ class RobotApplication:
                 "[CONTINUATION] episode=E%s goal=G%s backend=%s request=failed",
                 episode.id, expected_goal.id, backend.identifier,
             )
+            if job_work:
+                raise
             return False, (
                 InitiativeEffectOutcome(action, status or "rejected", result_text or "")
                 if action is not None else None
@@ -2501,6 +2790,35 @@ class RobotApplication:
                 self.state is LifecycleState.RUNNING and self._active_goal is not None):
             return ()
         return (*self.acquisition_tools(), *self.effect_tools())
+
+    def _initiative_tools_for_episode(
+        self, *, job_work: bool
+    ) -> tuple[CognitionToolDefinition, ...]:
+        if not job_work:
+            return self.initiative_tools()
+        return (*self.acquisition_tools(), *self._effect_tools_for_episode(
+            job_work=True
+        ))
+
+    def _effect_tools_for_episode(
+        self, *, job_work: bool
+    ) -> tuple[CognitionToolDefinition, ...]:
+        tools = self.effect_tools()
+        if not job_work:
+            return tools
+        return tuple(tool for tool in tools if tool.name != SCHEDULE_FOLLOWUP_TOOL.name)
+
+    def _continuation_tools_for_episode(
+        self, first_effect_name: str, *, job_work: bool
+    ) -> tuple[CognitionToolDefinition, ...]:
+        if not job_work:
+            return self.continuation_tools(first_effect_name)
+        if not self.options.initiative_continuation_enabled:
+            return ()
+        return tuple(
+            tool for tool in self._effect_tools_for_episode(job_work=True)
+            if tool.name != first_effect_name
+        )
 
     def acquisition_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project only read-only autonomous acquisition capabilities."""

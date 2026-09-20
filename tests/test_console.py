@@ -171,6 +171,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  job add <name> [options]       Add an enabled Job definition\n"
             "  job enable|disable JOB<n>      Change Job definition state\n"
             "  job start JOB<n>               Start a JobRun and bounded Task\n"
+            "  job work                       Perform one bounded Job work episode\n"
             "  job current                    Show current JobRun and Task\n"
             "  job complete [summary]         Complete current JobRun\n"
             "  job fail <error-summary>       Fail current JobRun\n"
