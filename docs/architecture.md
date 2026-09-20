@@ -120,9 +120,15 @@ through the shared terminal cleanup path. Runtime shutdown also releases them
 before dropping volatile binding ownership, without semantically stopping or
 otherwise transitioning the externally held Task snapshot.
 
-No camera, body, voice, microphone, speaker, or hardware-bus path automatically
-acquires an arbiter lease yet. In particular, voice's local `asyncio.Lock` and
-provider-side thread lock remain implementation synchronization: those locks
+Camera frame acquisition is the first physical capability wired through the
+arbiter: normal application-owned one-shot captures acquire the canonical
+`camera` resource under an explicit runtime or Task owner and release it
+immediately after physical capture. Interpretation never holds that lease, and
+contention fails without waiting or retry. Camera adapters remain unaware of
+runtime arbitration. Body, voice, microphone, speaker, and hardware-bus paths do
+not automatically acquire an arbiter lease yet. In particular, voice's local
+`asyncio.Lock` and provider-side thread lock remain implementation synchronization:
+those locks
 protect concurrent implementation access, while an arbiter lease expresses which
 semantic runtime owner is entitled to a capability. This phase does not unify or
 replace those mechanisms.

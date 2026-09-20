@@ -51,8 +51,9 @@ to a terminal state. Pause/resume/stop provide coordination at a safe applicatio
 boundary only. They do not interrupt arbitrary code or in-flight hardware work,
 checkpoint progress, or persist it. Resource acquisition is currently explicit,
 exclusive, synchronous, and fail-fast; current ownership adds no executor,
-scheduler, waiting policy, persistence, recovery, or autonomous work. Camera,
-body, and voice paths are not yet integrated with these leases.
+scheduler, waiting policy, persistence, recovery, or autonomous work. One-shot
+camera frame acquisition is integrated with an exclusive, short-lived `camera`
+lease; body and voice paths are not yet integrated with these leases.
 
 An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
 or persistent history. It is one transient delivery effect through an

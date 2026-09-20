@@ -67,7 +67,7 @@ from embodied_runtime.perception import (
 )
 from embodied_runtime.reflexes import Reflex
 from embodied_runtime.resources import (
-    ResourceArbiter, ResourceKey, ResourceLease, ResourceOwner,
+    ResourceArbiter, ResourceBusyError, ResourceKey, ResourceLease, ResourceOwner,
 )
 from embodied_runtime.run_history import (
     MAX_GREP_QUERY_LENGTH, RunHistoryEvidenceReader, canonical_run_id,
@@ -95,6 +95,9 @@ from embodied_runtime.voice import (
 
 LOGGER = logging.getLogger(__name__)
 OPERATOR_SOURCE: ContextVar[str] = ContextVar("operator_source", default="operator")
+CAMERA_RESOURCE = ResourceKey("camera")
+CAMERA_CAPTURE_OWNER = ResourceOwner("runtime", "camera_capture")
+VISUAL_PERCEPTION_OWNER = ResourceOwner("runtime", "visual_perception")
 
 ORIENT_BODY_TOOL = CognitionToolDefinition(
     name="orient_body",
@@ -1074,16 +1077,39 @@ class RobotApplication:
         self._stop_requested.set()
 
     def capture_camera_frame(self) -> CameraFrame:
-        if self.state is not LifecycleState.RUNNING:
-            raise RuntimeError("Camera capture requires a running application")
-        if self.camera_backend is None:
-            raise RuntimeError("No camera backend is configured")
-        frame = self.camera_backend.capture_frame()
+        frame = self._capture_camera_frame_for_owner(CAMERA_CAPTURE_OWNER)
         LOGGER.info(
             "[CAMERA] capture width=%s height=%s media_type=%s bytes=%s",
             frame.width, frame.height, frame.media_type, len(frame.data),
         )
         return frame
+
+    def _capture_camera_frame_for_owner(self, owner: ResourceOwner) -> CameraFrame:
+        """Capture one frame under an exact, short-lived camera lease."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Camera capture requires a running application")
+        if self.camera_backend is None:
+            raise RuntimeError("No camera backend is configured")
+        lease = self.resources.acquire(CAMERA_RESOURCE, owner)
+        try:
+            return self.camera_backend.capture_frame()
+        finally:
+            self.resources.release(lease)
+
+    def _visual_perception_resource_owner(
+        self, expected_goal: ActiveGoal | None, *, autonomous: bool,
+    ) -> ResourceOwner:
+        binding = self._current_task_binding
+        if (
+            autonomous
+            and binding is not None
+            and binding.task.status is TaskStatus.RUNNING
+            and binding.active_goal is not None
+            and binding.active_goal is expected_goal
+            and self._active_goal is expected_goal
+        ):
+            return self._task_resource_owner(binding.task)
+        return VISUAL_PERCEPTION_OWNER
 
     async def request_cognition(
         self, message: str, *, interaction: InteractionContext | None = None,
@@ -2500,7 +2526,10 @@ class RobotApplication:
             if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
                 raise RuntimeError("expected active goal is no longer current")
             LOGGER.info("[PERCEPTION] modality=visual status=capture_requested")
-            frame = self.camera_backend.capture_frame()  # type: ignore[union-attr]
+            owner = self._visual_perception_resource_owner(
+                expected_goal, autonomous=autonomous
+            )
+            frame = self._capture_camera_frame_for_owner(owner)
             observed_at = self._aware_wall_clock()
             if len(frame.data) > MAX_CAMERA_FRAME_BYTES:
                 raise ValueError(
@@ -2522,6 +2551,16 @@ class RobotApplication:
             result = VisualPerceptionResult(
                 focus, description[:2000], truncated, observed_at
             )
+        except ResourceBusyError:
+            error = RuntimeError("camera resource is busy")
+            LOGGER.info("[PERCEPTION] modality=visual status=rejected")
+            if autonomous:
+                self.attention.record_visual(
+                    state="failed", focus=focus or None, status="rejected"
+                )
+            return CognitionToolResult(json.dumps({
+                "status": "rejected", "error": str(error),
+            }, sort_keys=True)), None
         except Exception as error:
             LOGGER.info("[PERCEPTION] modality=visual status=rejected")
             if autonomous:
