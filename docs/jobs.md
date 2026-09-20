@@ -159,13 +159,29 @@ until the operator explicitly invokes `job work`. Unrelated operator interaction
 does not resume it. Explicit work may override either waiting readiness and
 receives the latest valid semantic continuity summary.
 
+`wait_for_event` fully yields until a supported semantic runtime event occurs.
+The initial catalog contains only `presence_changed`, mapped by the harness to
+`PresenceChanged`; model output cannot name Python classes or provide predicates.
+The event must arrive after the exact wait is armed. It makes one later episode
+eligible but does not run cognition in the event handler, claim attention, or
+consume budget. The projected `present` boolean is a bounded runtime-authored
+fact; it establishes reported presence only, not a person's identity, object
+visibility, safety, or unrelated mutable conditions. Fresh acquisition remains
+necessary for facts outside that payload.
+
+Event satisfaction remains sticky through pause, operator fairness, and busy
+attention, and matching events coalesce rather than queue. Acceptance through
+the ordinary continuation gate consumes the one wake context even if the
+provider then fails. If that episode selects `wait_for_event` again, a new later
+event is required. Explicit `job work` may instead supersede either a satisfied
+or unsatisfied event wait; it receives semantic continuity but no invented wake
+event.
+
 Readiness is volatile, belongs to one exact JobRun/Task binding, and is removed
-on terminal state or restart. A daily schedule starts a new occurrence;
-`after_delay` only gates another episode of the same occurrence and is not a
-calendar schedule. Event readiness (`wait_for_event`) is not implemented. Work
-that genuinely depends on an external event may use a reasonable bounded
-`after_delay` polling interval, but must not mislabel that dependency as operator
-involvement.
+on terminal state, shutdown, or restart. A daily schedule starts a new
+occurrence; readiness only gates another episode of that same occurrence.
+Events never discover or create JobRuns, and no selector, payload, subscription,
+or event history is persisted.
 
 ### Semantic continuity
 

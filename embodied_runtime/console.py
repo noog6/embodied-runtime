@@ -494,6 +494,7 @@ class RuntimeConsole:
             f"  task_status:   {binding.task.status.value}",
             f"  readiness:     {self._job_continuation_readiness()}",
             *self._job_continuation_delay_lines(),
+            *self._job_continuation_event_lines(),
             f"  auto_continuation:    {self._job_continuation_state()}",
             f"  auto_steps_remaining: {self._job_continuation_steps()}",
         ))
@@ -517,6 +518,17 @@ class RuntimeConsole:
         if remaining is None:
             return ()
         return (f"  delay_remaining: {remaining}s",)
+
+    def _job_continuation_event_lines(self) -> tuple[str, ...]:
+        continuation = self._application.job_continuation
+        if (continuation is None
+                or continuation.readiness.value != "wait_for_event"
+                or continuation.event_type is None):
+            return ()
+        return (
+            f"  waiting_event: {continuation.event_type.value}",
+            f"  event_satisfied: {str(continuation.event_satisfied).lower()}",
+        )
 
     def _runs(self) -> str:
         run_ids, older = discover_run_ids(self._history_root)
