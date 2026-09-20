@@ -147,6 +147,26 @@ rows nor discovers or starts enabled Jobs. Restart does not resume work, and
 there are no execution claims, multi-runtime adoption, or persistent
 continuation records.
 
+### Semantic continuity
+
+A continuing Job occurrence may carry the latest work summary into its next
+bounded episode. This projection comes directly from the volatile
+`JobContinuation.last_summary`, is limited to 750 characters, and is scoped to
+the exact Job ID, JobRun ID, and Task UUID. It exists only to preserve immediate
+progress context. It is not authoritative evidence about the current world or
+runtime state and cannot independently establish a mutable condition or a
+terminal Job outcome; fresh acquisitions and current effect results remain the
+authoritative evidence. Prior progress may still guide what should be inspected
+next.
+
+Only the latest episode summary is retained, rather than a transcript or
+cumulative history. Manual work and heartbeat work use the same projection;
+the first episode of a manual or scheduled occurrence has none. Pause/resume may
+retain it because the occurrence and Task identity remain the same, while
+terminalization, a new JobRun, shutdown, or a stale binding removes or rejects
+it. The summary is not persisted, recovered, regenerated, or written as a
+checkpoint or planner state.
+
 ## Daily local-time activation
 
 An ordinary Job may have one durable daily schedule: an enabled flag, strict

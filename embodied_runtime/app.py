@@ -56,7 +56,7 @@ from embodied_runtime.interaction import (
 from embodied_runtime.jobs import (
     Job, JobContinuation, JobContinuationController, JobContinuationState,
     JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
-    ScheduledJobController,
+    ScheduledJobController, project_job_continuity_summary, render_job_continuity,
 )
 from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
 from embodied_runtime.memory import (
@@ -498,7 +498,10 @@ JOB_OUTCOME_EVALUATION_REQUEST = (
     "acquisition, and effect evidence in the instructions. Request report_job_outcome "
     "with completed only when the TaskGoal is established, failed only when current "
     "authoritative evidence establishes the occurrence cannot reasonably proceed, and "
-    "continue otherwise. Insufficient information or one rejected optional capability "
+    "continue otherwise. The initiative response is model-generated commentary, not "
+    "authoritative evidence, and any previous-work continuity context is deliberately "
+    "excluded from this evidence bundle; neither can independently justify a terminal "
+    "outcome. Insufficient information or one rejected optional capability "
     "normally means continue. Do not infer an outcome from prose and do not request work."
 )
 
@@ -965,9 +968,14 @@ class RobotApplication:
         # decides whether a fresh grant is created.
         if self._active_job_work_task is not None:
             raise RuntimeError("another Job work episode is already active")
+        prepared = self._validate_job_work_preconditions()
+        previous_work_summary = self._valid_job_continuity_summary(*prepared[:2])
         self._job_continuation = None
         try:
-            outcome = await self._work_current_job_once("manual")
+            outcome = await self._work_current_job_once(
+                "manual", prepared=prepared,
+                previous_work_summary=previous_work_summary,
+            )
         except asyncio.CancelledError:
             self._set_job_continuation_awaiting_operator()
             raise
@@ -981,6 +989,7 @@ class RobotApplication:
         *,
         prepared: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
         episode: AttentionEpisode | None = None,
+        previous_work_summary: str | None = None,
     ) -> JobWorkOutcome:
         """Shared one-shot executor for manual and heartbeat work."""
         binding, task_binding, goal = (
@@ -1021,10 +1030,17 @@ class RobotApplication:
         ))
         LOGGER.info("[JOBS] job=JOB%s run=RUN%s episode=E%s work=started source=%s",
                     binding.job.id, binding.run.id, episode.id, invocation)
+        continuity = project_job_continuity_summary(previous_work_summary)
+        if continuity is not None:
+            LOGGER.info(
+                "[JOBS] job=JOB%s run=RUN%s episode=E%s continuity=provided chars=%s",
+                binding.job.id, binding.run.id, episode.id, len(continuity),
+            )
         reason: EpisodeCompletionReason = "error"
         try:
             initiative = await self._request_initiative(
-                stimulus, episode, evaluate_goal_outcome=False, job_work=True
+                stimulus, episode, evaluate_goal_outcome=False, job_work=True,
+                previous_work_summary=continuity,
             )
             disposition, summary = await self._request_job_outcome(
                 binding, task_binding, goal, episode, stimulus, initiative
@@ -1084,6 +1100,19 @@ class RobotApplication:
             self._job_continuation = replace(
                 continuation, state=JobContinuationState.AWAITING_OPERATOR,
             )
+
+    def _valid_job_continuity_summary(
+        self, binding: CurrentJobRun, task_binding: _CurrentTaskBinding,
+    ) -> str | None:
+        """Return continuity only for the exact current occurrence association."""
+        continuation = self._job_continuation
+        if (continuation is None
+                or continuation.job_id != binding.job.id
+                or continuation.run_id != binding.run.id
+                or continuation.task_id != binding.task.id
+                or task_binding.task.id != binding.task.id):
+            return None
+        return continuation.last_summary
 
     def _clear_job_continuation(self, reason: str) -> None:
         continuation = self._job_continuation
@@ -1164,6 +1193,7 @@ class RobotApplication:
         task = asyncio.create_task(
             self._run_automatic_job_work(
                 (current, task_binding, task_binding.active_goal), episode,
+                continuation.last_summary,
             ),
             name="job-continuation-work",
         )
@@ -1185,12 +1215,15 @@ class RobotApplication:
         self,
         prepared: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal],
         episode: AttentionEpisode,
+        previous_work_summary: str | None,
     ) -> None:
         continuation = self._job_continuation
         binding, task_binding, goal = prepared
-        if continuation is None or not self._job_work_binding_matches(
-            binding, task_binding, goal,
-        ):
+        if (continuation is None
+                or continuation.job_id != binding.job.id
+                or continuation.run_id != binding.run.id
+                or continuation.task_id != binding.task.id
+                or not self._job_work_binding_matches(binding, task_binding, goal)):
             self.episode_coordinator.close(episode, "stale_goal")
             if self._active_job_work_task is asyncio.current_task():
                 self._active_job_work_task = None
@@ -1198,6 +1231,7 @@ class RobotApplication:
         try:
             outcome = await self._work_current_job_once(
                 "heartbeat", prepared=prepared, episode=episode,
+                previous_work_summary=previous_work_summary,
             )
         except asyncio.CancelledError:
             raise
@@ -1296,7 +1330,9 @@ class RobotApplication:
         def evidence_lines() -> list[str]:
             lines = [
                 "Job outcome evaluation", stimulus.render(actions_enabled=None),
-                f"initiative_response: {initiative.response}",
+                "Non-authoritative model commentary from this current episode "
+                "(not evidence):",
+                f"  initiative_response: {initiative.response}",
                 "Ordered runtime-produced acquisition evidence:",
             ]
             lines.extend(
@@ -2358,6 +2394,7 @@ class RobotApplication:
         expected_goal: ActiveGoal | None = None,
         tools: tuple[CognitionToolDefinition, ...] = (),
         notification_interaction: InteractionContext | None = None,
+        previous_work_summary: str | None = None,
     ) -> str:
         context = compose_cognition_instructions(
             self.cognition_context(), self.temporal_context(), self.temporal_situation(),
@@ -2388,10 +2425,12 @@ class RobotApplication:
         )
         sections = self._notification_sections(tools, notification_interaction)
         notification = "" if not sections else "\n\n" + "\n\n".join(sections)
+        continuity = render_job_continuity(previous_work_summary)
+        continuity_section = "" if continuity is None else f"\n\n{continuity}"
         return (
             f"{context}{notification}\n\n{episode.render()}\n\n"
             f"{stimulus.render(actions_enabled=capabilities_available)}"
-            f"{inspection_guidance}{history_guidance}{sequencing}"
+            f"{continuity_section}{inspection_guidance}{history_guidance}{sequencing}"
         )
 
     @staticmethod
@@ -2414,6 +2453,7 @@ class RobotApplication:
     async def _request_initiative(
         self, stimulus: AttentionStimulus, episode: AttentionEpisode | None = None,
         *, evaluate_goal_outcome: bool = True, job_work: bool = False,
+        previous_work_summary: str | None = None,
     ) -> InitiativeOutcome:
         backend = self._cognition_backend
         if backend is None:
@@ -2443,6 +2483,7 @@ class RobotApplication:
             stimulus, episode, prior_memory, capabilities_available=capabilities_available,
             expected_goal=expected_goal,
             tools=tools, notification_interaction=notification_interaction,
+            previous_work_summary=previous_work_summary,
         )
         action: str | None = None
         action_status: str | None = None
@@ -2556,6 +2597,7 @@ class RobotApplication:
                         stimulus, episode, prior_memory, capabilities_available=True,
                         expected_goal=expected_goal,
                         tools=tools, notification_interaction=notification_interaction,
+                        previous_work_summary=previous_work_summary,
                     )
                 ) if tools else None,
             )

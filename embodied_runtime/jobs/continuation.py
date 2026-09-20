@@ -9,6 +9,38 @@ from typing import Any
 from uuid import UUID
 
 
+# Prompt projection is intentionally smaller than the 2,000-character durable
+# run-summary limit.  It carries only the immediately preceding episode's context.
+MAX_JOB_CONTINUITY_SUMMARY_CHARS = 750
+
+
+def project_job_continuity_summary(summary: str | None) -> str | None:
+    """Return a bounded prompt projection without changing the stored outcome."""
+    if summary is None:
+        return None
+    value = summary.strip()
+    return value[:MAX_JOB_CONTINUITY_SUMMARY_CHARS] or None
+
+
+def render_job_continuity(summary: str | None) -> str | None:
+    """Render prior progress as an explicitly non-authoritative section."""
+    value = project_job_continuity_summary(summary)
+    if value is None:
+        return None
+    return (
+        "Previous bounded Job work\n"
+        "-------------------------\n"
+        "A previous bounded work episode for this exact JobRun and Task ended "
+        "with `continue`.\n"
+        "Previous work summary (prior model-generated progress context):\n"
+        f"{value}\n"
+        "This summary is not authoritative evidence about the current world or "
+        "current runtime state. Previous progress may guide what to inspect next, "
+        "but it does not prove mutable current conditions. Use fresh acquisitions "
+        "when current evidence is required. Do not complete or fail the Job solely "
+        "because this summary says a condition was or was not true previously."
+    )
+
 class JobContinuationState(str, Enum):
     ARMED = "armed"
     AWAITING_OPERATOR = "awaiting_operator"
