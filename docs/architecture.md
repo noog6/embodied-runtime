@@ -41,10 +41,16 @@ execution or cognition wake.
 ```text
 Task domain                         Runtime Session
 
-Task                               Current Task binding
+Task RUNNING --------------------> Current Task binding
   |                                      |
-  +-- TaskGoal --------------------------+--> ActiveGoal
-                     while current
+  | TaskGoal                             +--> ActiveGoal
+  |                                            |
+  | pause                                      +--> attention/follow-up
+  v
+Task PAUSED ---------------------> Current Task binding
+  |
+  | TaskGoal preserved
+  +-------------------------------------> no ActiveGoal
 ```
 
 The lifecycle domains remain independent. `RobotApplication.start_task()` owns
@@ -55,13 +61,29 @@ exact goal object so existing identity-based runtime coordination is preserved. 
 Task with no `TaskGoal` still becomes current but creates no implicit goal from
 its Task description.
 
-`RobotApplication.finish_task()` permits only `completed`, `failed`, or `stopped`,
-then removes the binding and its exact `ActiveGoal`. Application shutdown also
-removes this volatile binding, but deliberately leaves the running Task snapshot
-semantically unchanged: ending a runtime session is not a Task outcome. A current
-Task does not imply autonomous execution. There is still no executor, scheduler,
-queue, pause/resume orchestration, persistence, recovery, or Task lifecycle event
-publication.
+`pause_task()` transitions the running snapshot to paused without releasing the
+current-Task slot. It suspends the Task-owned intention by removing its exact
+`ActiveGoal`, clearing its age marker, and cancelling any temporal follow-up bound
+to it. `resume_task()` transitions that same Task identity back to running and,
+when it has a `TaskGoal`, creates a fresh session-local `ActiveGoal`; cancelled
+follow-ups are not restored. A paused Task therefore remains current but has no
+active goal, and ordinary goal mutation remains unavailable.
+
+`RobotApplication.finish_task()` permits only `completed`, `failed`, or `stopped`
+according to the domain transition table, then removes the binding and its exact
+`ActiveGoal`. `stop_task()` is the focused semantic stop API and delegates to that
+same terminal cleanup path, from either running or paused. A paused Task must
+resume before completion or failure. Application shutdown also removes volatile
+ownership, but deliberately leaves either a running or paused snapshot semantically
+unchanged: ending a runtime session is not Task stop.
+
+Pause and stop are coordination boundaries, not arbitrary execution preemption.
+Work may continue for a Task only while its current application snapshot is
+running; future executors and capabilities must cooperatively observe that rule.
+The APIs do not cancel arbitrary `asyncio.Task` objects, interrupt Python or an
+in-flight hardware operation, unwind capabilities, checkpoint work, or release
+future resource leases. There is still no executor, scheduler, queue, resource
+arbiter, persistence, recovery, or Task lifecycle event publication.
 
 These boundaries are intended to keep the reusable runtime independent of a
 specific robot or vendor backend. Interaction and cognition implementations

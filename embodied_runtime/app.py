@@ -444,7 +444,7 @@ class CameraSummary:
 
 @dataclass(frozen=True, slots=True)
 class _CurrentTaskBinding:
-    """Session-local ownership of one running task and its exact goal object."""
+    """Session-local ownership of one running or paused Task activation."""
 
     task: Task
     active_goal: ActiveGoal | None
@@ -570,7 +570,7 @@ class RobotApplication:
 
     @property
     def current_task(self) -> Task | None:
-        """Return the running Task snapshot currently owned by this session."""
+        """Return the running or paused Task snapshot owned by this session."""
         binding = self._current_task_binding
         return None if binding is None else binding.task
 
@@ -709,16 +709,83 @@ class RobotApplication:
         LOGGER.info("[TASK] task=%s status=%s", terminal.id, terminal.status.value)
         return terminal
 
+    def pause_task(self) -> Task:
+        """Suspend the current Task's runtime intention while retaining ownership."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Pausing a Task requires a running application")
+        binding = self._current_task_binding
+        if binding is None:
+            raise RuntimeError("no current Task exists")
+        if binding.task.status is not TaskStatus.RUNNING:
+            raise RuntimeError("current Task must be running")
+
+        self._validate_current_task_binding(binding)
+        paused = binding.task.transition_to(TaskStatus.PAUSED)
+        self._release_task_active_goal(binding)
+        self._current_task_binding = _CurrentTaskBinding(paused, None)
+        LOGGER.info("[TASK] task=%s status=paused", paused.id)
+        return paused
+
+    def resume_task(self) -> Task:
+        """Reactivate the current paused Task with a fresh runtime intention."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Resuming a Task requires a running application")
+        binding = self._current_task_binding
+        if binding is None:
+            raise RuntimeError("no current Task exists")
+        if binding.task.status is not TaskStatus.PAUSED:
+            raise RuntimeError("current Task must be paused")
+
+        self._validate_current_task_binding(binding)
+        running = binding.task.transition_to(TaskStatus.RUNNING)
+        goal = (
+            None
+            if running.goal is None
+            else self._create_active_goal(running.goal.description)
+        )
+        self._current_task_binding = _CurrentTaskBinding(running, goal)
+        LOGGER.info(
+            "[TASK] task=%s status=running goal=%s",
+            running.id,
+            "none" if goal is None else f"G{goal.id}",
+        )
+        return running
+
+    def stop_task(self) -> Task:
+        """Semantically stop and release the current running or paused Task."""
+        return self.finish_task(TaskStatus.STOPPED)
+
+    def _validate_current_task_binding(self, binding: _CurrentTaskBinding) -> None:
+        """Fail closed unless Task ownership matches the exact active intention."""
+        goal = binding.active_goal
+        if binding.task.status is TaskStatus.PAUSED:
+            if goal is not None or self._active_goal is not None:
+                raise RuntimeError("current Task ActiveGoal binding is inconsistent")
+        elif binding.task.goal is None:
+            if goal is not None or self._active_goal is not None:
+                raise RuntimeError("current Task ActiveGoal binding is inconsistent")
+        elif goal is None or self._active_goal is not goal:
+            raise RuntimeError("current Task ActiveGoal binding is inconsistent")
+
+        marker = self._active_goal_started_monotonic
+        if (goal is None and marker is not None) or (
+            goal is not None and (marker is None or marker[0] is not goal)
+        ):
+            raise RuntimeError("current Task ActiveGoal binding is inconsistent")
+
+    def _release_task_active_goal(self, binding: _CurrentTaskBinding) -> None:
+        """Release only the exact runtime intention owned by a Task binding."""
+        self._validate_current_task_binding(binding)
+        goal = binding.active_goal
+        if goal is None:
+            return
+        self._active_goal = None
+        self._active_goal_started_monotonic = None
+        self.temporal.cancel("goal_changed")
+
     def _release_current_task_binding(self, binding: _CurrentTaskBinding) -> None:
         """Remove volatile Task ownership without changing its domain snapshot."""
-        goal = binding.active_goal
-        if goal is not None:
-            # Identity is intentional: never clear a replacement goal accidentally.
-            if self._active_goal is not goal:
-                raise RuntimeError("current Task ActiveGoal binding is inconsistent")
-            self._active_goal = None
-            self._active_goal_started_monotonic = None
-            self.temporal.cancel("goal_changed")
+        self._release_task_active_goal(binding)
         self._current_task_binding = None
 
     def _set_lifecycle(self, lifecycle: LifecycleState) -> None:
@@ -886,8 +953,8 @@ class RobotApplication:
             failure = error
         binding = self._current_task_binding
         if binding is not None:
-            # Session shutdown drops coordination only; the running Task snapshot
-            # is deliberately not transitioned to a semantic terminal state.
+            # Session shutdown drops coordination only; the running or paused Task
+            # snapshot is deliberately not given a semantic terminal state.
             if binding.active_goal is not None:
                 self._active_goal = None
                 self._active_goal_started_monotonic = None
