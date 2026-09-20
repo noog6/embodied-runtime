@@ -55,11 +55,18 @@ class MemoryFileConfig:
 
 
 @dataclass(frozen=True)
+class JobsFileConfig:
+    enabled: bool = False
+    database_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeFileConfiguration:
     runtime: RuntimeFileConfig = RuntimeFileConfig()
     initiative: InitiativeFileConfig = InitiativeFileConfig()
     voice: VoiceFileConfig = VoiceFileConfig()
     memory: MemoryFileConfig = MemoryFileConfig()
+    jobs: JobsFileConfig = JobsFileConfig()
 
 
 @dataclass(frozen=True)
@@ -93,6 +100,8 @@ class LaunchConfiguration:
     voice_followup_timeout_seconds: float
     memory_enabled: bool
     memory_database_path: Path | None
+    jobs_enabled: bool
+    jobs_database_path: Path | None
 
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
@@ -110,6 +119,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     voice_initial_timeout_seconds=18.0,
     voice_followup_timeout_seconds=10.0,
     memory_enabled=False, memory_database_path=None,
+    jobs_enabled=False, jobs_database_path=None,
 )
 
 _RUNTIME_KEYS = {
@@ -126,6 +136,7 @@ _VOICE_KEYS = {
     "elevenlabs_tts_model", "elevenlabs_tts_voice_id", "elevenlabs_tts_speed",
 }
 _MEMORY_KEYS = {"enabled", "database_path"}
+_JOBS_KEYS = {"enabled", "database_path"}
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
     "runtime.camera": {"none", "picamera2"},
@@ -149,15 +160,17 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "initiative", "voice", "memory"})
+    _reject_unknown(data, {"runtime", "initiative", "voice", "memory", "jobs"})
     runtime = _table(data, "runtime")
     initiative = _table(data, "initiative")
     voice = _table(data, "voice")
     memory = _table(data, "memory")
+    jobs = _table(data, "jobs")
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
     _reject_unknown(memory, _MEMORY_KEYS, "memory")
+    _reject_unknown(jobs, _JOBS_KEYS, "jobs")
 
     if "enabled" in memory and not isinstance(memory["enabled"], bool):
         raise ConfigurationError("memory.enabled must be boolean")
@@ -174,6 +187,22 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         database_path = Path(configured_path).expanduser()
         if not database_path.is_absolute():
             database_path = (path.parent / database_path).resolve()
+
+    if "enabled" in jobs and not isinstance(jobs["enabled"], bool):
+        raise ConfigurationError("jobs.enabled must be boolean")
+    if "database_path" in jobs and not isinstance(jobs["database_path"], str):
+        raise ConfigurationError("jobs.database_path must be a string")
+    jobs_enabled = jobs.get("enabled", False)
+    jobs_configured_path = jobs.get("database_path")
+    if jobs_enabled and (jobs_configured_path is None or not jobs_configured_path.strip()):
+        raise ConfigurationError(
+            "jobs.database_path must be a non-empty string when jobs are enabled"
+        )
+    jobs_database_path = None
+    if jobs_configured_path is not None and jobs_configured_path.strip():
+        jobs_database_path = Path(jobs_configured_path).expanduser()
+        if not jobs_database_path.is_absolute():
+            jobs_database_path = (path.parent / jobs_database_path).resolve()
 
     for key, value in runtime.items():
         name = f"runtime.{key}"
@@ -245,7 +274,8 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     return RuntimeFileConfiguration(
         RuntimeFileConfig(**runtime), InitiativeFileConfig(**initiative),
-        VoiceFileConfig(**voice), MemoryFileConfig(memory_enabled, database_path)
+        VoiceFileConfig(**voice), MemoryFileConfig(memory_enabled, database_path),
+        JobsFileConfig(jobs_enabled, jobs_database_path),
     )
 
 
@@ -258,6 +288,7 @@ def resolve_launch_configuration(
     initiative = file_config.initiative
     voice = file_config.voice
     memory = file_config.memory
+    jobs = file_config.jobs
 
     def scalar(name: str, configured: object, historical: object) -> object:
         explicit = getattr(cli_values, name, None)
@@ -321,6 +352,8 @@ def resolve_launch_configuration(
         voice_followup_timeout_seconds=(voice.followup_timeout_seconds if voice.followup_timeout_seconds is not None else 10.0),
         memory_enabled=memory.enabled,
         memory_database_path=memory.database_path if memory.enabled else None,
+        jobs_enabled=jobs.enabled,
+        jobs_database_path=jobs.database_path if jobs.enabled else None,
     )
 
 

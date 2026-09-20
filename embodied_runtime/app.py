@@ -53,6 +53,7 @@ from embodied_runtime.interaction import (
     render_notification_context, render_notification_policy,
     resolve_notification_route,
 )
+from embodied_runtime.jobs import JobStore
 from embodied_runtime.memory import (
     MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
     MemoryRecallProjector, PersistentMemoryStore,
@@ -538,6 +539,7 @@ class RobotApplication:
         timezone_name: str = "UTC",
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         persistent_memory_store: PersistentMemoryStore | None = None,
+        job_store: JobStore | None = None,
         run_history_evidence: RunHistoryEvidenceReader | None = None,
         resource_arbiter: ResourceArbiter | None = None,
     ) -> None:
@@ -565,6 +567,7 @@ class RobotApplication:
             working_memory if working_memory is not None else WorkingMemory()
         )
         self.persistent_memory = persistent_memory_store
+        self.jobs = job_store
         self._run_history_evidence = run_history_evidence
         self._memory_recall = (
             MemoryRecallProjector(persistent_memory_store)
@@ -575,6 +578,7 @@ class RobotApplication:
             if persistent_memory_store is not None else None
         )
         self._persistent_memory_closed = False
+        self._job_store_closed = False
         authorized_voice_provider = (
             SpeakerAuthorizedVoiceProvider(voice_provider, self.resources)
             if voice_provider is not None else None
@@ -1028,6 +1032,10 @@ class RobotApplication:
                 self._close_persistent_memory()
             except BaseException:
                 LOGGER.exception("[MEMORY] cleanup_failed")
+            try:
+                self._close_job_store()
+            except BaseException:
+                LOGGER.exception("[JOBS] cleanup_failed")
             raise
         self._set_lifecycle(LifecycleState.RUNNING)
         try:
@@ -1115,6 +1123,10 @@ class RobotApplication:
             self._close_persistent_memory()
         except BaseException as error:
             failure = failure or error
+        try:
+            self._close_job_store()
+        except BaseException as error:
+            failure = failure or error
         LOGGER.info("[APP] stopped")
         if failure is not None:
             raise failure
@@ -1125,6 +1137,13 @@ class RobotApplication:
             return
         self._persistent_memory_closed = True
         self.persistent_memory.close()
+
+    def _close_job_store(self) -> None:
+        """Close Job persistence without changing any durable run state."""
+        if self.jobs is None or self._job_store_closed:
+            return
+        self._job_store_closed = True
+        self.jobs.close()
 
     async def run(self) -> None:
         await self.start()

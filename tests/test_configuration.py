@@ -5,8 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.cli import (
-    build_persistent_memory_store, main, parse_launch_arguments,
+    build_job_store, build_persistent_memory_store, main, parse_launch_arguments,
 )
+from embodied_runtime.jobs import SQLiteJobStore
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.config import (
     ConfigurationError, HISTORICAL_DEFAULTS, load_runtime_config,
@@ -81,6 +82,29 @@ class ConfigurationTests(unittest.TestCase):
                 **{**HISTORICAL_DEFAULTS.__dict__, "camera": "picamera2"}
             ),
         )
+
+    def test_jobs_configuration_is_independent_and_resolves_relative_path(self):
+        effective = self.effective(
+            "[jobs]\nenabled=true\ndatabase_path='data/jobs.sqlite3'\n"
+            "[memory]\nenabled=false\n"
+        )
+        self.assertTrue(effective.jobs_enabled)
+        self.assertFalse(effective.memory_enabled)
+        self.assertEqual(effective.jobs_database_path.name, "jobs.sqlite3")
+
+        with self.assertRaisesRegex(ConfigurationError, "jobs.database_path"):
+            load_runtime_config(self.write("[jobs]\nenabled=true\n"))
+
+    def test_job_store_builder_is_independent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "nested" / "jobs.sqlite3"
+            store = build_job_store(SimpleNamespace(
+                jobs_enabled=True, jobs_database_path=path
+            ))
+            self.assertIsInstance(store, SQLiteJobStore)
+            store.close()
+            self.assertTrue(path.is_file())
+        self.assertIsNone(build_job_store(SimpleNamespace(jobs_enabled=False)))
 
     def test_timezone_valid_invalid_and_historical_default(self):
         self.assertEqual(HISTORICAL_DEFAULTS.timezone, "UTC")
