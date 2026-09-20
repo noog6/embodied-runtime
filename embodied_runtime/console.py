@@ -256,6 +256,8 @@ class RuntimeConsole:
                 "  job add <name> [options]       Add an enabled Job definition",
                 "  job enable|disable JOB<n>      Change Job definition state",
                 "  job start JOB<n>               Start a JobRun and bounded Task",
+                "  job schedule JOB<n> [daily HH:MM [--timezone ZONE]]",
+                "  job unschedule JOB<n>          Remove a Job's daily schedule",
                 "  job work                       Perform one bounded Job work episode",
                 "  job current                    Show current JobRun and Task",
                 "  job complete [summary]         Complete current JobRun",
@@ -340,6 +342,10 @@ class RuntimeConsole:
             return self._job_add(words)
         if action in ("enable", "disable"):
             return self._job_enable(words, action == "enable")
+        if action == "schedule":
+            return self._job_schedule(words)
+        if action == "unschedule":
+            return self._job_unschedule(words)
         if action == "start":
             if len(words) != 3 or (job_id := _catalog_id(words[2], "JOB")) is None:
                 return "Usage: job start JOB<n>."
@@ -376,8 +382,47 @@ class RuntimeConsole:
                 return f"Unable to {action} Job: persistence operation failed."
             return f"Job RUN{binding.run.id} {binding.run.status.value}."
         return (
-            "Usage: job add|enable|disable|start|work|current|complete|fail|stop."
+            "Usage: job add|enable|disable|start|schedule|unschedule|work|current|complete|fail|stop."
         )
+
+    def _job_schedule(self, words: list[str]) -> str:
+        store = self._application.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        if len(words) < 3 or (job_id := _catalog_id(words[2], "JOB")) is None:
+            return "Usage: job schedule JOB<n> [daily HH:MM [--timezone ZONE]]."
+        if store.get_job(job_id) is None:
+            return f"Job not found: JOB{job_id}."
+        if len(words) == 3:
+            schedule = store.get_schedule(job_id)
+            if schedule is None:
+                return f"JOB{job_id} has no schedule."
+            return "\n".join(("Job schedule", f"  job:               JOB{job_id}",
+                f"  enabled:           {str(schedule.enabled).lower()}",
+                "  cadence:           daily", f"  local_time:        {schedule.local_time}",
+                f"  timezone:          {schedule.timezone}",
+                f"  last_started_date: {schedule.last_started_local_date or 'none'}"))
+        if len(words) not in (5, 7) or words[3].lower() != "daily" \
+                or (len(words) == 7 and words[5] != "--timezone"):
+            return "Usage: job schedule JOB<n> daily HH:MM [--timezone ZONE]."
+        timezone = words[6] if len(words) == 7 else self._application.timezone_name
+        try:
+            schedule = store.set_schedule(job_id, words[4], timezone)
+        except (KeyError, TypeError, ValueError) as error:
+            return f"Unable to schedule Job: {error}."
+        return (f"Scheduled JOB{job_id} daily at {schedule.local_time} "
+                f"{schedule.timezone}.")
+
+    def _job_unschedule(self, words: list[str]) -> str:
+        if len(words) != 3 or (job_id := _catalog_id(words[2], "JOB")) is None:
+            return "Usage: job unschedule JOB<n>."
+        store = self._application.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        if store.get_job(job_id) is None:
+            return f"Job not found: JOB{job_id}."
+        removed = store.remove_schedule(job_id)
+        return f"Unscheduled JOB{job_id}." if removed else f"JOB{job_id} has no schedule."
 
     @staticmethod
     def _job_terminal_usage(action: str) -> str:

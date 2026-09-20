@@ -4,12 +4,43 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 MAX_JOB_NAME_CHARS = 200
 MAX_JOB_DESCRIPTION_CHARS = 2000
 MAX_RUN_SUMMARY_CHARS = 2000
 _TOKEN = re.compile(r"^[^\W\d][\w-]*$", re.UNICODE)
+_LOCAL_TIME = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class JobSchedule:
+    """One durable daily, explicitly zoned activation schedule."""
+
+    job_id: int
+    enabled: bool
+    local_time: str
+    timezone: str
+    last_started_local_date: str | None = None
+
+    def __post_init__(self) -> None:
+        _positive_id(self.job_id, "job ID")
+        if not isinstance(self.enabled, bool):
+            raise TypeError("enabled must be boolean")
+        if not isinstance(self.local_time, str) or _LOCAL_TIME.fullmatch(self.local_time) is None:
+            raise ValueError("local_time must use strict 24-hour HH:MM format")
+        if not isinstance(self.timezone, str):
+            raise TypeError("timezone must be a string")
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise ValueError(f"unknown IANA timezone: {self.timezone!r}") from error
+        if self.last_started_local_date is not None:
+            try:
+                datetime.strptime(self.last_started_local_date, "%Y-%m-%d")
+            except (TypeError, ValueError) as error:
+                raise ValueError("last_started_local_date must use YYYY-MM-DD") from error
 
 
 def _positive_id(value: int, label: str) -> int:
@@ -136,4 +167,3 @@ class JobRun:
             raise ValueError("non-terminal job runs cannot have finished_at")
         if self.status is JobRunStatus.PENDING and self.started_at is not None:
             raise ValueError("pending job runs cannot have started_at")
-

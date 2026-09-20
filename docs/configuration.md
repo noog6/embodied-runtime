@@ -67,6 +67,7 @@ database_path = "../data/jobs.sqlite3"
 auto_continue = true
 heartbeat_seconds = 30
 max_auto_steps = 3
+scheduler_poll_seconds = 30
 ```
 
 `hardware`, `camera`, and `cognition` accept the same values as their existing
@@ -91,6 +92,11 @@ stability, similarity, style, or speaker-boost setting is overridden. Its API
 key is environment-provided, not TOML.
 Unknown tables, unknown keys, wrong types, unsupported values, and malformed
 TOML fail before a profile or backend is constructed.
+
+`jobs.scheduler_poll_seconds` is the positive interval for the lightweight
+daily-schedule timer. It defaults to 30 seconds. It only determines when the
+runtime next checks eligibility; due schedules use same-day catch-up rather
+than depending on exact timer precision.
 
 The file may be partial. Omitted values retain the historical defaults:
 

@@ -427,7 +427,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
                     "selector": {
                         "type": "string",
                         "description": (
-                            "Run selection: recent, current, previous, or "
+                            "Run selection: recent, current, previous, previous_day, or "
                             "R<positive integer>."
                         ),
                     },

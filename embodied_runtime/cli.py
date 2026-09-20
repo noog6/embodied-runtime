@@ -253,6 +253,7 @@ def parse_launch_arguments(
     args.jobs_auto_continue = effective.jobs_auto_continue
     args.jobs_heartbeat_seconds = effective.jobs_heartbeat_seconds
     args.jobs_max_auto_steps = effective.jobs_max_auto_steps
+    args.jobs_scheduler_poll_seconds = effective.jobs_scheduler_poll_seconds
     return parser, args, effective
 
 
@@ -471,7 +472,8 @@ async def _run_application(
                                               initiative_goal_closure_enabled=args.initiative_goal_closure,
                                               jobs_auto_continue=args.jobs_auto_continue,
                                               jobs_heartbeat_seconds=args.jobs_heartbeat_seconds,
-                                              jobs_max_auto_steps=args.jobs_max_auto_steps),
+                                              jobs_max_auto_steps=args.jobs_max_auto_steps,
+                                              jobs_scheduler_poll_seconds=args.jobs_scheduler_poll_seconds),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
         camera_backend=camera,
@@ -627,8 +629,10 @@ def main(
         result = _run_with_asyncio_cleanup(
             _run_application(
                 args, profile, history_root,
-                RunHistoryEvidenceReader(history_root, history.run_id)
-                if history is not None else RunHistoryEvidenceReader(history_root),
+                RunHistoryEvidenceReader(history_root, history.run_id,
+                                         timezone_name=args.timezone)
+                if history is not None else RunHistoryEvidenceReader(
+                    history_root, timezone_name=args.timezone),
             )
         )
     except (
