@@ -492,12 +492,21 @@ class RuntimeConsole:
             f"  run_status:    {binding.run.status.value}",
             f"  task_id:       {binding.task.id}",
             f"  task_status:   {binding.task.status.value}",
+            f"  progress:      {self._job_progress()}",
             f"  readiness:     {self._job_continuation_readiness()}",
             *self._job_continuation_delay_lines(),
             *self._job_continuation_event_lines(),
             f"  auto_continuation:    {self._job_continuation_state()}",
             f"  auto_steps_remaining: {self._job_continuation_steps()}",
         ))
+
+    def _job_progress(self) -> str:
+        progress = self._application.job_progress
+        if progress is None or not progress.counters:
+            return "none"
+        return ", ".join(
+            f"{counter.name}={counter.value}" for counter in progress.counters
+        )
 
     def _job_continuation_state(self) -> str:
         continuation = self._application.job_continuation
