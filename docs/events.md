@@ -46,6 +46,16 @@ Semantic events may drive deterministic [local reflexes](reflexes.md). They
 remain facts, not commands: the reflex independently translates a relevant fact
 into a request through an application semantic capability.
 
+## Job continuation readiness
+
+The Jobs runtime is also a bounded consumer of the existing transient bus. One
+application-owned `PresenceChanged` subscriber maps that concrete event to the
+stable model-facing selector `presence_changed`. It only marks a matching,
+already-running exact JobRun continuation as satisfied; it never invokes
+cognition or creates a JobRun. Delivery retains at most one bounded wake fact
+(`present`) and repeated events coalesce until ordinary Job work consumes it.
+The subscription is application-lifetime and is closed with the `EventBus`.
+
 Initiative-driven orientation uses the runtime-owned source `initiative`.
 Attention accepts only sources beginning with `reflex:`, so that resulting event
 is observable but cannot recursively trigger another initiative episode.

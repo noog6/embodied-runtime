@@ -8,7 +8,7 @@ import json
 import logging
 import math
 import unicodedata
-from time import monotonic
+from time import monotonic, monotonic_ns
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -55,7 +55,8 @@ from embodied_runtime.interaction import (
 )
 from embodied_runtime.jobs import (
     Job, JobContinuation, JobContinuationController, JobContinuationReadiness,
-    JobContinuationState, MAX_JOB_CONTINUATION_DELAY_SECONDS,
+    JobContinuationState, JobReadinessEventType, JobWakeEvent,
+    MAX_JOB_CONTINUATION_DELAY_SECONDS,
     MIN_JOB_CONTINUATION_DELAY_SECONDS,
     JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
@@ -280,13 +281,16 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
             "summary": {"type": "string", "minLength": 1,
                         "maxLength": MAX_RUN_SUMMARY_CHARS},
             "readiness": {"type": ["string", "null"], "enum": [
-                "ready", "after_delay", "wait_for_operator", None,
+                "ready", "after_delay", "wait_for_operator", "wait_for_event", None,
             ]},
             "delay_seconds": {"type": ["integer", "null"],
                               "minimum": MIN_JOB_CONTINUATION_DELAY_SECONDS,
                               "maximum": MAX_JOB_CONTINUATION_DELAY_SECONDS},
+            "event_type": {"type": ["string", "null"],
+                           "enum": ["presence_changed", None]},
         },
-        "required": ["disposition", "summary", "readiness", "delay_seconds"],
+        "required": ["disposition", "summary", "readiness", "delay_seconds",
+                     "event_type"],
         "additionalProperties": False,
     },
 )
@@ -510,10 +514,13 @@ JOB_OUTCOME_EVALUATION_REQUEST = (
     "proceed at the next ordinary opportunity; after_delay with a 1..86400 second "
     "delay when waiting itself is useful (choose the shortest reasonable delay); or "
     "wait_for_operator only when meaningful progress specifically requires explicit "
-    "operator involvement. External events have no readiness mode yet; use a reasonable "
-    "after_delay polling interval rather than pretending they require the operator. "
-    "Terminal outcomes require null readiness and delay; ready/wait_for_operator require "
-    "a null delay. The initiative response is model-generated commentary, not "
+    "operator involvement; or wait_for_event with event_type presence_changed when a "
+    "later authoritative presence transition would make reconsideration useful. "
+    "Terminal outcomes require null readiness, delay, and event_type. Event waiting "
+    "requires a null delay; every other readiness requires a null event_type. "
+    "A wake event proves only its explicitly projected runtime fact; acquire fresh "
+    "evidence for unrelated mutable conditions. The initiative response is "
+    "model-generated commentary, not "
     "authoritative evidence, and any previous-work continuity context is deliberately "
     "excluded from this evidence bundle; neither can independently justify a terminal "
     "outcome. Insufficient information or one rejected optional capability "
@@ -627,6 +634,11 @@ class RobotApplication:
         self._active_operator_cognition_task: asyncio.Task[object] | None = None
         self._active_job_work_task: asyncio.Task[object] | None = None
         self._job_continuation: JobContinuation | None = None
+        # One application-lifetime listener; readiness changes never add workers.
+        self._job_event_subscription = (
+            self.events.subscribe(PresenceChanged, self._on_job_presence_changed)
+            if job_store is not None else None
+        )
         self._operator_message_sink = operator_message_sink
         self._operator_delivery_routes = (
             operator_delivery_routes or OperatorDeliveryRouteCatalog()
@@ -764,6 +776,35 @@ class RobotApplication:
         return max(0, math.ceil(
             continuation.eligible_at_monotonic - self._monotonic()
         ))
+
+    async def _on_job_presence_changed(self, event: PresenceChanged) -> None:
+        """Record a matching wake; cognition remains owned by the normal gate."""
+        continuation = self._job_continuation
+        current = self._current_job_run
+        task_binding = self._current_task_binding
+        if (self.state is not LifecycleState.RUNNING
+                or continuation is None
+                or continuation.readiness is not JobContinuationReadiness.WAIT_FOR_EVENT
+                or continuation.event_type is not JobReadinessEventType.PRESENCE_CHANGED
+                or continuation.event_armed_after_ns is None
+                or event.timestamp_ns <= continuation.event_armed_after_ns
+                or continuation.event_satisfied
+                or current is None
+                or current.job.id != continuation.job_id
+                or current.run.id != continuation.run_id
+                or current.task.id != continuation.task_id
+                or current.run.status is not JobRunStatus.RUNNING
+                or task_binding is None
+                or task_binding.task.id != continuation.task_id):
+            return
+        self._job_continuation = replace(
+            continuation, event_satisfied=True,
+            wake_event=JobWakeEvent(JobReadinessEventType.PRESENCE_CHANGED, event.present),
+        )
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s continuation=event_satisfied event=%s",
+            continuation.job_id, continuation.run_id, continuation.event_type.value,
+        )
 
     @property
     def job_continuation_controller(self) -> JobContinuationController | None:
@@ -1016,6 +1057,7 @@ class RobotApplication:
         prepared: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
         episode: AttentionEpisode | None = None,
         previous_work_summary: str | None = None,
+        wake_event: JobWakeEvent | None = None,
     ) -> JobWorkOutcome:
         """Shared one-shot executor for manual and heartbeat work."""
         binding, task_binding, goal = (
@@ -1036,6 +1078,17 @@ class RobotApplication:
             raise RuntimeError("another Job work episode is already active")
         self._active_job_work_task = current_async_task
         target = "unassigned" if binding.job.target is None else str(binding.job.target)
+        wake_facts = () if wake_event is None else (
+            SemanticObservationFact("continuation_wake_event", wake_event.event_type.value),
+            SemanticObservationFact("presence_reported", str(wake_event.present).lower()),
+            SemanticObservationFact(
+                "wake_event_authority",
+                "The runtime event occurred after this JobRun began waiting. Its "
+                "presence_reported field is authoritative only for reported presence; "
+                "it establishes no identity, object visibility, safety, or other "
+                "mutable condition.",
+            ),
+        )
         stimulus = AttentionStimulus(SemanticObservation(
             "job_run_work", f"JOB{binding.job.id}/RUN{binding.run.id}", (
                 SemanticObservationFact("job_id", str(binding.job.id)),
@@ -1052,6 +1105,7 @@ class RobotApplication:
                     "JobRun. The Job definition is durable responsibility context, not "
                     "a new operator utterance.",
                 ),
+                *wake_facts,
             )
         ))
         LOGGER.info("[JOBS] job=JOB%s run=RUN%s episode=E%s work=started source=%s",
@@ -1068,7 +1122,7 @@ class RobotApplication:
                 stimulus, episode, evaluate_goal_outcome=False, job_work=True,
                 previous_work_summary=continuity,
             )
-            disposition, summary, readiness, delay_seconds = await self._request_job_outcome(
+            disposition, summary, readiness, delay_seconds, event_type = await self._request_job_outcome(
                 binding, task_binding, goal, episode, stimulus, initiative
             )
             if (
@@ -1086,6 +1140,7 @@ class RobotApplication:
                 binding.job.id, binding.run.id, binding.task.id, episode.id,
                 disposition, summary, initiative.response,
                 initiative.action, initiative.action_status, readiness, delay_seconds,
+                event_type,
             )
         except asyncio.CancelledError:
             reason = "cancelled"
@@ -1118,15 +1173,22 @@ class RobotApplication:
             if outcome.readiness is JobContinuationReadiness.AFTER_DELAY
             and outcome.delay_seconds is not None else None
         )
+        event_type = outcome.event_type
+        event_armed_after_ns = (
+            monotonic_ns()
+            if outcome.readiness is JobContinuationReadiness.WAIT_FOR_EVENT else None
+        )
         self._job_continuation = JobContinuation(
             outcome.job_id, outcome.run_id, outcome.task_id,
             JobContinuationState.ARMED, self.options.jobs_max_auto_steps,
-            outcome.summary, outcome.readiness, eligible_at,
+            outcome.summary, outcome.readiness, eligible_at, event_type,
+            event_armed_after_ns,
         )
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s continuation=armed readiness=%s%s remaining=%s source=%s",
             outcome.job_id, outcome.run_id, outcome.readiness.value,
-            (f" delay_s={outcome.delay_seconds}" if outcome.delay_seconds is not None else ""),
+            (f" delay_s={outcome.delay_seconds}" if outcome.delay_seconds is not None
+             else f" event={event_type.value}" if event_type is not None else ""),
             self.options.jobs_max_auto_steps, source,
         )
 
@@ -1190,6 +1252,13 @@ class RobotApplication:
             return
         if continuation.readiness is JobContinuationReadiness.WAIT_FOR_OPERATOR:
             return
+        if continuation.readiness is JobContinuationReadiness.WAIT_FOR_EVENT:
+            if (continuation.event_type is None
+                    or continuation.event_armed_after_ns is None):
+                self._clear_job_continuation("invalid_readiness_state")
+                return
+            if not continuation.event_satisfied or continuation.wake_event is None:
+                return
         if continuation.readiness is JobContinuationReadiness.AFTER_DELAY:
             if continuation.eligible_at_monotonic is None:
                 self._clear_job_continuation("invalid_readiness_state")
@@ -1233,11 +1302,12 @@ class RobotApplication:
         remaining = continuation.automatic_steps_remaining - 1
         self._job_continuation = replace(
             continuation, automatic_steps_remaining=remaining,
+            event_satisfied=False, wake_event=None,
         )
         task = asyncio.create_task(
             self._run_automatic_job_work(
                 (current, task_binding, task_binding.active_goal), episode,
-                continuation.last_summary,
+                continuation.last_summary, continuation.wake_event,
             ),
             name="job-continuation-work",
         )
@@ -1260,6 +1330,7 @@ class RobotApplication:
         prepared: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal],
         episode: AttentionEpisode,
         previous_work_summary: str | None,
+        wake_event: JobWakeEvent | None,
     ) -> None:
         continuation = self._job_continuation
         binding, task_binding, goal = prepared
@@ -1275,7 +1346,7 @@ class RobotApplication:
         try:
             outcome = await self._work_current_job_once(
                 "heartbeat", prepared=prepared, episode=episode,
-                previous_work_summary=previous_work_summary,
+                previous_work_summary=previous_work_summary, wake_event=wake_event,
             )
         except asyncio.CancelledError:
             raise
@@ -1311,7 +1382,13 @@ class RobotApplication:
         )
         updated = replace(
             current, last_summary=outcome.summary, readiness=outcome.readiness,
-            eligible_at_monotonic=eligible_at,
+            eligible_at_monotonic=eligible_at, event_type=outcome.event_type,
+            event_armed_after_ns=(
+                monotonic_ns()
+                if outcome.readiness is JobContinuationReadiness.WAIT_FOR_EVENT
+                else None
+            ),
+            event_satisfied=False, wake_event=None,
         )
         if current.automatic_steps_remaining == 0:
             self._job_continuation = replace(
@@ -1386,13 +1463,15 @@ class RobotApplication:
         self, binding: CurrentJobRun, task_binding: _CurrentTaskBinding,
         goal: ActiveGoal, episode: AttentionEpisode, stimulus: AttentionStimulus,
         initiative: InitiativeOutcome,
-    ) -> tuple[JobWorkDisposition, str | None, JobContinuationReadiness | None, int | None]:
+    ) -> tuple[JobWorkDisposition, str | None, JobContinuationReadiness | None,
+               int | None, JobReadinessEventType | None]:
         backend = self._cognition_backend
         assert backend is not None
         proposed_disposition: JobWorkDisposition | None = None
         proposed_summary: str | None = None
         proposed_readiness: JobContinuationReadiness | None = None
         proposed_delay_seconds: int | None = None
+        proposed_event_type: JobReadinessEventType | None = None
         consumed = False
 
         def evidence_lines() -> list[str]:
@@ -1417,6 +1496,7 @@ class RobotApplication:
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
             nonlocal consumed, proposed_disposition, proposed_summary
             nonlocal proposed_readiness, proposed_delay_seconds
+            nonlocal proposed_event_type
             if consumed:
                 return self._rejected_tool(call.name, "Job outcome request already consumed",
                                            log_prefix="JOBS")
@@ -1424,12 +1504,21 @@ class RobotApplication:
             try:
                 if call.name != REPORT_JOB_OUTCOME_TOOL.name:
                     raise RuntimeError("tool is not available")
-                arguments = self._tool_arguments(
-                    call, {"disposition", "summary", "readiness", "delay_seconds"}
-                )
+                # event_type is schema-required. Accept its omission from older
+                # provider/test clients as the equivalent null for non-event modes.
+                arguments = json.loads(call.arguments)
+                required = {"disposition", "summary", "readiness", "delay_seconds"}
+                if (not isinstance(arguments, dict)
+                        or not required <= set(arguments)
+                        or set(arguments) - required != ({"event_type"} if "event_type" in arguments else set())):
+                    raise ValueError("invalid report_job_outcome arguments")
                 disposition = JobWorkDisposition(arguments["disposition"])
                 readiness_value = arguments["readiness"]
                 delay_seconds = arguments["delay_seconds"]
+                event_value = arguments.get("event_type")
+                event_type = (
+                    None if event_value is None else JobReadinessEventType(event_value)
+                )
                 readiness = (
                     None if readiness_value is None
                     else JobContinuationReadiness(readiness_value)
@@ -1444,8 +1533,15 @@ class RobotApplication:
                             raise ValueError("after_delay requires a bounded positive integer delay_seconds")
                     elif delay_seconds is not None:
                         raise ValueError(f"{readiness.value} requires null delay_seconds")
-                elif readiness is not None or delay_seconds is not None:
-                    raise ValueError("terminal outcomes require null readiness and delay_seconds")
+                    if readiness is JobContinuationReadiness.WAIT_FOR_EVENT:
+                        if event_type is None:
+                            raise ValueError("wait_for_event requires event_type")
+                    elif event_type is not None:
+                        raise ValueError(f"{readiness.value} requires null event_type")
+                elif readiness is not None or delay_seconds is not None or event_type is not None:
+                    raise ValueError(
+                        "terminal outcomes require null readiness, delay_seconds, and event_type"
+                    )
                 value = arguments["summary"]
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError("summary must be a non-empty string")
@@ -1456,6 +1552,7 @@ class RobotApplication:
                     raise RuntimeError("exact Job work binding is no longer current")
                 proposed_disposition, proposed_summary = disposition, value
                 proposed_readiness, proposed_delay_seconds = readiness, delay_seconds
+                proposed_event_type = event_type
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as error:
                 return self._rejected_tool(call.name, str(error), log_prefix="JOBS")
             return CognitionToolResult(json.dumps({
@@ -1478,13 +1575,13 @@ class RobotApplication:
             refreshed_instructions=lambda: instructions,
         )
         if proposed_disposition is None:
-            return JobWorkDisposition.CONTINUE, None, None, None
+            return JobWorkDisposition.CONTINUE, None, None, None, None
         assert proposed_summary is not None
         if proposed_disposition in (
             JobWorkDisposition.COMPLETED, JobWorkDisposition.FAILED,
         ):
             if not self._job_work_binding_matches(binding, task_binding, goal):
-                return JobWorkDisposition.CONTINUE, None, None, None
+                return JobWorkDisposition.CONTINUE, None, None, None, None
             terminal = (
                 JobRunStatus.COMPLETED
                 if proposed_disposition is JobWorkDisposition.COMPLETED
@@ -1492,7 +1589,7 @@ class RobotApplication:
             )
             self.finish_job_run(terminal, proposed_summary)
         return (proposed_disposition, proposed_summary, proposed_readiness,
-                proposed_delay_seconds)
+                proposed_delay_seconds, proposed_event_type)
 
     def temporal_context(self) -> TemporalContext:
         """Build fresh local wall-clock grounding for one cognition boundary."""

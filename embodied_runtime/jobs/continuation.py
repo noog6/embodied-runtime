@@ -54,6 +54,21 @@ class JobContinuationReadiness(str, Enum):
     READY = "ready"
     AFTER_DELAY = "after_delay"
     WAIT_FOR_OPERATOR = "wait_for_operator"
+    WAIT_FOR_EVENT = "wait_for_event"
+
+
+class JobReadinessEventType(str, Enum):
+    """Stable model-facing catalog of events that may wake Job work."""
+
+    PRESENCE_CHANGED = "presence_changed"
+
+
+@dataclass(frozen=True, slots=True)
+class JobWakeEvent:
+    """One bounded, runtime-authored event projection for the next episode."""
+
+    event_type: JobReadinessEventType
+    present: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +83,10 @@ class JobContinuation:
     last_summary: str | None
     readiness: JobContinuationReadiness
     eligible_at_monotonic: float | None = None
+    event_type: JobReadinessEventType | None = None
+    event_armed_after_ns: int | None = None
+    event_satisfied: bool = False
+    wake_event: JobWakeEvent | None = None
 
 
 class JobContinuationController:

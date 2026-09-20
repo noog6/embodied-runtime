@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
-from embodied_runtime.jobs.continuation import JobContinuationReadiness
+from embodied_runtime.jobs.continuation import (
+    JobContinuationReadiness, JobReadinessEventType,
+)
 
 
 class JobWorkDisposition(StrEnum):
@@ -26,3 +28,4 @@ class JobWorkOutcome:
     action_status: str | None
     readiness: JobContinuationReadiness | None = None
     delay_seconds: int | None = None
+    event_type: JobReadinessEventType | None = None
