@@ -147,6 +147,42 @@ rows nor discovers or starts enabled Jobs. Restart does not resume work, and
 there are no execution claims, multi-runtime adoption, or persistent
 continuation records.
 
+## Daily local-time activation
+
+An ordinary Job may have one durable daily schedule: an enabled flag, strict
+24-hour `HH:MM` local time, explicit IANA timezone, and the last local calendar
+date whose occurrence was created. `job schedule JOB1 daily 02:00` uses the
+configured runtime timezone; `--timezone America/Toronto` makes it explicit,
+`job schedule JOB1` inspects it, and `job unschedule JOB1` removes only the
+schedule, never the Job or its history.
+
+At each lightweight scheduler opportunity the application orders due schedules
+by scheduled instant and Job ID. Schedule-local ineligibility (a disabled
+schedule, missing Job, or disabled Job) is skipped so it cannot starve a later
+eligible schedule. A runtime-wide blocker (current work, unavailable cognition,
+operator waiting, or occupied attention) ends that opportunity. The first
+eligible schedule starts, so at most one occurrence is activated. A time is due at its
+exact minute or any later time on that same local date, so restart at 08:00
+catches up a missed 02:00 occurrence but never backfills older dates. Disabled
+Jobs and busy Task, goal, Job, operator, attention, or Job-work state defer
+without consuming the date. The store atomically updates
+`last_started_local_date` and creates the pending JobRun in one transaction;
+repeated checks and ordinary restart therefore cannot create another occurrence
+for that Job/date.
+
+After Task binding, scheduled activation claims the shared attention
+coordinator and starts exactly one invocation of the existing bounded Job work
+executor. A `continue` result arms the existing Phase 4 heartbeat grant. There
+is no scheduling-specific cognition loop. Shutdown stops the schedule timer
+before cancelling work and dropping volatile Task coordination. A durable
+running occurrence is not adopted after restart. Cross-runtime execution
+claims and multi-body eligibility remain future work.
+
+The timer offers an immediate check at startup before its first poll sleep.
+Ordinary check exceptions are logged and followed by the normal sleep before a
+later opportunity; they neither kill the timer nor retry Job work. Cancellation
+still stops the timer promptly.
+
 While a Task is paused, its JobRun remains `running`. Existing Task behavior
 releases Task-owned resources and suspends its ActiveGoal; resume creates a
 fresh Task-owned ActiveGoal without reacquiring resources. Completion, failure,

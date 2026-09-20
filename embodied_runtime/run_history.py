@@ -2,12 +2,13 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 import json
 import os
 from pathlib import Path
 import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_HISTORY_ROOT = Path("data/runs")
@@ -19,6 +20,7 @@ MAX_GREP_QUERY_LENGTH = 256
 MAX_COGNITION_RUNS = 5
 MAX_COGNITION_MATCHES = 20
 MAX_COGNITION_LINE_CHARS = 800
+MAX_DAILY_RUNS = 20
 _CONTENT_FIELDS = (
     "text=", "message=", "purpose=", "description=", "summary=", "evidence=",
     "focus=", "query=", "prompt=", "utterance=", "response=", "heard=", "words=",
@@ -204,8 +206,13 @@ def _record_dict(record: RunRecord) -> dict[str, object]:
 class RunHistoryEvidenceReader:
     """Read-only, bounded, model-safe projection of persisted run evidence."""
 
-    def __init__(self, root: Path, current_run_id: str | None = None) -> None:
+    def __init__(self, root: Path, current_run_id: str | None = None, *,
+                 timezone_name: str = "UTC",
+                 clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
         self._root = root
+        self._timezone_name = timezone_name
+        self._timezone = ZoneInfo(timezone_name)
+        self._clock = clock
         self.current_run_id = (
             current_run_id if current_run_id is not None
             and canonical_run_id(current_run_id) == current_run_id else None
@@ -224,6 +231,8 @@ class RunHistoryEvidenceReader:
         if operation == "search" and (type(query) is not str or not query.strip()
                                       or len(query) > MAX_GREP_QUERY_LENGTH):
             return self._rejected("invalid_tool_arguments")
+        if run == "previous_day":
+            return self._previous_day(operation, query)
         resolved, reason = self._resolve(run)
         if resolved is None:
             return self._rejected(reason or "invalid_run_selector")
@@ -359,6 +368,68 @@ class RunHistoryEvidenceReader:
         except (OSError, FileNotFoundError):
             return None, False, "runtime_log_unavailable"
         return matches, False, ""
+
+    def _previous_day(self, operation: str, query: object) -> dict[str, object]:
+        """Aggregate safe completed log records by local line timestamp."""
+        local_now = self._clock().astimezone(self._timezone)
+        calendar_date = local_now.date() - timedelta(days=1)
+        categories: dict[str, int] = {}
+        first: list[dict[str, object]] = []
+        last: list[dict[str, object]] = []
+        matches: list[dict[str, object]] = []
+        run_ids: list[str] = []
+        safe_count = 0
+        truncated = False
+        ids = list(reversed(self._safe_ids()))
+        if len(ids) > MAX_DAILY_RUNS:
+            truncated = True
+            ids = ids[-MAX_DAILY_RUNS:]
+        needle = query.casefold() if isinstance(query, str) else None
+        for run_id in ids:
+            represented = False
+            try:
+                lines = self._complete_lines(run_id)
+                for number, line in lines:
+                    if not self._safe_line(line):
+                        continue
+                    try:
+                        timestamp = datetime.fromisoformat(line.split(" ", 1)[0].replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if timestamp.astimezone(self._timezone).date() != calendar_date:
+                        continue
+                    represented = True
+                    safe_count += 1
+                    item = {"run_id": run_id, **self._bounded_line(number, line)}
+                    if operation == "search":
+                        if needle in line.casefold():  # type: ignore[operator]
+                            if len(matches) < MAX_COGNITION_MATCHES:
+                                matches.append(item)
+                            else:
+                                truncated = True
+                    else:
+                        category = _STRUCTURED_LOG_RECORD.match(line).group(1)  # type: ignore[union-attr]
+                        categories[category] = categories.get(category, 0) + 1
+                        if len(first) < 8:
+                            first.append(item)
+                        last.append(item)
+                        if len(last) > 16:
+                            last.pop(0)
+            except (OSError, FileNotFoundError, RunDataUnavailable):
+                continue
+            if represented:
+                run_ids.append(run_id)
+        common = {"status": "applied", "operation": operation,
+                  "selector": "previous_day", "calendar_date": calendar_date.isoformat(),
+                  "timezone": self._timezone_name, "run_ids": run_ids,
+                  "safe_line_count": safe_count, "truncated": truncated}
+        if operation == "search":
+            return {**common, "query": query, "matches": matches}
+        by_key = {(item["run_id"], item["line_number"]): item for item in (*first, *last)}
+        return {**common, "category_counts": dict(sorted(categories.items())),
+                "first_lines": first, "last_lines": last,
+                "lines": list(by_key.values()),
+                "truncated": truncated or safe_count > len(by_key)}
 
 
 class RunHistorySetupError(OSError):

@@ -6,11 +6,11 @@ from pathlib import Path
 import sqlite3
 
 from .model import (
-    InvalidJobRunTransitionError, Job, JobRun, JobRunStatus, JobTarget,
+    InvalidJobRunTransitionError, Job, JobRun, JobRunStatus, JobSchedule, JobTarget,
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SCHEMA = (
     """CREATE TABLE jobs (
        id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
@@ -25,6 +25,11 @@ _SCHEMA = (
        created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
        outcome_summary TEXT, error_summary TEXT)""",
     "CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)",
+    """CREATE TABLE job_schedules (
+       job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
+       enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+       local_time TEXT NOT NULL, timezone TEXT NOT NULL,
+       last_started_local_date TEXT)""",
 )
 
 
@@ -47,6 +52,16 @@ class SQLiteJobStore:
     def _initialize_schema(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
+            return
+        if version == 1:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(_SCHEMA[-1])
+                self._connection.execute("PRAGMA user_version = 2")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
             return
         if version != 0:
             raise RuntimeError(f"unsupported jobs schema version {version}; expected {SCHEMA_VERSION}")
@@ -125,6 +140,62 @@ class SQLiteJobStore:
         except sqlite3.IntegrityError as error:
             raise ValueError(f"job does not exist: {job_id}") from error
         return JobRun(cursor.lastrowid, job_id, JobRunStatus.PENDING, now)
+
+    def set_schedule(self, job_id: int, local_time: str, timezone: str, *,
+                     enabled: bool = True) -> JobSchedule:
+        schedule = JobSchedule(job_id, enabled, local_time, timezone)
+        if self.get_job(job_id) is None:
+            raise KeyError(f"unknown job: {job_id}")
+        self._connection.execute(
+            """INSERT INTO job_schedules(job_id, enabled, local_time, timezone)
+               VALUES (?, ?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET
+               enabled=excluded.enabled, local_time=excluded.local_time,
+               timezone=excluded.timezone""",
+            (job_id, int(enabled), local_time, timezone),
+        )
+        return self.get_schedule(job_id)  # type: ignore[return-value]
+
+    def get_schedule(self, job_id: int) -> JobSchedule | None:
+        _id(job_id, "job")
+        row = self._connection.execute(
+            "SELECT * FROM job_schedules WHERE job_id=?", (job_id,)
+        ).fetchone()
+        return _schedule(row) if row is not None else None
+
+    def list_schedules(self) -> tuple[JobSchedule, ...]:
+        rows = self._connection.execute("SELECT * FROM job_schedules ORDER BY job_id").fetchall()
+        return tuple(_schedule(row) for row in rows)
+
+    def remove_schedule(self, job_id: int) -> bool:
+        _id(job_id, "job")
+        return self._connection.execute(
+            "DELETE FROM job_schedules WHERE job_id=?", (job_id,)
+        ).rowcount == 1
+
+    def create_scheduled_run(self, job_id: int, local_date: str) -> JobRun | None:
+        """Atomically consume today's schedule marker and create its occurrence."""
+        probe = JobSchedule(job_id, True, "00:00", "UTC", local_date)
+        now = self._now()
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._connection.execute(
+                """UPDATE job_schedules SET last_started_local_date=?
+                   WHERE job_id=? AND enabled=1 AND
+                   (last_started_local_date IS NULL OR last_started_local_date<>?)""",
+                (probe.last_started_local_date, job_id, probe.last_started_local_date),
+            )
+            if cursor.rowcount != 1:
+                self._connection.rollback()
+                return None
+            cursor = self._connection.execute(
+                "INSERT INTO job_runs(job_id,status,created_at) VALUES(?,'pending',?)",
+                (job_id, _format(now)),
+            )
+            self._connection.commit()
+            return JobRun(cursor.lastrowid, job_id, JobRunStatus.PENDING, now)
+        except BaseException:
+            self._connection.rollback()
+            raise
 
     def get_run(self, run_id: int) -> JobRun | None:
         _id(run_id, "job run")
@@ -210,3 +281,7 @@ def _run(row: sqlite3.Row) -> JobRun:
                   _parse(row["finished_at"]), row["outcome_summary"],
                   row["error_summary"])  # type: ignore[arg-type]
 
+
+def _schedule(row: sqlite3.Row) -> JobSchedule:
+    return JobSchedule(row["job_id"], bool(row["enabled"]), row["local_time"],
+                       row["timezone"], row["last_started_local_date"])

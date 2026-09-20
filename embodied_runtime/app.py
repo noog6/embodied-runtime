@@ -56,6 +56,7 @@ from embodied_runtime.interaction import (
 from embodied_runtime.jobs import (
     Job, JobContinuation, JobContinuationController, JobContinuationState,
     JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
+    ScheduledJobController,
 )
 from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
 from embodied_runtime.memory import (
@@ -345,7 +346,7 @@ INSPECT_RUN_HISTORY_TOOL = CognitionToolDefinition(
         "properties": {
             "selector": {
                 "type": "string",
-                "description": "Run selection: recent, current, previous, or R<positive integer>.",
+                "description": "Run selection: recent, current, previous, previous_day, or R<positive integer>.",
             },
             "query": {
                 "type": ["string", "null"], "minLength": 1,
@@ -514,6 +515,7 @@ class ApplicationOptions:
     jobs_auto_continue: bool = False
     jobs_heartbeat_seconds: float = 30.0
     jobs_max_auto_steps: int = 3
+    jobs_scheduler_poll_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -578,6 +580,7 @@ class RobotApplication:
         visual_perception_backend: VisualPerceptionBackend | None = None,
         temporal_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         job_continuation_sleep: Callable[[float], Awaitable[None]] | None = None,
+        job_scheduler_sleep: Callable[[float], Awaitable[None]] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
         voice_provider: VoiceProvider | None = None,
         text_to_speech_provider: TextToSpeechProvider | None = None,
@@ -681,6 +684,13 @@ class RobotApplication:
             )
             if self.jobs is not None and self.options.jobs_auto_continue else None
         )
+        self._scheduled_job_controller = (
+            ScheduledJobController(
+                self.options.jobs_scheduler_poll_seconds,
+                self._offer_scheduled_job,
+                sleep=job_scheduler_sleep or asyncio.sleep,
+            ) if self.jobs is not None else None
+        )
         self.attention = GoalAttentionController(
             enabled=self.options.initiative_enabled,
             platform_attention_enabled=self.options.initiative_platform_attention_enabled,
@@ -701,6 +711,10 @@ class RobotApplication:
     def state(self) -> LifecycleState:
         """Compatibility view of the authoritative lifecycle state."""
         return self._runtime_state.lifecycle
+
+    @property
+    def timezone_name(self) -> str:
+        return self._timezone_name
 
     @property
     def active_goal(self) -> ActiveGoal | None:
@@ -726,6 +740,10 @@ class RobotApplication:
     def job_continuation_controller(self) -> JobContinuationController | None:
         return self._job_continuation_controller
 
+    @property
+    def scheduled_job_controller(self) -> ScheduledJobController | None:
+        return self._scheduled_job_controller
+
     def start_job_run(self, job_id: int) -> CurrentJobRun:
         """Explicitly start one durable Job occurrence through Task coordination."""
         if self.state is not LifecycleState.RUNNING:
@@ -745,6 +763,11 @@ class RobotApplication:
             raise RuntimeError("an unrelated active goal prevents Task start")
 
         run = self.jobs.create_run(job.id)
+        return self._start_job_occurrence(job, run)
+
+    def _start_job_occurrence(self, job: Job, run: JobRun) -> CurrentJobRun:
+        """Bind one already-created occurrence through ordinary Task authority."""
+        assert self.jobs is not None
         task = Task(
             f"Run JOB{job.id}: {job.name}",
             goal=TaskGoal(f"Complete JOB{job.id}: {job.name}"),
@@ -784,6 +807,89 @@ class RobotApplication:
             job.id, running_run.id, running_task.id,
         )
         return binding
+
+    async def _offer_scheduled_job(self) -> None:
+        """Start at most one currently-due daily occurrence and its first episode."""
+        if self.state is not LifecycleState.RUNNING or self.jobs is None:
+            return
+        now = self._aware_wall_clock()
+        due = []
+        for schedule in self.jobs.list_schedules():
+            local_now = now.astimezone(ZoneInfo(schedule.timezone))
+            local_date = local_now.date().isoformat()
+            hour, minute = map(int, schedule.local_time.split(":"))
+            instant = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if local_now >= instant and schedule.last_started_local_date != local_date:
+                due.append((instant.astimezone(UTC), schedule.job_id, schedule, local_date))
+        due.sort(key=lambda item: (item[0], item[1]))
+        global_reason = None
+        if self.state is not LifecycleState.RUNNING:
+            global_reason = "not_running"
+        elif self._current_job_run is not None:
+            global_reason = "current_job"
+        elif self._current_task_binding is not None or self._active_goal is not None:
+            global_reason = "task_busy"
+        elif self._active_job_work_task is not None:
+            global_reason = "work_active"
+        elif self._cognition_backend is None:
+            global_reason = "cognition_unavailable"
+        elif self.episode_coordinator.operator_waiting:
+            global_reason = "operator_waiting"
+        elif self.episode_coordinator.current is not None:
+            global_reason = "attention_busy"
+        if global_reason is not None:
+            if due:
+                schedule, local_date = due[0][2:]
+                LOGGER.info("[JOBS] job=JOB%s schedule=daily date=%s activation=deferred reason=%s",
+                            schedule.job_id, local_date, global_reason)
+            return
+        selected = None
+        for _, _, schedule, local_date in due:
+            job = self.jobs.get_job(schedule.job_id)
+            reason = ("schedule_disabled" if not schedule.enabled else
+                      "job_missing" if job is None else
+                      "job_disabled" if not job.enabled else None)
+            if reason is not None:
+                LOGGER.info("[JOBS] job=JOB%s schedule=daily date=%s activation=deferred reason=%s",
+                            schedule.job_id, local_date, reason)
+                continue
+            selected = (schedule, local_date, job)
+            break
+        if selected is None:
+            return
+        schedule, local_date, job = selected
+        # No await occurs between the final fairness checks, durable consumption,
+        # Task creation, and attention claim.
+        run = self.jobs.create_scheduled_run(schedule.job_id, local_date)
+        if run is None:
+            return
+        binding = self._start_job_occurrence(job, run)
+        prepared = self._validate_job_work_preconditions()
+        episode = self._try_start_job_work_episode(binding, prepared[2])
+        if episode is None:
+            LOGGER.info("[JOBS] job=JOB%s run=RUN%s schedule=daily date=%s activation=deferred reason=attention_busy",
+                        job.id, run.id, local_date)
+            return
+        LOGGER.info("[JOBS] job=JOB%s run=RUN%s schedule=daily date=%s activation=started",
+                    job.id, run.id, local_date)
+        task = asyncio.create_task(
+            self._run_scheduled_initial_work(prepared, episode),
+            name="job-scheduled-initial-work",
+        )
+        self._active_job_work_task = task
+
+    async def _run_scheduled_initial_work(self, prepared, episode) -> None:
+        try:
+            outcome = await self._work_current_job_once(
+                "scheduled", prepared=prepared, episode=episode,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.warning("[JOBS] scheduled initial work failed", exc_info=True)
+            return
+        if outcome.disposition is JobWorkDisposition.CONTINUE:
+            self._arm_job_continuation(outcome, source="scheduled")
 
     def _stop_unstarted_job_run(self, run: JobRun, summary: str) -> None:
         """Best-effort compensation for a pending occurrence that did not start."""
@@ -955,7 +1061,7 @@ class RobotApplication:
                 if self._active_job_work_task is current_async_task:
                     self._active_job_work_task = None
 
-    def _arm_job_continuation(self, outcome: JobWorkOutcome) -> None:
+    def _arm_job_continuation(self, outcome: JobWorkOutcome, *, source: str = "manual") -> None:
         if not self.options.jobs_auto_continue or self.jobs is None:
             self._job_continuation = None
             return
@@ -968,8 +1074,8 @@ class RobotApplication:
             outcome.summary,
         )
         LOGGER.info(
-            "[JOBS] job=JOB%s run=RUN%s continuation=armed remaining=%s source=manual",
-            outcome.job_id, outcome.run_id, self.options.jobs_max_auto_steps,
+            "[JOBS] job=JOB%s run=RUN%s continuation=armed remaining=%s source=%s",
+            outcome.job_id, outcome.run_id, self.options.jobs_max_auto_steps, source,
         )
 
     def _set_job_continuation_awaiting_operator(self) -> None:
@@ -1676,6 +1782,10 @@ class RobotApplication:
                 self.options.jobs_heartbeat_seconds,
                 self.options.jobs_max_auto_steps,
             )
+        if self._scheduled_job_controller is not None:
+            self._scheduled_job_controller.start()
+            LOGGER.info("[JOBS] scheduler=ready poll_s=%s",
+                        self.options.jobs_scheduler_poll_seconds)
         LOGGER.info(
             "[PULSE] monitor=platform interval_s=%s heartbeat_s=%s status=ready",
             str(self._platform_monitor.policy.interval_seconds),
@@ -1689,6 +1799,12 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.STOPPING)
         LOGGER.info("[APP] stopping")
         failure: BaseException | None = None
+        if self._scheduled_job_controller is not None:
+            try:
+                await self._scheduled_job_controller.stop()
+                LOGGER.info("[JOBS] scheduler=stopped")
+            except BaseException as error:
+                failure = error
         if self._job_continuation_controller is not None:
             try:
                 await self._job_continuation_controller.stop()
@@ -3264,7 +3380,7 @@ class RobotApplication:
         if type(raw_selector) is not str or (query is not None and type(query) is not str):
             raise ValueError("invalid arguments")
         selector = (
-            raw_selector if raw_selector in ("recent", "current", "previous")
+            raw_selector if raw_selector in ("recent", "current", "previous", "previous_day")
             else canonical_run_id(raw_selector)
         )
         if selector is None:

@@ -61,6 +61,7 @@ class JobsFileConfig:
     auto_continue: bool = False
     heartbeat_seconds: float = 30.0
     max_auto_steps: int = 3
+    scheduler_poll_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,7 @@ class LaunchConfiguration:
     jobs_auto_continue: bool
     jobs_heartbeat_seconds: float
     jobs_max_auto_steps: int
+    jobs_scheduler_poll_seconds: float
 
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
@@ -127,6 +129,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     memory_enabled=False, memory_database_path=None,
     jobs_enabled=False, jobs_database_path=None, jobs_auto_continue=False,
     jobs_heartbeat_seconds=30.0, jobs_max_auto_steps=3,
+    jobs_scheduler_poll_seconds=30.0,
 )
 
 _RUNTIME_KEYS = {
@@ -146,6 +149,7 @@ _MEMORY_KEYS = {"enabled", "database_path"}
 _JOBS_KEYS = {
     "enabled", "database_path", "auto_continue", "heartbeat_seconds",
     "max_auto_steps",
+    "scheduler_poll_seconds",
 }
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
@@ -213,6 +217,12 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     if (isinstance(max_auto_steps, bool) or not isinstance(max_auto_steps, int)
             or max_auto_steps <= 0):
         raise ConfigurationError("jobs.max_auto_steps must be a positive integer")
+    scheduler_poll_seconds = jobs.get("scheduler_poll_seconds", 30.0)
+    if (isinstance(scheduler_poll_seconds, bool)
+            or not isinstance(scheduler_poll_seconds, (int, float))
+            or not math.isfinite(scheduler_poll_seconds)
+            or scheduler_poll_seconds <= 0):
+        raise ConfigurationError("jobs.scheduler_poll_seconds must be a positive number")
     jobs_enabled = jobs.get("enabled", False)
     jobs_configured_path = jobs.get("database_path")
     if jobs_enabled and (jobs_configured_path is None or not jobs_configured_path.strip()):
@@ -299,6 +309,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         JobsFileConfig(
             jobs_enabled, jobs_database_path, jobs.get("auto_continue", False),
             float(heartbeat_seconds), max_auto_steps,
+            float(scheduler_poll_seconds),
         ),
     )
 
@@ -381,6 +392,7 @@ def resolve_launch_configuration(
         jobs_auto_continue=jobs.auto_continue,
         jobs_heartbeat_seconds=jobs.heartbeat_seconds,
         jobs_max_auto_steps=jobs.max_auto_steps,
+        jobs_scheduler_poll_seconds=jobs.scheduler_poll_seconds,
     )
 
 

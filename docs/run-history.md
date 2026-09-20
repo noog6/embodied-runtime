@@ -89,19 +89,29 @@ and recent discovery remain usable but `current` and `previous` are unavailable.
 Direct `RobotApplication` construction has no history provider by default.
 
 `inspect_run_history(selector, query)` exposes two required fields. `selector`
-accepts `recent`, `current`, `previous`, or an exact case-insensitive
+accepts `recent`, `current`, `previous`, `previous_day`, or an exact case-insensitive
 `R<positive integer>`; `query` is null for metadata/overview mode or a non-blank
 literal search string of at most 256 characters. Blank or whitespace-only
 queries are rejected rather than treated as an overview. The adapter maps
 `recent, null` to `reader.inspect("recent")`; every other null query to
 `reader.inspect("overview", selector)`; and a non-null query to
 `reader.inspect("search", selector, query)`. `recent` with a query is rejected.
-Run selectors are only `current`, `previous`, and an exact
+Run selectors are `current`, `previous`, `previous_day`, and an exact
 case-insensitive `R<positive integer>`. `current` uses only the explicitly
 injected ID, never the newest directory. `previous` is the highest safe direct
 ID below that explicit current ID (gaps are allowed); malformed evidence in that
 run is reported rather than skipped. `recent` returns metadata for at most five
 numeric-newest safe run directories and no log excerpts.
+
+`previous_day` is resolved from the injected runtime timezone and clock as the
+previous local calendar date, using `zoneinfo` calendar semantics across DST.
+It filters each model-safe log line by that line's timestamp, rather than by a
+Run's start date, so records from a Run spanning midnight are included and
+complete prior-day lines in the current active log are eligible. Overview
+aggregates category counts, run IDs, safe-line count, first 8 and last 16 lines
+across at most 20 safe Runs. Search returns at most 20 literal matches with Run
+ID and source line number. Both forms report `calendar_date`, `timezone`, and a
+truthful `truncated` flag.
 
 An overview returns validated metadata, category counts, and at most the first
 8 plus last 16 model-safe operational lines, deduplicated in source order.
