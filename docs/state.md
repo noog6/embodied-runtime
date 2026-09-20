@@ -40,13 +40,19 @@ slot.
 
 Finishing the current Task explicitly produces an allowed terminal Task snapshot
 and removes the binding; `stop_task()` uses this path to stop either a running or
-paused Task. Application shutdown only removes volatile ownership and any
-Task-bound ActiveGoal; it does not force a running or paused domain snapshot to a
-terminal state. Pause/resume/stop provide coordination at a safe application
+paused Task. The session-local `ResourceArbiter` is not `RuntimeState`, and its
+immutable exclusive lease handles are not durable Task state. A running current
+Task may hold zero or more leases under a `ResourceOwner` derived from its stable
+Task UUID. Pause releases every such lease, resume does not reacquire them, and
+terminal transitions release them before current ownership disappears.
+Application shutdown likewise releases Task leases and removes volatile ownership
+and any Task-bound ActiveGoal; it does not force a running or paused domain snapshot
+to a terminal state. Pause/resume/stop provide coordination at a safe application
 boundary only. They do not interrupt arbitrary code or in-flight hardware work,
-release resource leases, checkpoint progress, or persist it. Current ownership
-adds no executor, scheduler, resource arbitration, persistence, recovery, or
-autonomous work.
+checkpoint progress, or persist it. Resource acquisition is currently explicit,
+exclusive, synchronous, and fail-fast; current ownership adds no executor,
+scheduler, waiting policy, persistence, recovery, or autonomous work. Camera,
+body, and voice paths are not yet integrated with these leases.
 
 An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
 or persistent history. It is one transient delivery effect through an

@@ -11,6 +11,8 @@ from embodied_runtime.app import (
 from embodied_runtime.cognition import CognitionToolCall
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.resources import ResourceArbiter, ResourceKey, ResourceOwner
+from embodied_runtime.state import LifecycleState
 from embodied_runtime.tasks import Task, TaskGoal, TaskStatus
 from tests.test_platform import snapshot
 
@@ -18,6 +20,11 @@ from tests.test_platform import snapshot
 class StaticPlatform:
     def snapshot(self):
         return snapshot()
+
+
+class FailingReleaseArbiter(ResourceArbiter):
+    def release_all(self, owner: ResourceOwner):
+        raise RuntimeError("injected Task resource cleanup failure")
 
 
 class TaskCoordinationTests(unittest.IsolatedAsyncioTestCase):
@@ -414,6 +421,146 @@ class TaskCoordinationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(paused.status, TaskStatus.PAUSED)
         self.assertIsNone(app.current_task)
         self.assertIsNone(app.active_goal)
+
+    async def test_task_resource_acquisition_guards_and_stable_owner(self):
+        app = self.make_app()
+        camera = ResourceKey("camera")
+        with self.assertRaisesRegex(RuntimeError, "running application"):
+            app.acquire_task_resource(camera)
+        await app.start()
+        with self.assertRaisesRegex(RuntimeError, "no current Task"):
+            app.acquire_task_resource(camera)
+        running = app.start_task(Task("work"))
+        lease = app.acquire_task_resource(camera)
+        self.assertEqual(lease.owner, ResourceOwner("task", str(running.id)))
+        paused = app.pause_task()
+        with self.assertRaisesRegex(RuntimeError, "must be running"):
+            app.acquire_task_resource(camera)
+        self.assertEqual(paused.id, running.id)
+        await app.stop()
+
+    async def test_task_can_hold_and_explicitly_release_multiple_resources(self):
+        app = self.make_app()
+        await app.start()
+        app.start_task(Task("work"))
+        camera = app.acquire_task_resource(ResourceKey("camera"))
+        body = app.acquire_task_resource(ResourceKey("body"))
+        self.assertIs(app.resources.lease_for(camera.resource), camera)
+        self.assertIs(app.resources.lease_for(body.resource), body)
+        app.release_task_resource(camera)
+        self.assertIsNone(app.resources.lease_for(camera.resource))
+        self.assertIs(app.resources.lease_for(body.resource), body)
+        await app.stop()
+
+    async def test_task_cannot_release_another_semantic_owners_lease(self):
+        app = self.make_app()
+        await app.start()
+        app.start_task(Task("work"))
+        foreign = app.resources.acquire(
+            ResourceKey("camera"), ResourceOwner("runtime", "voice")
+        )
+        with self.assertRaisesRegex(RuntimeError, "not owned"):
+            app.release_task_resource(foreign)
+        self.assertIs(app.resources.lease_for(foreign.resource), foreign)
+        await app.stop()
+
+    async def test_pause_releases_resources_and_resume_does_not_reacquire(self):
+        app = self.make_app()
+        await app.start()
+        running = app.start_task(Task("work", goal=TaskGoal("finish")))
+        camera_key = ResourceKey("camera")
+        body_key = ResourceKey("body")
+        old_camera = app.acquire_task_resource(camera_key)
+        app.acquire_task_resource(body_key)
+
+        app.pause_task()
+        self.assertIsNone(app.resources.lease_for(camera_key))
+        self.assertIsNone(app.resources.lease_for(body_key))
+        resumed = app.resume_task()
+        self.assertEqual(resumed.id, running.id)
+        self.assertIsNone(app.resources.lease_for(camera_key))
+        new_camera = app.acquire_task_resource(camera_key)
+        self.assertIsNot(new_camera, old_camera)
+        await app.stop()
+
+    async def test_each_terminal_path_releases_all_task_resources(self):
+        for status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED):
+            with self.subTest(status=status):
+                app = self.make_app()
+                await app.start()
+                app.start_task(Task("work"))
+                key = ResourceKey("camera")
+                app.acquire_task_resource(key)
+                if status is TaskStatus.STOPPED:
+                    app.stop_task()
+                else:
+                    app.finish_task(status)
+                self.assertIsNone(app.resources.lease_for(key))
+                await app.stop()
+
+    async def test_shutdown_releases_running_resources_without_task_transition(self):
+        app = self.make_app()
+        await app.start()
+        running = app.start_task(Task("work"))
+        key = ResourceKey("camera")
+        app.acquire_task_resource(key)
+        await app.stop()
+        self.assertIs(running.status, TaskStatus.RUNNING)
+        self.assertIsNone(app.resources.lease_for(key))
+
+    async def test_shutdown_continues_and_reraises_task_cleanup_failure(self):
+        hardware = VirtualHardwareBackend()
+        app = RobotApplication(
+            RobotProfile("test", "Test"), hardware,
+            platform_provider=StaticPlatform(),
+            resource_arbiter=FailingReleaseArbiter(),
+        )
+        await app.start()
+        running = app.start_task(Task("work", goal=TaskGoal("finish")))
+        lease = app.acquire_task_resource(ResourceKey("camera"))
+        self.assertIs(app.current_task, running)
+        self.assertIsNotNone(app.active_goal)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "injected Task resource cleanup failure"
+        ):
+            await app.stop()
+
+        self.assertIs(app.state, LifecycleState.STOPPED)
+        self.assertFalse(hardware.is_running)
+        self.assertIs(running.status, TaskStatus.RUNNING)
+        self.assertIsNone(app.current_task)
+        self.assertIsNone(app.active_goal)
+        self.assertIsNone(app._active_goal_started_monotonic)
+        self.assertIs(app.resources.lease_for(lease.resource), lease)
+
+    async def test_paused_shutdown_has_no_resources(self):
+        app = self.make_app()
+        await app.start()
+        app.start_task(Task("work"))
+        key = ResourceKey("camera")
+        app.acquire_task_resource(key)
+        paused = app.pause_task()
+        await app.stop()
+        self.assertIs(paused.status, TaskStatus.PAUSED)
+        self.assertIsNone(app.resources.lease_for(key))
+
+    async def test_task_cleanup_preserves_generic_owner_lease(self):
+        resources = ResourceArbiter()
+        app = RobotApplication(
+            RobotProfile("test", "Test"), VirtualHardwareBackend(),
+            platform_provider=StaticPlatform(), resource_arbiter=resources,
+        )
+        await app.start()
+        app.start_task(Task("work"))
+        task_key = ResourceKey("camera")
+        other_key = ResourceKey("audio.microphone")
+        app.acquire_task_resource(task_key)
+        other = resources.acquire(other_key, ResourceOwner("runtime", "voice"))
+        app.pause_task()
+        self.assertIsNone(resources.lease_for(task_key))
+        self.assertIs(resources.lease_for(other_key), other)
+        await app.stop()
 
 
 if __name__ == "__main__":

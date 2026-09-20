@@ -81,9 +81,51 @@ Pause and stop are coordination boundaries, not arbitrary execution preemption.
 Work may continue for a Task only while its current application snapshot is
 running; future executors and capabilities must cooperatively observe that rule.
 The APIs do not cancel arbitrary `asyncio.Task` objects, interrupt Python or an
-in-flight hardware operation, unwind capabilities, checkpoint work, or release
-future resource leases. There is still no executor, scheduler, queue, resource
-arbiter, persistence, recovery, or Task lifecycle event publication.
+in-flight hardware operation, unwind capabilities, or checkpoint work. There is
+still no executor, scheduler, queue, persistence, recovery, or Task lifecycle
+event publication.
+
+## Runtime resource ownership
+
+`RobotApplication` owns one session-local `ResourceArbiter`. It is coordination
+machinery, not physical `RuntimeState`. A validated `ResourceKey` names a resource
+without establishing an exhaustive taxonomy, and a semantic `ResourceOwner`
+identifies the actor entitled to it. Task ownership is always derived from the
+stable Task UUID (`ResourceOwner("task", <UUID>)`), never a Task snapshot's Python
+identity, current position, or its session-local `ActiveGoal` ID.
+
+```text
+Task UUID -> ResourceOwner("task", UUID) -> ResourceArbiter
+                                               |       |
+                                            camera    body
+                                               |       |
+                                           Lease L1  Lease L2
+
+pause / terminal transition / shutdown -> release Task-owned leases
+resume                                -> no automatic reacquisition
+```
+
+Leases are immutable, identity-sensitive runtime handles rather than durable Task
+state. Arbitration is synchronous, in-process, exclusive-only, non-blocking, and
+fail-fast: it does not wait, queue, retry, preempt, steal, or implicitly reacquire
+a resource already held by the same owner. Exact active handles are required for
+release, so stale, fabricated, and already-released handles fail closed. The
+arbiter does not claim thread or cross-process synchronization and does not choose
+which actor should run next.
+
+Pausing a Task retains current Task ownership but releases all of its leases along
+with its active runtime intention. Resume creates the fresh `ActiveGoal` described
+above but restores no leases. Completion, failure, and stop release Task leases
+through the shared terminal cleanup path. Runtime shutdown also releases them
+before dropping volatile binding ownership, without semantically stopping or
+otherwise transitioning the externally held Task snapshot.
+
+No camera, body, voice, microphone, speaker, or hardware-bus path automatically
+acquires an arbiter lease yet. In particular, voice's local `asyncio.Lock` and
+provider-side thread lock remain implementation synchronization: those locks
+protect concurrent implementation access, while an arbiter lease expresses which
+semantic runtime owner is entitled to a capability. This phase does not unify or
+replace those mechanisms.
 
 These boundaries are intended to keep the reusable runtime independent of a
 specific robot or vendor backend. Interaction and cognition implementations
