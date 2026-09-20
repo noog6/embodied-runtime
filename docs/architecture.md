@@ -120,8 +120,8 @@ through the shared terminal cleanup path. Runtime shutdown also releases them
 before dropping volatile binding ownership, without semantically stopping or
 otherwise transitioning the externally held Task snapshot.
 
-Camera frame acquisition and normal application-owned speaker output are the
-first physical capabilities wired through the arbiter. One-shot captures acquire the canonical
+Camera frame acquisition and normal application-owned audio are physical
+capabilities wired through the arbiter. One-shot captures acquire the canonical
 `camera` resource under an explicit runtime or Task owner and release it
 immediately after physical capture. Interpretation never holds that lease, and
 contention fails without waiting or retry. Camera adapters remain unaware of
@@ -134,12 +134,19 @@ combines hosted synthesis and playback, the lease conservatively covers both; a
 split may follow only if measured contention justifies it. Providers remain
 unaware of `ResourceArbiter`.
 
-Body, microphone, and hardware-bus paths do not automatically acquire an arbiter
-lease yet. Voice's existing `_microphone_lock` remains implementation-level
-microphone synchronization between wake and session listening; speaker authority
-does not replace it. Provider-side thread locks likewise remain implementation
-synchronization rather than semantic entitlement. No waiting, priority, or
-preemption is implied.
+Microphone capture uses the canonical `audio.microphone` resource. A bounded
+session owns it as `runtime:voice` for the whole session, including thinking,
+speaking, and capture cleanup; each idle wake capture owns it as
+`runtime:voice_wake` until that exact capture has joined. The cooperative
+wake-to-session handoff releases the wake lease before acquiring the session
+lease. `stop_listening()` coordinates an already-owned capture and does not
+acquire a second lease. Capture and blocking cleanup must actually terminate
+before authority is released. Voice's `_microphone_lock` remains separate
+implementation/session coordination and is not replaced by semantic authority.
+Acquisition remains fail-fast and non-reentrant, with no queue, priority, or
+preemption; wake service retries independent attempts after a bounded backoff.
+Contention does not make the configured voice capability unavailable. Providers
+remain unaware of arbitration. Body and hardware-bus paths remain unintegrated.
 
 These boundaries are intended to keep the reusable runtime independent of a
 specific robot or vendor backend. Interaction and cognition implementations

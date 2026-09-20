@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, patch
 import wave
 
 from embodied_runtime.app import (
-    SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER,
+    MICROPHONE_RESOURCE, SPEAKER_RESOURCE, VOICE_MICROPHONE_OWNER,
+    VOICE_SPEAKER_OWNER, VOICE_WAKE_MICROPHONE_OWNER,
     SpeakerAuthorizedTextToSpeechProvider, SpeakerAuthorizedVoiceProvider,
 )
 from embodied_runtime.console import RuntimeConsole
@@ -453,6 +454,167 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             VoiceSessionPolicy(initial_timeout_seconds=0.01,
                                followup_timeout_seconds=0.01),
         )
+
+    def test_microphone_resource_and_semantic_owners_are_canonical(self):
+        self.assertEqual(MICROPHONE_RESOURCE, ResourceKey("audio.microphone"))
+        self.assertEqual(VOICE_MICROPHONE_OWNER, ResourceOwner("runtime", "voice"))
+        self.assertEqual(
+            VOICE_WAKE_MICROPHONE_OWNER, ResourceOwner("runtime", "voice_wake")
+        )
+
+    async def test_session_holds_exact_microphone_lease_while_thinking(self):
+        resources = ResourceArbiter()
+        provider = FakeVoiceProvider(["question", None])
+        thinking = asyncio.Event()
+        release = asyncio.Event()
+
+        async def cognition(text):
+            thinking.set()
+            await release.wait()
+            return "answer"
+
+        voice = VoiceInteraction(
+            provider, provider.tts, cognition, VoiceSessionPolicy(1, 1),
+            resources=resources,
+        )
+        session = asyncio.create_task(voice.start())
+        await thinking.wait()
+        lease = resources.lease_for(MICROPHONE_RESOURCE)
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease.owner, VOICE_MICROPHONE_OWNER)
+        release.set()
+        await session
+        self.assertIsNone(resources.lease_for(MICROPHONE_RESOURCE))
+
+    async def test_wake_capture_holds_and_releases_exact_microphone_lease(self):
+        resources = ResourceArbiter()
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), wake_words=["mira"],
+            resources=resources,
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        lease = resources.lease_for(MICROPHONE_RESOURCE)
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease.owner, VOICE_WAKE_MICROPHONE_OWNER)
+        stopping = asyncio.create_task(voice.stop())
+        await stopping
+        self.assertIsNone(resources.lease_for(MICROPHONE_RESOURCE))
+
+    async def test_manual_session_transfers_wake_authority_without_overlap(self):
+        resources = ResourceArbiter()
+        provider = CoordinatedVoiceProvider()
+        provider.stop_listening = AsyncMock(wraps=provider.stop_listening)
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(return_value="answer"),
+            VoiceSessionPolicy(1, 0.01), wake_words=["mira"], resources=resources,
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        wake_lease = resources.lease_for(MICROPHONE_RESOURCE)
+        self.assertEqual(wake_lease.owner, VOICE_WAKE_MICROPHONE_OWNER)
+        session = asyncio.create_task(voice.start(source="console"))
+        await provider.wait_for_listens(2)
+        provider.stop_listening.assert_awaited()
+        session_lease = resources.lease_for(MICROPHONE_RESOURCE)
+        self.assertEqual(session_lease.owner, VOICE_MICROPHONE_OWNER)
+        self.assertIsNot(session_lease, wake_lease)
+        await provider.feed(None)
+        await session
+        await voice.stop()
+
+    async def test_session_contention_fails_closed_without_capture_or_cleanup(self):
+        for owner in (ResourceOwner("runtime", "other"), VOICE_MICROPHONE_OWNER):
+            resources = ResourceArbiter()
+            foreign = resources.acquire(MICROPHONE_RESOURCE, owner)
+            provider = CoordinatedVoiceProvider()
+            provider.stop_listening = AsyncMock()
+            voice = VoiceInteraction(
+                provider, provider.tts, AsyncMock(), resources=resources
+            )
+            result = await voice.start()
+            self.assertEqual(
+                result, "Voice interaction failed: microphone resource is busy."
+            )
+            self.assertEqual(provider.listen_calls, 0)
+            provider.stop_listening.assert_not_awaited()
+            self.assertIs(resources.lease_for(MICROPHONE_RESOURCE), foreign)
+
+    async def test_contended_wake_service_does_not_authorize_session_stop(self):
+        for owner in (ResourceOwner("runtime", "other"), VOICE_MICROPHONE_OWNER):
+            resources = ResourceArbiter()
+            foreign = resources.acquire(MICROPHONE_RESOURCE, owner)
+            provider = CoordinatedVoiceProvider()
+            provider.stop_listening = AsyncMock(wraps=provider.stop_listening)
+            voice = VoiceInteraction(
+                provider, provider.tts, AsyncMock(), wake_words=["mira"],
+                resources=resources,
+            )
+            with patch(
+                "embodied_runtime.voice._WAKE_RESOURCE_BUSY_BACKOFF_SECONDS", 1
+            ):
+                voice.start_wake_listener()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertTrue(voice.wake_active)
+                self.assertIsNone(voice._wake_listen_task)
+                self.assertEqual(provider.listen_calls, 0)
+
+                result = await voice.start(source="console")
+
+                self.assertEqual(
+                    result,
+                    "Voice interaction failed: microphone resource is busy.",
+                )
+                provider.stop_listening.assert_not_awaited()
+                self.assertEqual(provider.listen_calls, 0)
+                self.assertIs(resources.lease_for(MICROPHONE_RESOURCE), foreign)
+                await voice.stop()
+            provider.stop_listening.assert_not_awaited()
+            self.assertFalse(voice.wake_active)
+            self.assertIs(resources.lease_for(MICROPHONE_RESOURCE), foreign)
+
+    async def test_wake_contention_retries_later_without_hot_spin(self):
+        resources = ResourceArbiter()
+        foreign = resources.acquire(
+            MICROPHONE_RESOURCE, ResourceOwner("runtime", "other")
+        )
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(), wake_words=["mira"],
+            resources=resources,
+        )
+        voice.start_wake_listener()
+        await asyncio.sleep(0.02)
+        self.assertEqual(provider.listen_calls, 0)
+        self.assertTrue(voice.wake_active)
+        self.assertIs(resources.lease_for(MICROPHONE_RESOURCE), foreign)
+        resources.release(foreign)
+        await provider.wait_for_listens(1)
+        self.assertEqual(
+            resources.lease_for(MICROPHONE_RESOURCE).owner,
+            VOICE_WAKE_MICROPHONE_OWNER,
+        )
+        await voice.stop()
+
+    def test_task_cleanup_and_microphone_cleanup_keep_resources_separate(self):
+        resources = ResourceArbiter()
+        microphone = resources.acquire(
+            MICROPHONE_RESOURCE, VOICE_MICROPHONE_OWNER
+        )
+        speaker = resources.acquire(
+            SPEAKER_RESOURCE, ResourceOwner("runtime", "notification")
+        )
+        task_owner = ResourceOwner(
+            "task", "00000000-0000-0000-0000-000000000042"
+        )
+        task_lease = resources.acquire(ResourceKey("body"), task_owner)
+        resources.release_all(task_owner)
+        self.assertIs(resources.lease_for(MICROPHONE_RESOURCE), microphone)
+        self.assertIsNone(resources.lease_for(task_lease.resource))
+        resources.release(microphone)
+        self.assertIs(resources.lease_for(SPEAKER_RESOURCE), speaker)
 
     def test_tts_selection_is_physical_and_preserves_all_providers(self):
         base = dict(voice_enabled=True, hardware="fusion-hat", piper_model="model",
@@ -1120,6 +1282,33 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await listen_task
 
         self.assertTrue(released.is_set())
+        self.assertTrue(completed.is_set())
+
+    async def test_fusion_stop_cancellation_waits_for_blocking_worker(self):
+        entered = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        class Vosk:
+            def stop_listening(self):
+                entered.set()
+                release.wait()
+                completed.set()
+
+        provider = FusionHatVoiceProvider()
+        provider._stt = Vosk()
+        stopping = asyncio.create_task(provider.stop_listening())
+        await asyncio.to_thread(entered.wait)
+        stopping.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(stopping.done())
+        stopping.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(stopping.done())
+        self.assertFalse(completed.is_set())
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await stopping
         self.assertTrue(completed.is_set())
 
     async def test_fusion_stop_during_initialization_skips_capture_and_is_not_sticky(self):
