@@ -180,6 +180,8 @@ class RuntimeConsole:
                 f"  action:        {outcome.action or 'none'}",
                 f"  action_status: {outcome.action_status or 'none'}",
                 f"  summary:       {outcome.summary or 'none'}",
+                f"  auto_continuation: {self._job_continuation_state()}",
+                f"  auto_steps:    {self._job_continuation_steps()}",
             )), False
         if lowered[:2] == ["camera", "capture"]:
             if len(words) != 3:
@@ -445,7 +447,19 @@ class RuntimeConsole:
             f"  run_status:    {binding.run.status.value}",
             f"  task_id:       {binding.task.id}",
             f"  task_status:   {binding.task.status.value}",
+            f"  auto_continuation:    {self._job_continuation_state()}",
+            f"  auto_steps_remaining: {self._job_continuation_steps()}",
         ))
+
+    def _job_continuation_state(self) -> str:
+        continuation = self._application.job_continuation
+        return "none" if continuation is None else continuation.state.value
+
+    def _job_continuation_steps(self) -> str:
+        continuation = self._application.job_continuation
+        return "0" if continuation is None else str(
+            continuation.automatic_steps_remaining
+        )
 
     def _runs(self) -> str:
         run_ids, older = discover_run_ids(self._history_root)

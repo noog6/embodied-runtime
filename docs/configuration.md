@@ -64,6 +64,9 @@ database_path = "../data/mira-memory.sqlite3"
 [jobs]
 enabled = true
 database_path = "../data/jobs.sqlite3"
+auto_continue = true
+heartbeat_seconds = 30
+max_auto_steps = 3
 ```
 
 `hardware`, `camera`, and `cognition` accept the same values as their existing
@@ -193,8 +196,12 @@ the database's parent directory only when enabled. See
 
 # Jobs
 
-The optional `[jobs]` table independently accepts `enabled` (boolean) and
-`database_path` (string). Jobs are disabled when absent or explicitly false;
-enabling them requires a non-empty path. Relative paths resolve from the TOML
-file's directory. Persistent memory need not be enabled. See
+The optional `[jobs]` table accepts `enabled` (boolean), `database_path`
+(string), `auto_continue` (boolean), positive numeric `heartbeat_seconds`, and
+positive integer `max_auto_steps` (booleans are not integers here). Jobs and
+automatic continuation default off; the continuation timing and budget defaults
+are `30.0` seconds and `3`. Enabling Jobs requires a non-empty path. Relative
+paths resolve from the TOML file's directory. The continuation settings only
+govern another bounded turn for an explicitly started current JobRun; they do
+not schedule or recover Jobs. Persistent memory need not be enabled. See
 [`jobs.md`](jobs.md) for catalog, assignment, and lifecycle semantics.

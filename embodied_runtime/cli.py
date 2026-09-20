@@ -250,6 +250,9 @@ def parse_launch_arguments(
     args.memory_database_path = effective.memory_database_path
     args.jobs_enabled = effective.jobs_enabled
     args.jobs_database_path = effective.jobs_database_path
+    args.jobs_auto_continue = effective.jobs_auto_continue
+    args.jobs_heartbeat_seconds = effective.jobs_heartbeat_seconds
+    args.jobs_max_auto_steps = effective.jobs_max_auto_steps
     return parser, args, effective
 
 
@@ -465,7 +468,10 @@ async def _run_application(
                                               initiative_actions_enabled=args.initiative_actions,
                                               initiative_messages_enabled=args.initiative_messages,
                                               initiative_continuation_enabled=args.initiative_continuation,
-                                              initiative_goal_closure_enabled=args.initiative_goal_closure),
+                                              initiative_goal_closure_enabled=args.initiative_goal_closure,
+                                              jobs_auto_continue=args.jobs_auto_continue,
+                                              jobs_heartbeat_seconds=args.jobs_heartbeat_seconds,
+                                              jobs_max_auto_steps=args.jobs_max_auto_steps),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
         camera_backend=camera,

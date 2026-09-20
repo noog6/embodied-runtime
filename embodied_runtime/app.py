@@ -54,7 +54,8 @@ from embodied_runtime.interaction import (
     resolve_notification_route,
 )
 from embodied_runtime.jobs import (
-    Job, JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
+    Job, JobContinuation, JobContinuationController, JobContinuationState,
+    JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
 )
 from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
 from embodied_runtime.memory import (
@@ -510,6 +511,9 @@ class ApplicationOptions:
     initiative_messages_enabled: bool = False
     initiative_continuation_enabled: bool = False
     initiative_goal_closure_enabled: bool = False
+    jobs_auto_continue: bool = False
+    jobs_heartbeat_seconds: float = 30.0
+    jobs_max_auto_steps: int = 3
 
 
 @dataclass(frozen=True)
@@ -573,6 +577,7 @@ class RobotApplication:
         self_inspector: SelfInspector | None = None,
         visual_perception_backend: VisualPerceptionBackend | None = None,
         temporal_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        job_continuation_sleep: Callable[[float], Awaitable[None]] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
         voice_provider: VoiceProvider | None = None,
         text_to_speech_provider: TextToSpeechProvider | None = None,
@@ -600,6 +605,7 @@ class RobotApplication:
         self._cognition_backend = cognition_backend
         self._active_operator_cognition_task: asyncio.Task[object] | None = None
         self._active_job_work_task: asyncio.Task[object] | None = None
+        self._job_continuation: JobContinuation | None = None
         self._operator_message_sink = operator_message_sink
         self._operator_delivery_routes = (
             operator_delivery_routes or OperatorDeliveryRouteCatalog()
@@ -667,6 +673,14 @@ class RobotApplication:
             monotonic_clock=self._monotonic,
         )
         self.episode_coordinator = AttentionEpisodeCoordinator(self._monotonic)
+        self._job_continuation_controller = (
+            JobContinuationController(
+                self.options.jobs_heartbeat_seconds,
+                self._offer_job_continuation,
+                sleep=job_continuation_sleep or temporal_sleep,
+            )
+            if self.jobs is not None and self.options.jobs_auto_continue else None
+        )
         self.attention = GoalAttentionController(
             enabled=self.options.initiative_enabled,
             platform_attention_enabled=self.options.initiative_platform_attention_enabled,
@@ -702,6 +716,15 @@ class RobotApplication:
     def current_job_run(self) -> CurrentJobRun | None:
         """Return the current volatile JobRun association, if one exists."""
         return self._current_job_run
+
+    @property
+    def job_continuation(self) -> JobContinuation | None:
+        """Return the current session-local automatic continuation diagnostic."""
+        return self._job_continuation
+
+    @property
+    def job_continuation_controller(self) -> JobContinuationController | None:
+        return self._job_continuation_controller
 
     def start_job_run(self, job_id: int) -> CurrentJobRun:
         """Explicitly start one durable Job occurrence through Task coordination."""
@@ -797,6 +820,7 @@ class RobotApplication:
         binding = self._current_job_run
         if binding is None:
             raise RuntimeError("no current JobRun")
+        self._clear_job_continuation(status.value)
         task_status = TaskStatus(status.value)
         task = binding.task
         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED):
@@ -831,19 +855,42 @@ class RobotApplication:
 
     async def work_current_job_once(self) -> JobWorkOutcome:
         """Perform one explicitly requested, finite episode for the current JobRun."""
-        binding, task_binding, goal = self._validate_job_work_preconditions()
-        episode = self.episode_coordinator.try_start(
-            "job_run", f"JOB{binding.job.id}/RUN{binding.run.id}",
-            f"Perform one bounded work episode for JOB{binding.job.id}/RUN{binding.run.id}",
-            goal.id,
+        # An explicit request supersedes any old automatic grant. Its result alone
+        # decides whether a fresh grant is created.
+        if self._active_job_work_task is not None:
+            raise RuntimeError("another Job work episode is already active")
+        self._job_continuation = None
+        try:
+            outcome = await self._work_current_job_once("manual")
+        except asyncio.CancelledError:
+            self._set_job_continuation_awaiting_operator()
+            raise
+        if outcome.disposition is JobWorkDisposition.CONTINUE:
+            self._arm_job_continuation(outcome)
+        return outcome
+
+    async def _work_current_job_once(
+        self,
+        invocation: str,
+        *,
+        prepared: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
+        episode: AttentionEpisode | None = None,
+    ) -> JobWorkOutcome:
+        """Shared one-shot executor for manual and heartbeat work."""
+        binding, task_binding, goal = (
+            self._validate_job_work_preconditions() if prepared is None else prepared
         )
         if episode is None:
-            raise RuntimeError("another attention episode is already active or an operator is waiting")
+            episode = self._try_start_job_work_episode(binding, goal)
+            if episode is None:
+                raise RuntimeError(
+                    "another attention episode is already active or an operator is waiting"
+                )
         current_async_task = asyncio.current_task()
         if current_async_task is None:
             self.episode_coordinator.close(episode, "error")
             raise RuntimeError("Job work requires an asyncio task")
-        if self._active_job_work_task is not None:
+        if self._active_job_work_task not in (None, current_async_task):
             self.episode_coordinator.close(episode, "error")
             raise RuntimeError("another Job work episode is already active")
         self._active_job_work_task = current_async_task
@@ -866,8 +913,8 @@ class RobotApplication:
                 ),
             )
         ))
-        LOGGER.info("[JOBS] job=JOB%s run=RUN%s episode=E%s work=started",
-                    binding.job.id, binding.run.id, episode.id)
+        LOGGER.info("[JOBS] job=JOB%s run=RUN%s episode=E%s work=started source=%s",
+                    binding.job.id, binding.run.id, episode.id, invocation)
         reason: EpisodeCompletionReason = "error"
         try:
             initiative = await self._request_initiative(
@@ -907,6 +954,174 @@ class RobotApplication:
             finally:
                 if self._active_job_work_task is current_async_task:
                     self._active_job_work_task = None
+
+    def _arm_job_continuation(self, outcome: JobWorkOutcome) -> None:
+        if not self.options.jobs_auto_continue or self.jobs is None:
+            self._job_continuation = None
+            return
+        current = self._current_job_run
+        if current is None or current.run.id != outcome.run_id:
+            return
+        self._job_continuation = JobContinuation(
+            outcome.job_id, outcome.run_id, outcome.task_id,
+            JobContinuationState.ARMED, self.options.jobs_max_auto_steps,
+            outcome.summary,
+        )
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s continuation=armed remaining=%s source=manual",
+            outcome.job_id, outcome.run_id, self.options.jobs_max_auto_steps,
+        )
+
+    def _set_job_continuation_awaiting_operator(self) -> None:
+        continuation = self._job_continuation
+        if continuation is not None:
+            self._job_continuation = replace(
+                continuation, state=JobContinuationState.AWAITING_OPERATOR,
+            )
+
+    def _clear_job_continuation(self, reason: str) -> None:
+        continuation = self._job_continuation
+        if continuation is None:
+            return
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s continuation=cleared reason=%s",
+            continuation.job_id, continuation.run_id, reason,
+        )
+        self._job_continuation = None
+
+    def _try_start_job_work_episode(
+        self, binding: CurrentJobRun, goal: ActiveGoal,
+    ) -> AttentionEpisode | None:
+        """Atomically claim the attention grant for one bounded Job episode."""
+        return self.episode_coordinator.try_start(
+            "job_run", f"JOB{binding.job.id}/RUN{binding.run.id}",
+            f"Perform one bounded work episode for JOB{binding.job.id}/RUN{binding.run.id}",
+            goal.id,
+        )
+
+    def _offer_job_continuation(self) -> None:
+        """Validate and schedule at most one separately owned automatic episode."""
+        continuation = self._job_continuation
+        if continuation is None or continuation.state is not JobContinuationState.ARMED:
+            return
+        if self.state is not LifecycleState.RUNNING or self.jobs is None \
+                or not self.options.jobs_auto_continue:
+            return
+        current = self._current_job_run
+        task_binding = self._current_task_binding
+        if (current is None or current.job.id != continuation.job_id
+                or current.run.id != continuation.run_id
+                or current.run.status is not JobRunStatus.RUNNING
+                or current.task.id != continuation.task_id
+                or task_binding is None
+                or task_binding.task.id != continuation.task_id):
+            self._clear_job_continuation("binding_changed")
+            return
+        if current.task.status is TaskStatus.PAUSED:
+            self._log_job_continuation_deferred(continuation, "task_paused")
+            return
+        if (current.task.status is not TaskStatus.RUNNING
+                or task_binding.active_goal is None
+                or self._active_goal is not task_binding.active_goal):
+            self._clear_job_continuation("binding_changed")
+            return
+        if self._active_job_work_task is not None:
+            self._log_job_continuation_deferred(continuation, "work_active")
+            return
+        if self.episode_coordinator.operator_waiting:
+            self._log_job_continuation_deferred(continuation, "operator_waiting")
+            return
+        if self.episode_coordinator.current is not None:
+            self._log_job_continuation_deferred(continuation, "attention_busy")
+            return
+        if continuation.automatic_steps_remaining <= 0:
+            self._job_continuation = replace(
+                continuation, state=JobContinuationState.AWAITING_OPERATOR,
+            )
+            return
+        # The attention claim is the acceptance boundary. Nothing is charged until
+        # this synchronous single-flight operation succeeds; a contender that wins
+        # after the preliminary checks therefore remains an ordinary deferral.
+        episode = self._try_start_job_work_episode(current, task_binding.active_goal)
+        if episode is None:
+            reason = (
+                "operator_waiting"
+                if self.episode_coordinator.operator_waiting
+                else "attention_busy"
+            )
+            self._log_job_continuation_deferred(continuation, reason)
+            return
+        remaining = continuation.automatic_steps_remaining - 1
+        self._job_continuation = replace(
+            continuation, automatic_steps_remaining=remaining,
+        )
+        task = asyncio.create_task(
+            self._run_automatic_job_work(
+                (current, task_binding, task_binding.active_goal), episode,
+            ),
+            name="job-continuation-work",
+        )
+        self._active_job_work_task = task
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s continuation=accepted remaining=%s source=heartbeat",
+            continuation.job_id, continuation.run_id, remaining,
+        )
+
+    def _log_job_continuation_deferred(
+        self, continuation: JobContinuation, reason: str,
+    ) -> None:
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s continuation=deferred reason=%s",
+            continuation.job_id, continuation.run_id, reason,
+        )
+
+    async def _run_automatic_job_work(
+        self,
+        prepared: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal],
+        episode: AttentionEpisode,
+    ) -> None:
+        continuation = self._job_continuation
+        binding, task_binding, goal = prepared
+        if continuation is None or not self._job_work_binding_matches(
+            binding, task_binding, goal,
+        ):
+            self.episode_coordinator.close(episode, "stale_goal")
+            if self._active_job_work_task is asyncio.current_task():
+                self._active_job_work_task = None
+            return
+        try:
+            outcome = await self._work_current_job_once(
+                "heartbeat", prepared=prepared, episode=episode,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            current = self._job_continuation
+            if current is not None:
+                self._job_continuation = replace(
+                    current, state=JobContinuationState.AWAITING_OPERATOR,
+                )
+                LOGGER.warning(
+                    "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator reason=work_error",
+                    current.job_id, current.run_id,
+                )
+            return
+        if outcome.disposition is not JobWorkDisposition.CONTINUE:
+            return
+        current = self._job_continuation
+        if current is None:
+            return
+        if current.automatic_steps_remaining == 0:
+            self._job_continuation = replace(
+                current, state=JobContinuationState.AWAITING_OPERATOR,
+                last_summary=outcome.summary,
+            )
+            LOGGER.info(
+                "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator reason=budget_exhausted",
+                current.job_id, current.run_id,
+            )
+        else:
+            self._job_continuation = replace(current, last_summary=outcome.summary)
 
     async def _finish_job_work_episode(
         self, episode: AttentionEpisode, reason: EpisodeCompletionReason,
@@ -1207,6 +1422,10 @@ class RobotApplication:
         if binding is None:
             raise RuntimeError("no current Task exists")
 
+        continuation = self._job_continuation
+        if continuation is not None and continuation.task_id == binding.task.id:
+            self._clear_job_continuation(f"task_{status.value}")
+
         terminal = binding.task.transition_to(status)
         self._refresh_current_job_task(terminal)
         self._release_current_task_binding(binding)
@@ -1450,6 +1669,13 @@ class RobotApplication:
         await self.events.publish(ApplicationStarted(source="application"))
         self._platform_monitor.start()
         self.voice.start_wake_listener()
+        if self._job_continuation_controller is not None:
+            self._job_continuation_controller.start()
+            LOGGER.info(
+                "[JOBS] continuation=ready heartbeat_s=%s max_auto_steps=%s",
+                self.options.jobs_heartbeat_seconds,
+                self.options.jobs_max_auto_steps,
+            )
         LOGGER.info(
             "[PULSE] monitor=platform interval_s=%s heartbeat_s=%s status=ready",
             str(self._platform_monitor.policy.interval_seconds),
@@ -1463,6 +1689,11 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.STOPPING)
         LOGGER.info("[APP] stopping")
         failure: BaseException | None = None
+        if self._job_continuation_controller is not None:
+            try:
+                await self._job_continuation_controller.stop()
+            except BaseException as error:
+                failure = error
         try:
             await self.voice.stop()
         except BaseException as error:
@@ -1475,6 +1706,7 @@ class RobotApplication:
             await self._stop_job_work()
         except BaseException as error:
             failure = failure or error
+        self._clear_job_continuation("shutdown")
         try:
             await self.temporal.stop()
         except BaseException as error:
@@ -1560,6 +1792,8 @@ class RobotApplication:
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        if self._active_job_work_task is task:
+            self._active_job_work_task = None
 
     def _close_job_store(self) -> None:
         """Close Job persistence without changing any durable run state."""

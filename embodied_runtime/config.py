@@ -58,6 +58,9 @@ class MemoryFileConfig:
 class JobsFileConfig:
     enabled: bool = False
     database_path: Path | None = None
+    auto_continue: bool = False
+    heartbeat_seconds: float = 30.0
+    max_auto_steps: int = 3
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,9 @@ class LaunchConfiguration:
     memory_database_path: Path | None
     jobs_enabled: bool
     jobs_database_path: Path | None
+    jobs_auto_continue: bool
+    jobs_heartbeat_seconds: float
+    jobs_max_auto_steps: int
 
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
@@ -119,7 +125,8 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     voice_initial_timeout_seconds=18.0,
     voice_followup_timeout_seconds=10.0,
     memory_enabled=False, memory_database_path=None,
-    jobs_enabled=False, jobs_database_path=None,
+    jobs_enabled=False, jobs_database_path=None, jobs_auto_continue=False,
+    jobs_heartbeat_seconds=30.0, jobs_max_auto_steps=3,
 )
 
 _RUNTIME_KEYS = {
@@ -136,7 +143,10 @@ _VOICE_KEYS = {
     "elevenlabs_tts_model", "elevenlabs_tts_voice_id", "elevenlabs_tts_speed",
 }
 _MEMORY_KEYS = {"enabled", "database_path"}
-_JOBS_KEYS = {"enabled", "database_path"}
+_JOBS_KEYS = {
+    "enabled", "database_path", "auto_continue", "heartbeat_seconds",
+    "max_auto_steps",
+}
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
     "runtime.camera": {"none", "picamera2"},
@@ -192,6 +202,17 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         raise ConfigurationError("jobs.enabled must be boolean")
     if "database_path" in jobs and not isinstance(jobs["database_path"], str):
         raise ConfigurationError("jobs.database_path must be a string")
+    if "auto_continue" in jobs and not isinstance(jobs["auto_continue"], bool):
+        raise ConfigurationError("jobs.auto_continue must be boolean")
+    heartbeat_seconds = jobs.get("heartbeat_seconds", 30.0)
+    if (isinstance(heartbeat_seconds, bool)
+            or not isinstance(heartbeat_seconds, (int, float))
+            or not math.isfinite(heartbeat_seconds) or heartbeat_seconds <= 0):
+        raise ConfigurationError("jobs.heartbeat_seconds must be a positive number")
+    max_auto_steps = jobs.get("max_auto_steps", 3)
+    if (isinstance(max_auto_steps, bool) or not isinstance(max_auto_steps, int)
+            or max_auto_steps <= 0):
+        raise ConfigurationError("jobs.max_auto_steps must be a positive integer")
     jobs_enabled = jobs.get("enabled", False)
     jobs_configured_path = jobs.get("database_path")
     if jobs_enabled and (jobs_configured_path is None or not jobs_configured_path.strip()):
@@ -275,7 +296,10 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     return RuntimeFileConfiguration(
         RuntimeFileConfig(**runtime), InitiativeFileConfig(**initiative),
         VoiceFileConfig(**voice), MemoryFileConfig(memory_enabled, database_path),
-        JobsFileConfig(jobs_enabled, jobs_database_path),
+        JobsFileConfig(
+            jobs_enabled, jobs_database_path, jobs.get("auto_continue", False),
+            float(heartbeat_seconds), max_auto_steps,
+        ),
     )
 
 
@@ -354,6 +378,9 @@ def resolve_launch_configuration(
         memory_database_path=memory.database_path if memory.enabled else None,
         jobs_enabled=jobs.enabled,
         jobs_database_path=jobs.database_path if jobs.enabled else None,
+        jobs_auto_continue=jobs.auto_continue,
+        jobs_heartbeat_seconds=jobs.heartbeat_seconds,
+        jobs_max_auto_steps=jobs.max_auto_steps,
     )
 
 

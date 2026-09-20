@@ -109,9 +109,43 @@ commit leaves the durable run unchanged.
 The `schedule_followup` capability is omitted from the initial decision,
 post-acquisition decisions, and effect continuation for Job work. Other
 capabilities retain their normal configuration and availability checks.
-`continue` does **not** schedule another work episode: another episode occurs
-only after another explicit `job work` invocation. There is no automatic loop,
-retry, Job scheduler, startup scan, or Job-owned resource authority.
+`continue` never recursively schedules another work episode and the one-shot
+executor always returns to the runtime. With automatic continuation disabled
+(the default), another episode occurs only after another explicit `job work`
+invocation. There is no Job-owned resource authority.
+
+## Cooperative closed-loop continuation
+
+Phase 4 optionally gives the exact, explicitly started current JobRun another
+bounded work opportunity on a runtime heartbeat. This is closed-loop
+continuation, not Job scheduling: scheduling would decide when to start a new
+JobRun, while continuation only offers another turn to the already-bound
+JobRun/Task. A manual `continue` arms a volatile grant of `max_auto_steps`.
+Each accepted heartbeat consumes one step and schedules one separately owned,
+finite invocation of the same Job executor. A further `continue` yields fully
+before the next heartbeat; there is no cognition-owned or recursive loop.
+The automatic step is accepted, and its budget charged, only after the shared
+attention coordinator grants the Job episode. Losing that claim to an operator
+or another episode is a deferral and leaves the grant unchanged.
+
+The volatile record binds Job ID, JobRun ID, and Task UUID, and records
+`armed` or `awaiting_operator`, the remaining step count, and last summary. It
+does not bind the ActiveGoal, so a paused Task retains the grant and a resumed
+Task can proceed using its fresh, exact Task-owned ActiveGoal. Paused Tasks,
+operator waiters, and another active attention episode defer without consuming
+a step. Operator attention wins before automatic work starts; an already-started
+finite episode is not preempted.
+
+Budget exhaustion leaves the Task and JobRun running in `awaiting_operator`;
+an explicit `job work` can grant a fresh burst. An automatic provider failure
+also moves to `awaiting_operator` and is not automatically retried. Terminal
+Job operations clear the record.
+
+Continuation is session-local, volatile, heartbeat-driven, bounded,
+operator-fair, and non-recovering. The heartbeat neither scans durable running
+rows nor discovers or starts enabled Jobs. Restart does not resume work, and
+there are no execution claims, multi-runtime adoption, or persistent
+continuation records.
 
 While a Task is paused, its JobRun remains `running`. Existing Task behavior
 releases Task-owned resources and suspends its ActiveGoal; resume creates a
@@ -151,9 +185,14 @@ and memory can each be enabled or disabled independently.
 [jobs]
 enabled = true
 database_path = "data/jobs.sqlite3"
+auto_continue = true
+heartbeat_seconds = 30
+max_auto_steps = 3
 ```
 
-Shutdown releases the current Task's volatile ActiveGoal and resources, then
+Shutdown first stops the continuation heartbeat, cancels and joins in-flight
+Job work, and clears continuation. It then releases the current Task's volatile
+ActiveGoal and resources, and
 clears both Task and JobRun bindings before closing the store. It does not
 invent semantic completion: a durable running occurrence remains running. On
 restart it remains visible through `job runs`, while `current_job_run` and
@@ -164,9 +203,7 @@ JOB<n>`. Definition commands are `job add`, `job enable`, and `job disable`.
 Runtime coordination commands are `job start`, asynchronous `job work`, `job
 current`, `job complete`, `job fail`, and `job stop`.
 
-Shutdown cancels and joins an in-flight bounded Job episode before releasing the
-Task's volatile goal/resources and detaching the Job binding. It does not mark
-the durable run failed; the occurrence remains `running`, with the same Phase 2
-restart semantics. Scheduling, timers, Job-owned resources, retries,
-body/runtime registries, target matching, distributed coordination, claims, and
-restart recovery remain future work.
+It does not mark the durable run failed; the occurrence remains `running`, with
+the same restart semantics. Cron, new-Job scheduling, Job-owned resources,
+unbounded retries, body/runtime registries, target matching, distributed
+coordination, claims, and restart recovery remain future work.

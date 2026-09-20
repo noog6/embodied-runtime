@@ -31,3 +31,10 @@ goal_closure = true
 [memory]
 enabled = true
 database_path = "../data/mira-memory.sqlite3"
+
+[jobs]
+enabled = true
+database_path = "../data/jobs.sqlite3"
+auto_continue = true
+heartbeat_seconds = 30
+max_auto_steps = 3

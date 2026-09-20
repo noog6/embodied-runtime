@@ -67,6 +67,9 @@ class ConfigurationTests(unittest.TestCase):
                 "timezone": "America/Toronto",
                 "memory_enabled": True,
                 "memory_database_path": Path("data/mira-memory.sqlite3").resolve(),
+                "jobs_enabled": True,
+                "jobs_database_path": Path("data/jobs.sqlite3").resolve(),
+                "jobs_auto_continue": True,
             }),
         )
 
@@ -94,6 +97,30 @@ class ConfigurationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ConfigurationError, "jobs.database_path"):
             load_runtime_config(self.write("[jobs]\nenabled=true\n"))
+
+    def test_jobs_continuation_defaults_and_validation(self):
+        self.assertFalse(HISTORICAL_DEFAULTS.jobs_auto_continue)
+        self.assertEqual(HISTORICAL_DEFAULTS.jobs_heartbeat_seconds, 30.0)
+        self.assertEqual(HISTORICAL_DEFAULTS.jobs_max_auto_steps, 3)
+        effective = self.effective(
+            "[jobs]\nenabled=true\ndatabase_path='jobs.db'\n"
+            "auto_continue=true\nheartbeat_seconds=2.5\nmax_auto_steps=4\n"
+        )
+        self.assertTrue(effective.jobs_auto_continue)
+        self.assertEqual(effective.jobs_heartbeat_seconds, 2.5)
+        self.assertEqual(effective.jobs_max_auto_steps, 4)
+        for value in ("0", "-1", "false"):
+            with self.subTest(heartbeat=value), self.assertRaisesRegex(
+                ConfigurationError, "heartbeat_seconds"
+            ):
+                load_runtime_config(self.write(
+                    f"[jobs]\nheartbeat_seconds={value}\n"
+                ))
+        for value in ("0", "-1", "true", "1.5"):
+            with self.subTest(steps=value), self.assertRaisesRegex(
+                ConfigurationError, "max_auto_steps"
+            ):
+                load_runtime_config(self.write(f"[jobs]\nmax_auto_steps={value}\n"))
 
     def test_job_store_builder_is_independent(self):
         with tempfile.TemporaryDirectory() as temporary:
