@@ -9,8 +9,15 @@ import unittest
 from unittest.mock import AsyncMock, patch
 import wave
 
+from embodied_runtime.app import (
+    SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER,
+    SpeakerAuthorizedTextToSpeechProvider, SpeakerAuthorizedVoiceProvider,
+)
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.cli import build_text_to_speech_provider
+from embodied_runtime.resources import (
+    ResourceArbiter, ResourceBusyError, ResourceKey, ResourceOwner,
+)
 from embodied_runtime.voice import (
     FusionHatElevenLabsTTSProvider, FusionHatEspeakTTSProvider,
     FusionHatOpenAITTSProvider,
@@ -152,6 +159,291 @@ class LostFirstStopVoiceProvider:
 
     async def close(self):
         pass
+
+
+class SpeakerAuthorityTests(unittest.IsolatedAsyncioTestCase):
+    class BlockingTTS:
+        def __init__(self, error=None):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
+            self.close_calls = 0
+            self.error = error
+
+        async def speak(self, text):
+            self.calls += 1
+            self.entered.set()
+            if self.error is not None:
+                raise self.error
+            await self.release.wait()
+
+        async def close(self):
+            self.close_calls += 1
+
+    class BlockingVoice:
+        def __init__(self, error=None):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.cue_calls = 0
+            self.error = error
+
+        async def listen(self): return None
+        async def stop_listening(self): pass
+        async def close(self): pass
+
+        async def play_engagement_cue(self):
+            self.cue_calls += 1
+            self.entered.set()
+            if self.error is not None:
+                raise self.error
+            await self.release.wait()
+
+    async def assert_blocking_speaker_worker_retains_lease(
+        self, operation, entered, release, finished
+    ):
+        resources = ResourceArbiter()
+        task = asyncio.create_task(operation(resources))
+        await asyncio.to_thread(entered.wait)
+
+        lease = resources.lease_for(SPEAKER_RESOURCE)
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease.owner, VOICE_SPEAKER_OWNER)
+
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        self.assertIs(resources.lease_for(SPEAKER_RESOURCE), lease)
+        foreign_owner = ResourceOwner("runtime", "notification")
+        with self.assertRaises(ResourceBusyError):
+            resources.acquire(SPEAKER_RESOURCE, foreign_owner)
+
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        self.assertIs(resources.lease_for(SPEAKER_RESOURCE), lease)
+
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(finished.is_set())
+        self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+        next_lease = resources.acquire(SPEAKER_RESOURCE, foreign_owner)
+        resources.release(next_lease)
+
+    async def test_cancelled_cue_keeps_lease_until_physical_worker_exits(self):
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        calls = []
+
+        def run(*args, **kwargs):
+            entered.set()
+            try:
+                release.wait()
+            finally:
+                finished.set()
+
+        fusion_hat = ModuleType("fusion_hat")
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append("enable")
+        device.disable_speaker = lambda: calls.append("disable")
+
+        async def operation(resources):
+            provider = SpeakerAuthorizedVoiceProvider(
+                FusionHatVoiceProvider(), resources
+            )
+            await provider.play_engagement_cue()
+
+        with patch.dict(sys.modules, {
+            "fusion_hat": fusion_hat, "fusion_hat.device": device,
+        }), patch("embodied_runtime.voice.subprocess.run", side_effect=run):
+            await self.assert_blocking_speaker_worker_retains_lease(
+                operation, entered, release, finished
+            )
+
+        self.assertEqual(calls, ["enable", "disable"])
+
+    async def test_cancelled_espeak_keeps_lease_until_speech_worker_exits(self):
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        calls = []
+
+        class Espeak:
+            def say(self, text):
+                entered.set()
+                try:
+                    release.wait()
+                finally:
+                    finished.set()
+
+        fusion_hat = ModuleType("fusion_hat")
+        tts = ModuleType("fusion_hat.tts")
+        tts.Espeak = Espeak
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append("enable")
+        device.disable_speaker = lambda: calls.append("disable")
+
+        async def operation(resources):
+            provider = SpeakerAuthorizedTextToSpeechProvider(
+                FusionHatEspeakTTSProvider(), resources
+            )
+            await provider.speak("hello")
+
+        with patch.dict(sys.modules, {
+            "fusion_hat": fusion_hat, "fusion_hat.tts": tts,
+            "fusion_hat.device": device,
+        }):
+            await self.assert_blocking_speaker_worker_retains_lease(
+                operation, entered, release, finished
+            )
+
+        self.assertEqual(calls, ["enable", "disable"])
+
+    async def test_cancelled_tts_cleanup_keeps_lease_until_worker_exits(self):
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def disable_speaker():
+            entered.set()
+            try:
+                release.wait()
+            finally:
+                finished.set()
+
+        fusion_hat = ModuleType("fusion_hat")
+        device = ModuleType("fusion_hat.device")
+        device.disable_speaker = disable_speaker
+
+        async def operation(resources):
+            provider = SpeakerAuthorizedTextToSpeechProvider(
+                FusionHatEspeakTTSProvider(), resources
+            )
+            await provider.close()
+
+        with patch.dict(sys.modules, {
+            "fusion_hat": fusion_hat, "fusion_hat.device": device,
+        }):
+            await self.assert_blocking_speaker_worker_retains_lease(
+                operation, entered, release, finished
+            )
+
+    async def test_tts_holds_canonical_lease_until_successful_speech_finishes(self):
+        resources = ResourceArbiter()
+        provider = self.BlockingTTS()
+        authorized = SpeakerAuthorizedTextToSpeechProvider(provider, resources)
+        operation = asyncio.create_task(authorized.speak("hello"))
+        await provider.entered.wait()
+        lease = resources.lease_for(SPEAKER_RESOURCE)
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease.owner, VOICE_SPEAKER_OWNER)
+        provider.release.set()
+        await operation
+        self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+
+    async def test_engagement_cue_holds_same_lease_until_playback_finishes(self):
+        resources = ResourceArbiter()
+        provider = self.BlockingVoice()
+        authorized = SpeakerAuthorizedVoiceProvider(provider, resources)
+        operation = asyncio.create_task(authorized.play_engagement_cue())
+        await provider.entered.wait()
+        lease = resources.lease_for(SPEAKER_RESOURCE)
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease.owner, VOICE_SPEAKER_OWNER)
+        provider.release.set()
+        await operation
+        self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+
+    async def test_foreign_lease_prevents_tts_without_retry_or_release(self):
+        resources = ResourceArbiter()
+        foreign = resources.acquire(
+            SPEAKER_RESOURCE, ResourceOwner("runtime", "notification")
+        )
+        provider = self.BlockingTTS()
+        authorized = SpeakerAuthorizedTextToSpeechProvider(provider, resources)
+        with self.assertRaises(ResourceBusyError):
+            await authorized.speak("hello")
+        self.assertEqual(provider.calls, 0)
+        self.assertIs(resources.lease_for(SPEAKER_RESOURCE), foreign)
+
+    async def test_foreign_lease_prevents_cue_without_retry_or_release(self):
+        resources = ResourceArbiter()
+        foreign = resources.acquire(
+            SPEAKER_RESOURCE, ResourceOwner("runtime", "notification")
+        )
+        provider = self.BlockingVoice()
+        authorized = SpeakerAuthorizedVoiceProvider(provider, resources)
+        with self.assertRaises(ResourceBusyError):
+            await authorized.play_engagement_cue()
+        self.assertEqual(provider.cue_calls, 0)
+        self.assertIs(resources.lease_for(SPEAKER_RESOURCE), foreign)
+
+    async def test_same_owner_lease_is_not_borrowed(self):
+        resources = ResourceArbiter()
+        original = resources.acquire(SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER)
+        provider = self.BlockingTTS()
+        with self.assertRaises(ResourceBusyError):
+            await SpeakerAuthorizedTextToSpeechProvider(provider, resources).speak("x")
+        self.assertEqual(provider.calls, 0)
+        self.assertIs(resources.lease_for(SPEAKER_RESOURCE), original)
+
+    async def test_foreign_lease_prevents_speaker_affecting_tts_cleanup(self):
+        resources = ResourceArbiter()
+        foreign = resources.acquire(
+            SPEAKER_RESOURCE, ResourceOwner("runtime", "notification")
+        )
+        provider = self.BlockingTTS()
+        authorized = SpeakerAuthorizedTextToSpeechProvider(provider, resources)
+        with self.assertRaises(ResourceBusyError):
+            await authorized.close()
+        self.assertEqual(provider.close_calls, 0)
+        self.assertIs(resources.lease_for(SPEAKER_RESOURCE), foreign)
+
+    async def test_provider_failures_release_tts_and_cue_leases(self):
+        for provider, operation in (
+            (self.BlockingTTS(RuntimeError("tts")), "tts"),
+            (self.BlockingVoice(RuntimeError("cue")), "cue"),
+        ):
+            resources = ResourceArbiter()
+            with self.assertRaises(RuntimeError):
+                if operation == "tts":
+                    authorized = SpeakerAuthorizedTextToSpeechProvider(
+                        provider, resources
+                    )
+                    await authorized.speak("x")
+                else:
+                    authorized = SpeakerAuthorizedVoiceProvider(provider, resources)
+                    await authorized.play_engagement_cue()
+            self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+
+    async def test_cancellation_releases_tts_and_cue_leases(self):
+        operations = ((self.BlockingTTS(), "tts"), (self.BlockingVoice(), "cue"))
+        for provider, operation in operations:
+            resources = ResourceArbiter()
+            if operation == "tts":
+                authorized = SpeakerAuthorizedTextToSpeechProvider(
+                    provider, resources
+                )
+                coroutine = authorized.speak("x")
+            else:
+                authorized = SpeakerAuthorizedVoiceProvider(provider, resources)
+                coroutine = authorized.play_engagement_cue()
+            task = asyncio.create_task(coroutine)
+            await provider.entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+
+    async def test_task_cleanup_does_not_release_runtime_voice_or_unrelated_lease(self):
+        resources = ResourceArbiter()
+        voice = resources.acquire(SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER)
+        task_owner = ResourceOwner("task", "00000000-0000-0000-0000-000000000001")
+        unrelated = resources.acquire(ResourceKey("camera"), task_owner)
+        resources.release_all(task_owner)
+        self.assertIs(resources.lease_for(SPEAKER_RESOURCE), voice)
+        self.assertIsNone(resources.lease_for(unrelated.resource))
 
 
 class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
@@ -757,9 +1049,37 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(playback_calls, [
             ("enable",), ("say", "answer"), ("disable",),
+            ("disable",),
             ("enable",), ("say", "answer"), ("disable",),
+            ("disable",),
         ])
         self.assertEqual(calls.count(("espeak",)), 1)
+
+    async def test_espeak_speaking_failure_disables_speaker_before_returning(self):
+        calls = []
+
+        class Espeak:
+            def say(self, text):
+                calls.append(("say", text))
+                raise RuntimeError("speech failed")
+
+        fusion_hat = ModuleType("fusion_hat")
+        tts = ModuleType("fusion_hat.tts")
+        tts.Espeak = Espeak
+        device = ModuleType("fusion_hat.device")
+        device.enable_speaker = lambda: calls.append(("enable",))
+        device.disable_speaker = lambda: calls.append(("disable",))
+        with patch.dict(sys.modules, {
+            "fusion_hat": fusion_hat, "fusion_hat.tts": tts,
+            "fusion_hat.device": device,
+        }):
+            provider = FusionHatEspeakTTSProvider()
+            with self.assertRaisesRegex(RuntimeError, "speech failed"):
+                await provider.speak("answer")
+
+        self.assertEqual(calls, [
+            ("enable",), ("say", "answer"), ("disable",),
+        ])
 
     async def test_fusion_listen_cancellation_waits_for_blocking_worker(self):
         entered = threading.Event()

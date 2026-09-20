@@ -120,18 +120,26 @@ through the shared terminal cleanup path. Runtime shutdown also releases them
 before dropping volatile binding ownership, without semantically stopping or
 otherwise transitioning the externally held Task snapshot.
 
-Camera frame acquisition is the first physical capability wired through the
-arbiter: normal application-owned one-shot captures acquire the canonical
+Camera frame acquisition and normal application-owned speaker output are the
+first physical capabilities wired through the arbiter. One-shot captures acquire the canonical
 `camera` resource under an explicit runtime or Task owner and release it
 immediately after physical capture. Interpretation never holds that lease, and
 contention fails without waiting or retry. Camera adapters remain unaware of
-runtime arbitration. Body, voice, microphone, speaker, and hardware-bus paths do
-not automatically acquire an arbiter lease yet. In particular, voice's local
-`asyncio.Lock` and provider-side thread lock remain implementation synchronization:
-those locks
-protect concurrent implementation access, while an arbiter lease expresses which
-semantic runtime owner is entitled to a capability. This phase does not unify or
-replace those mechanisms.
+runtime arbitration. TTS responses, wake engagement cues, and speaker-affecting
+TTS cleanup acquire the canonical `audio.speaker` resource as the stable semantic
+owner `runtime:voice`. Acquisition is exclusive, fail-fast, and non-reentrant;
+the exact lease remains held across the awaited provider operation and is released
+on success, provider failure, or cancellation. Because the current TTS operation
+combines hosted synthesis and playback, the lease conservatively covers both; a
+split may follow only if measured contention justifies it. Providers remain
+unaware of `ResourceArbiter`.
+
+Body, microphone, and hardware-bus paths do not automatically acquire an arbiter
+lease yet. Voice's existing `_microphone_lock` remains implementation-level
+microphone synchronization between wake and session listening; speaker authority
+does not replace it. Provider-side thread locks likewise remain implementation
+synchronization rather than semantic entitlement. No waiting, priority, or
+preemption is implied.
 
 These boundaries are intended to keep the reusable runtime independent of a
 specific robot or vendor backend. Interaction and cognition implementations
