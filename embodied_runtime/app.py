@@ -59,6 +59,7 @@ from embodied_runtime.jobs import (
     MAX_JOB_CONTINUATION_DELAY_SECONDS,
     MIN_JOB_CONTINUATION_DELAY_SECONDS,
     JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
+    JOB_PROGRESS_BASES, JobProgress, JobProgressUpdate, validate_counter_name,
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
 )
 from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
@@ -288,9 +289,22 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
                               "maximum": MAX_JOB_CONTINUATION_DELAY_SECONDS},
             "event_type": {"type": ["string", "null"],
                            "enum": ["presence_changed", None]},
+            "progress_update": {
+                "anyOf": [
+                    {"type": "null"},
+                    {"type": "object", "properties": {
+                        "counter": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9_]{0,47}$",
+                        },
+                        "basis": {"type": "string", "enum": sorted(JOB_PROGRESS_BASES)},
+                    }, "required": ["counter", "basis"],
+                     "additionalProperties": False},
+                ]
+            },
         },
         "required": ["disposition", "summary", "readiness", "delay_seconds",
-                     "event_type"],
+                     "event_type", "progress_update"],
         "additionalProperties": False,
     },
 )
@@ -523,7 +537,10 @@ JOB_OUTCOME_EVALUATION_REQUEST = (
     "model-generated commentary, not "
     "authoritative evidence, and any previous-work continuity context is deliberately "
     "excluded from this evidence bundle; neither can independently justify a terminal "
-    "outcome. Insufficient information or one rejected optional capability "
+    "outcome. A continue outcome may propose at most one progress_update, naming a "
+    "counter and one advertised current-episode evidence basis; the runtime alone "
+    "increments it by one. Terminal outcomes require null progress_update. Insufficient "
+    "information or one rejected optional capability "
     "normally means continue. Do not infer an outcome from prose and do not request work."
 )
 
@@ -684,6 +701,7 @@ class RobotApplication:
         self._active_goal: ActiveGoal | None = None
         self._current_task_binding: _CurrentTaskBinding | None = None
         self._current_job_run: CurrentJobRun | None = None
+        self._job_progress: JobProgress | None = None
         self._monotonic = monotonic_clock or monotonic
         self._active_goal_started_monotonic: tuple[ActiveGoal, float] | None = None
         self._last_operator_turn_completed_monotonic: float | None = None
@@ -765,6 +783,34 @@ class RobotApplication:
     def job_continuation(self) -> JobContinuation | None:
         """Return the current session-local automatic continuation diagnostic."""
         return self._job_continuation
+
+    @property
+    def job_progress(self) -> JobProgress | None:
+        """Return progress only when it belongs to the exact current occurrence."""
+        progress = self._job_progress
+        current = self._current_job_run
+        if (progress is None or current is None
+                or (progress.job_id, progress.run_id, progress.task_id)
+                != (current.job.id, current.run.id, current.task.id)):
+            return None
+        return progress
+
+    def _clear_stale_job_progress(self, binding: CurrentJobRun) -> None:
+        """Clear only progress owned by a now-stale occurrence callback."""
+        progress = self._job_progress
+        occurrence = (binding.job.id, binding.run.id, binding.task.id)
+        if progress is None or (progress.job_id, progress.run_id,
+                                progress.task_id) != occurrence:
+            return
+        current = self._current_job_run
+        if (current is not None
+                and (current.job.id, current.run.id, current.task.id) == occurrence
+                and current.run.status is JobRunStatus.RUNNING
+                and current.task.status in (TaskStatus.RUNNING, TaskStatus.PAUSED)):
+            # A pause (or pause/resume) invalidates the episode's ActiveGoal binding,
+            # not the Job occurrence that owns already-committed progress.
+            return
+        self._job_progress = None
 
     def job_continuation_delay_remaining(self) -> int | None:
         """Return the rounded-up monotonic delay remaining for diagnostics."""
@@ -872,6 +918,7 @@ class RobotApplication:
             raise
         binding = CurrentJobRun(job, running_run, running_task)
         self._current_job_run = binding
+        self._job_progress = JobProgress(job.id, running_run.id, running_task.id)
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s task=%s status=started",
             job.id, running_run.id, running_task.id,
@@ -1023,6 +1070,7 @@ class RobotApplication:
         run = self.jobs.transition_run(binding.run.id, status, **kwargs)
         finished = CurrentJobRun(binding.job, run, task)
         self._current_job_run = None
+        self._job_progress = None
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s task=%s status=%s",
             binding.job.id, run.id, task.id, status.value,
@@ -1122,8 +1170,9 @@ class RobotApplication:
                 stimulus, episode, evaluate_goal_outcome=False, job_work=True,
                 previous_work_summary=continuity,
             )
-            disposition, summary, readiness, delay_seconds, event_type = await self._request_job_outcome(
-                binding, task_binding, goal, episode, stimulus, initiative
+            disposition, summary, readiness, delay_seconds, event_type, progress_update = await self._request_job_outcome(
+                binding, task_binding, goal, episode, stimulus, initiative,
+                wake_event=wake_event,
             )
             if (
                 disposition is JobWorkDisposition.CONTINUE
@@ -1140,7 +1189,7 @@ class RobotApplication:
                 binding.job.id, binding.run.id, binding.task.id, episode.id,
                 disposition, summary, initiative.response,
                 initiative.action, initiative.action_status, readiness, delay_seconds,
-                event_type,
+                event_type, progress_update,
             )
         except asyncio.CancelledError:
             reason = "cancelled"
@@ -1463,8 +1512,9 @@ class RobotApplication:
         self, binding: CurrentJobRun, task_binding: _CurrentTaskBinding,
         goal: ActiveGoal, episode: AttentionEpisode, stimulus: AttentionStimulus,
         initiative: InitiativeOutcome,
+        *, wake_event: JobWakeEvent | None = None,
     ) -> tuple[JobWorkDisposition, str | None, JobContinuationReadiness | None,
-               int | None, JobReadinessEventType | None]:
+               int | None, JobReadinessEventType | None, JobProgressUpdate | None]:
         backend = self._cognition_backend
         assert backend is not None
         proposed_disposition: JobWorkDisposition | None = None
@@ -1472,6 +1522,7 @@ class RobotApplication:
         proposed_readiness: JobContinuationReadiness | None = None
         proposed_delay_seconds: int | None = None
         proposed_event_type: JobReadinessEventType | None = None
+        proposed_progress_update: JobProgressUpdate | None = None
         consumed = False
 
         def evidence_lines() -> list[str]:
@@ -1486,6 +1537,13 @@ class RobotApplication:
                 f"  {index}. {item.capability} status={item.status} result={item.runtime_result}"
                 for index, item in enumerate(initiative.acquisitions, 1)
             )
+            progress = self.job_progress
+            lines.extend((progress.render() if progress is not None else
+                          JobProgress(binding.job.id, binding.run.id,
+                                      binding.task.id).render()).splitlines())
+            lines.append("Available progress bases this episode:")
+            bases = self._job_progress_bases(initiative, wake_event)
+            lines.extend((f"  {basis}" for basis in bases) if bases else ("  none",))
             lines.append("Ordered runtime-produced effect evidence:")
             lines.extend(
                 f"  {index}. {item.name} status={item.status} result={item.runtime_result}"
@@ -1497,6 +1555,7 @@ class RobotApplication:
             nonlocal consumed, proposed_disposition, proposed_summary
             nonlocal proposed_readiness, proposed_delay_seconds
             nonlocal proposed_event_type
+            nonlocal proposed_progress_update
             if consumed:
                 return self._rejected_tool(call.name, "Job outcome request already consumed",
                                            log_prefix="JOBS")
@@ -1508,9 +1567,10 @@ class RobotApplication:
                 # provider/test clients as the equivalent null for non-event modes.
                 arguments = json.loads(call.arguments)
                 required = {"disposition", "summary", "readiness", "delay_seconds"}
+                optional = {"event_type", "progress_update"}
                 if (not isinstance(arguments, dict)
                         or not required <= set(arguments)
-                        or set(arguments) - required != ({"event_type"} if "event_type" in arguments else set())):
+                        or set(arguments) - required - optional):
                     raise ValueError("invalid report_job_outcome arguments")
                 disposition = JobWorkDisposition(arguments["disposition"])
                 readiness_value = arguments["readiness"]
@@ -1542,6 +1602,10 @@ class RobotApplication:
                     raise ValueError(
                         "terminal outcomes require null readiness, delay_seconds, and event_type"
                     )
+                progress_value = arguments.get("progress_update")
+                progress_update = self._validate_job_progress_update(
+                    progress_value, disposition, initiative, wake_event,
+                )
                 value = arguments["summary"]
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError("summary must be a non-empty string")
@@ -1553,6 +1617,7 @@ class RobotApplication:
                 proposed_disposition, proposed_summary = disposition, value
                 proposed_readiness, proposed_delay_seconds = readiness, delay_seconds
                 proposed_event_type = event_type
+                proposed_progress_update = progress_update
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as error:
                 return self._rejected_tool(call.name, str(error), log_prefix="JOBS")
             return CognitionToolResult(json.dumps({
@@ -1575,21 +1640,73 @@ class RobotApplication:
             refreshed_instructions=lambda: instructions,
         )
         if proposed_disposition is None:
-            return JobWorkDisposition.CONTINUE, None, None, None, None
+            return JobWorkDisposition.CONTINUE, None, None, None, None, None
         assert proposed_summary is not None
         if proposed_disposition in (
             JobWorkDisposition.COMPLETED, JobWorkDisposition.FAILED,
         ):
             if not self._job_work_binding_matches(binding, task_binding, goal):
-                return JobWorkDisposition.CONTINUE, None, None, None, None
+                return JobWorkDisposition.CONTINUE, None, None, None, None, None
             terminal = (
                 JobRunStatus.COMPLETED
                 if proposed_disposition is JobWorkDisposition.COMPLETED
                 else JobRunStatus.FAILED
             )
             self.finish_job_run(terminal, proposed_summary)
+        elif proposed_progress_update is not None:
+            if not self._job_work_binding_matches(binding, task_binding, goal):
+                self._clear_stale_job_progress(binding)
+                return JobWorkDisposition.CONTINUE, None, None, None, None, None
+            progress = self.job_progress
+            if progress is None:
+                return JobWorkDisposition.CONTINUE, None, None, None, None, None
+            updated = progress.increment(proposed_progress_update)
+            self._job_progress = updated
+            value = next(counter.value for counter in updated.counters
+                         if counter.name == proposed_progress_update.counter)
+            LOGGER.info(
+                "[JOBS] job=JOB%s run=RUN%s progress=%s value=%s basis=%s",
+                binding.job.id, binding.run.id, proposed_progress_update.counter,
+                value, proposed_progress_update.basis,
+            )
         return (proposed_disposition, proposed_summary, proposed_readiness,
-                proposed_delay_seconds, proposed_event_type)
+                proposed_delay_seconds, proposed_event_type, proposed_progress_update)
+
+    @staticmethod
+    def _job_progress_bases(
+        initiative: InitiativeOutcome, wake_event: JobWakeEvent | None,
+    ) -> tuple[str, ...]:
+        bases: list[str] = []
+        if wake_event is not None:
+            bases.append("wake_event")
+        bases.extend(f"acquisition_{index}" for index, item in
+                     enumerate(initiative.acquisitions, 1) if item.status == "applied")
+        bases.extend(f"effect_{index}" for index, item in
+                     enumerate(initiative.effects, 1) if item.status == "applied")
+        return tuple(bases)
+
+    def _validate_job_progress_update(
+        self, value: object, disposition: JobWorkDisposition,
+        initiative: InitiativeOutcome, wake_event: JobWakeEvent | None,
+    ) -> JobProgressUpdate | None:
+        if value is None:
+            return None
+        if disposition is not JobWorkDisposition.CONTINUE:
+            raise ValueError("terminal outcomes require null progress_update")
+        if not isinstance(value, dict) or set(value) != {"counter", "basis"}:
+            raise ValueError("progress_update requires exactly counter and basis")
+        counter = validate_counter_name(value["counter"])
+        basis = value["basis"]
+        if not isinstance(basis, str) or basis not in JOB_PROGRESS_BASES:
+            raise ValueError("unsupported progress evidence basis")
+        if basis not in self._job_progress_bases(initiative, wake_event):
+            raise ValueError("progress evidence basis is unavailable in this episode")
+        progress = self.job_progress
+        if progress is None:
+            raise ValueError("exact Job progress binding is unavailable")
+        # Validate catalog/value bounds without mutating the immutable snapshot.
+        progress.increment(JobProgressUpdate(counter, basis))
+        return JobProgressUpdate(counter, basis)
 
     def temporal_context(self) -> TemporalContext:
         """Build fresh local wall-clock grounding for one cognition boundary."""
@@ -2047,6 +2164,7 @@ class RobotApplication:
         except BaseException as error:
             failure = failure or error
         self._clear_job_continuation("shutdown")
+        self._job_progress = None
         try:
             await self.temporal.stop()
         except BaseException as error:
@@ -2615,10 +2733,16 @@ class RobotApplication:
         notification = "" if not sections else "\n\n" + "\n\n".join(sections)
         continuity = render_job_continuity(previous_work_summary)
         continuity_section = "" if continuity is None else f"\n\n{continuity}"
+        progress = self.job_progress
+        progress_section = (
+            f"\n\n{progress.render()}" if progress is not None
+            and stimulus.kind == "job_run_work" else ""
+        )
         return (
             f"{context}{notification}\n\n{episode.render()}\n\n"
             f"{stimulus.render(actions_enabled=capabilities_available)}"
-            f"{continuity_section}{inspection_guidance}{history_guidance}{sequencing}"
+            f"{continuity_section}{progress_section}{inspection_guidance}"
+            f"{history_guidance}{sequencing}"
         )
 
     @staticmethod

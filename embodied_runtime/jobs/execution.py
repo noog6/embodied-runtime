@@ -7,6 +7,7 @@ from uuid import UUID
 from embodied_runtime.jobs.continuation import (
     JobContinuationReadiness, JobReadinessEventType,
 )
+from embodied_runtime.jobs.progress import JobProgressUpdate
 
 
 class JobWorkDisposition(StrEnum):
@@ -29,3 +30,4 @@ class JobWorkOutcome:
     readiness: JobContinuationReadiness | None = None
     delay_seconds: int | None = None
     event_type: JobReadinessEventType | None = None
+    progress_update: JobProgressUpdate | None = None

@@ -203,6 +203,70 @@ terminalization, a new JobRun, shutdown, or a stale binding removes or rejects
 it. The summary is not persisted, recovered, regenerated, or written as a
 checkpoint or planner state.
 
+### Evidence-backed occurrence progress
+
+The runtime keeps four deliberately separate answers while bounded Job work is
+active:
+
+| Concept | Question answered | Authority |
+| --- | --- | --- |
+| Job | What am I responsible for? | Durable definition context |
+| Semantic continuity | Where did the previous model episode leave off? | Model-generated, non-authoritative context |
+| Job progress | What bounded evidence-backed occurrence progress was committed? | Runtime-owned for this exact JobRun and Task |
+| Readiness / wake | When is another episode useful, and what current event made it eligible? | Runtime-owned scheduling and one-shot evidence |
+
+`JobProgress` is an immutable, volatile snapshot bound to the exact Job ID,
+JobRun ID, and Task UUID. It contains at most eight counters, ordered by name.
+Names must match `[a-z][a-z0-9_]{0,47}`, and values are nonnegative integers no
+greater than 1,000. An occurrence starts with an empty snapshot. Cognition can
+never set a value, delta, decrement, or reset: a continuing
+`report_job_outcome` may propose zero or one object of this exact form:
+
+```json
+{"counter": "presence_changes_seen", "basis": "wake_event"}
+```
+
+The operation is always an increment of exactly one performed by the harness.
+The supported bases are `wake_event`, `acquisition_1`, `acquisition_2`,
+`effect_1`, and `effect_2`. The harness deterministically accepts a basis only
+when that evidence exists in the current exact episode: the wake was actually
+supplied to the accepted Job episode, or the indexed acquisition/effect has an
+`applied` runtime result. Rejected attempts, nonexistent indexes, earlier
+episodes, semantic continuity, working memory, and model commentary cannot back
+an increment. Terminal outcomes must carry no update.
+
+The harness attests that each counter increment was backed by an accepted
+current-episode runtime evidence source. Counter naming and task-level
+interpretation remain cognition-owned; progress counters are occurrence-scoped
+and are not general world-state assertions. This makes progress stronger than
+semantic continuity without turning it into global factual memory. A current
+wake remains separate evidence: committed progress can establish one earlier
+step while the one-shot wake establishes the current step.
+
+An accepted proposal is staged during the outcome tool callback. It commits
+only after the provider response finishes successfully and the exact
+Job/JobRun/Task/ActiveGoal binding is revalidated. Provider failure, stale
+binding, rejection, terminalization, or shutdown cannot commit speculative
+progress. Provider failure after an event wake retains the existing behavior:
+the wake and automatic step remain consumed, progress remains unchanged, and
+continuation awaits the operator.
+
+Progress survives manual, heartbeat, and event-driven work, readiness changes,
+pause/resume of the same Task, and automatic-budget exhaustion. These events do
+not add steps or refill the budget. Scheduled activation starts with an empty
+snapshot and later episodes of that same occurrence use the normal rules;
+schedule markers are unrelated. Terminal Job completion, failure or stop, a
+new occurrence, stale association, and application shutdown remove the
+snapshot. It is not persisted or recovered. Non-Job attention and operator
+conversation receive no progress-writing tool and cannot mutate it.
+When an outcome callback becomes stale before commit, the runtime physically
+clears only the snapshot owned by that stale occurrence; it cannot clear a
+replacement occurrence's progress.
+
+This facility is counters only. It is not a generic key/value store, arbitrary
+checkpoint object, planner state, transcript, event history, or semantic-memory
+write.
+
 ## Daily local-time activation
 
 An ordinary Job may have one durable daily schedule: an enabled flag, strict
