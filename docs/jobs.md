@@ -1,8 +1,9 @@
 # Jobs
 
-Jobs are durable runtime infrastructure. Phase 2 lets an operator explicitly
-coordinate one occurrence through the runtime's existing Task lifecycle. It
-still does not autonomously execute, schedule, route, or retry work.
+Jobs are durable runtime infrastructure. Phase 3 lets an operator explicitly
+coordinate one occurrence through the runtime's existing Task lifecycle and
+request one bounded work episode. It does not loop, schedule, route, or retry
+work.
 
 ## Job
 
@@ -66,6 +67,52 @@ description into the TaskGoal. Starting the Task creates its ActiveGoal through
 the existing Task path and does **not** wake cognition, synthesize an operator
 event, or invoke an LLM.
 
+## Explicit bounded work
+
+`job work` operates only on the current volatile JobRun association:
+
+```text
+Job
+ |
+JobRun
+ |
+Task / ActiveGoal
+ |
+explicit "job work"
+ |
+one bounded cognition/execution episode
+ |
+Job outcome evaluation
+ |
+completed | failed | continue
+```
+
+This is runtime-owned work, not operator dialogue. The exact Job ID, run ID,
+name, full description, target (or `unassigned`), Task identity and description,
+and bounded TaskGoal are supplied as explicit authoritative cognition context.
+No synthetic operator utterance or WorkingMemory conversation turn is created.
+The full Job description remains separate from the short TaskGoal.
+
+The episode uses the shared attention single-flight coordinator and the existing
+bounded initiative machinery, including its acquisition, effect, continuation,
+resource, and Task-owned camera authority. Job work cannot use generic
+`complete_goal`; its final decision instead passes through a separate
+`report_job_outcome` tool and an exact Job/JobRun/Task/ActiveGoal binding check.
+Only an accepted `completed` or `failed` report delegates to the authoritative
+`finish_job_run()` lifecycle path. Missing, invalid, stale, or conflicting
+reports conservatively mean `continue` and do not create a durable transition.
+The outcome tool accepts only a proposal during cognition. A terminal proposal
+is committed only after the entire outcome request returns successfully and the
+exact binding is revalidated; a provider failure or stale binding before that
+commit leaves the durable run unchanged.
+
+The `schedule_followup` capability is omitted from the initial decision,
+post-acquisition decisions, and effect continuation for Job work. Other
+capabilities retain their normal configuration and availability checks.
+`continue` does **not** schedule another work episode: another episode occurs
+only after another explicit `job work` invocation. There is no automatic loop,
+retry, Job scheduler, startup scan, or Job-owned resource authority.
+
 While a Task is paused, its JobRun remains `running`. Existing Task behavior
 releases Task-owned resources and suspends its ActiveGoal; resume creates a
 fresh Task-owned ActiveGoal without reacquiring resources. Completion, failure,
@@ -114,9 +161,12 @@ restart it remains visible through `job runs`, while `current_job_run` and
 
 The console inspection commands are `jobs`, `job show JOB<n>`, and `job runs
 JOB<n>`. Definition commands are `job add`, `job enable`, and `job disable`.
-Runtime coordination commands are `job start`, `job current`, `job complete`,
-`job fail`, and `job stop`.
+Runtime coordination commands are `job start`, asynchronous `job work`, `job
+current`, `job complete`, `job fail`, and `job stop`.
 
-Autonomous cognition/execution, scheduling, timers, Job-owned resources,
-retries, body/runtime registries, target matching, distributed coordination,
-claims, and restart recovery remain future work.
+Shutdown cancels and joins an in-flight bounded Job episode before releasing the
+Task's volatile goal/resources and detaching the Job binding. It does not mark
+the durable run failed; the occurrence remains `running`, with the same Phase 2
+restart semantics. Scheduling, timers, Job-owned resources, retries,
+body/runtime registries, target matching, distributed coordination, claims, and
+restart recovery remain future work.

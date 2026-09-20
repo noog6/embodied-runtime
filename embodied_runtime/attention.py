@@ -7,7 +7,9 @@ import logging
 from time import monotonic
 from typing import Literal
 
-from embodied_runtime.cognition.outcome import InitiativeAcquisitionOutcome
+from embodied_runtime.cognition.outcome import (
+    InitiativeAcquisitionOutcome, InitiativeEffectOutcome,
+)
 
 from embodied_runtime.events import (
     BodyOrientationChanged, Event, EventBus, MemoryPressureCleared,
@@ -348,6 +350,8 @@ class InitiativeOutcome:
     response: str
     action: str | None = None
     action_status: str | None = None
+    acquisitions: tuple[InitiativeAcquisitionOutcome, ...] = ()
+    effects: tuple[InitiativeEffectOutcome, ...] = ()
 
 
 class GoalAttentionController:
