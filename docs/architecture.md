@@ -39,21 +39,29 @@ Task lifecycle transitions preserve it unchanged. Defining either value causes n
 execution or cognition wake.
 
 ```text
-Runtime Session                    Task domain
+Task domain                         Runtime Session
 
-  ActiveGoal                       Task
-  volatile current                  |
-  intentional binding               +-- TaskGoal
-                                    semantic desired outcome
-
-          no Task <-> ActiveGoal binding exists yet
+Task                               Current Task binding
+  |                                      |
+  +-- TaskGoal --------------------------+--> ActiveGoal
+                     while current
 ```
 
-The diagram shows independent lifecycle domains. `ActiveGoal` remains the
-unchanged application-owned, volatile current intentional commitment. Future
-executor work may establish a relationship between a currently executing Task and
-that runtime intention, but no binding, current Task, executor, scheduler,
-persistence layer, or lifecycle event publisher exists.
+The lifecycle domains remain independent. `RobotApplication.start_task()` owns
+the volatile zero-or-one current Task binding. It installs a new running Task
+snapshot and, only when the Task has a `TaskGoal`, creates one ordinary
+session-local `ActiveGoal` from that goal's description. The binding retains that
+exact goal object so existing identity-based runtime coordination is preserved. A
+Task with no `TaskGoal` still becomes current but creates no implicit goal from
+its Task description.
+
+`RobotApplication.finish_task()` permits only `completed`, `failed`, or `stopped`,
+then removes the binding and its exact `ActiveGoal`. Application shutdown also
+removes this volatile binding, but deliberately leaves the running Task snapshot
+semantically unchanged: ending a runtime session is not a Task outcome. A current
+Task does not imply autonomous execution. There is still no executor, scheduler,
+queue, pause/resume orchestration, persistence, recovery, or Task lifecycle event
+publication.
 
 These boundaries are intended to keep the reusable runtime independent of a
 specific robot or vendor backend. Interaction and cognition implementations

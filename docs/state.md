@@ -23,10 +23,23 @@ session lifecycle. Its optional immutable `TaskGoal` is the semantic desired
 outcome of that work; a task goal is neither physical `RuntimeState` nor EventBus
 history. Tasks are immutable, currently session-resident domain values and own no
 runtime machinery. Defining a Task or TaskGoal causes neither execution nor a
-cognition wake. `ActiveGoal` remains the unchanged application-owned, volatile
-active-intention binding and is not yet scoped to a Task. Future executor work may
-bind the currently executing Task's goal to an active runtime intention, but that
-relationship is not implemented.
+cognition wake. The application may explicitly own one volatile current Task
+binding. While current, a Task's durable `TaskGoal` (when present) is represented
+by one exact, session-local `ActiveGoal`; neither the binding nor that ActiveGoal
+is stored inside the Task. Generic goal mutation cannot replace or clear a
+Task-bound goal while leaving its Task running. A current Task without a TaskGoal
+has no ActiveGoal and the Task description is not used as an implicit goal.
+Existing cognition goal closure therefore applies only to standalone ActiveGoals
+in this phase. A Task-owned ActiveGoal is released only through explicit Task
+lifecycle coordination; cognition does not yet complete Tasks. Goal mutation
+capabilities are not projected to cognition while a Task owns the current-intention
+slot.
+
+Finishing the current Task explicitly produces a terminal Task snapshot and
+removes the binding. Application shutdown only removes volatile ownership and
+the Task-bound ActiveGoal; it does not force the running domain snapshot to a
+terminal state. Current ownership provides coordination only: it adds no
+executor, scheduler, pause/resume orchestration, persistence, or autonomous work.
 
 An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
 or persistent history. It is one transient delivery effect through an

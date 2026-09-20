@@ -80,6 +80,7 @@ from embodied_runtime.platform import (
 from embodied_runtime.state import (
     BodyState, LifecycleState, PowerState, PresenceState, RuntimeState,
 )
+from embodied_runtime.tasks import Task, TaskStatus
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
 from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
 from embodied_runtime.voice import (
@@ -441,6 +442,14 @@ class CameraSummary:
     is_running: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _CurrentTaskBinding:
+    """Session-local ownership of one running task and its exact goal object."""
+
+    task: Task
+    active_goal: ActiveGoal | None
+
+
 class RobotApplication:
     def __init__(
         self,
@@ -511,6 +520,7 @@ class RobotApplication:
             wake_words=voice_wake_words,
         )
         self._active_goal: ActiveGoal | None = None
+        self._current_task_binding: _CurrentTaskBinding | None = None
         self._monotonic = monotonic_clock or monotonic
         self._active_goal_started_monotonic: tuple[ActiveGoal, float] | None = None
         self._last_operator_turn_completed_monotonic: float | None = None
@@ -558,6 +568,12 @@ class RobotApplication:
     def active_goal(self) -> ActiveGoal | None:
         return self._active_goal
 
+    @property
+    def current_task(self) -> Task | None:
+        """Return the running Task snapshot currently owned by this session."""
+        binding = self._current_task_binding
+        return None if binding is None else binding.task
+
     def temporal_context(self) -> TemporalContext:
         """Build fresh local wall-clock grounding for one cognition boundary."""
         instant = self._aware_wall_clock()
@@ -595,9 +611,15 @@ class RobotApplication:
     def set_goal(self, description: object) -> ActiveGoal:
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Setting a goal requires a running application")
-        normalized = validate_goal_description(description)
+        if self._current_task_binding is not None:
+            raise RuntimeError("cannot set a standalone goal while a Task is current")
         if self._active_goal is not None:
             raise RuntimeError("an active goal already exists")
+        return self._create_active_goal(description)
+
+    def _create_active_goal(self, description: object) -> ActiveGoal:
+        """Create and install a normal session-local ActiveGoal."""
+        normalized = validate_goal_description(description)
         goal = ActiveGoal(self._next_goal_id, normalized)
         self._next_goal_id += 1
         self._active_goal = goal
@@ -610,6 +632,11 @@ class RobotApplication:
             raise RuntimeError("Resolving a goal requires a running application")
         if outcome not in ("completed", "cancelled") or not isinstance(outcome, str):
             raise ValueError("outcome must be completed or cancelled")
+        if (
+            self._current_task_binding is not None
+            and self._current_task_binding.active_goal is not None
+        ):
+            raise RuntimeError("cannot resolve a Task-bound active goal directly")
         if self._active_goal is None:
             raise RuntimeError("no active goal exists")
         previous = self._active_goal
@@ -622,6 +649,11 @@ class RobotApplication:
     def clear_goal(self) -> bool:
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Clearing a goal requires a running application")
+        if (
+            self._current_task_binding is not None
+            and self._current_task_binding.active_goal is not None
+        ):
+            raise RuntimeError("cannot clear a Task-bound active goal directly")
         previous = self._active_goal
         cleared = previous is not None
         self._active_goal = None
@@ -630,6 +662,64 @@ class RobotApplication:
             self.temporal.cancel("goal_changed")
             LOGGER.info("[GOAL] goal=G%s status=cleared", previous.id)
         return cleared
+
+    def start_task(self, task: Task) -> Task:
+        """Install one pending Task as the application's current running work."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Starting a Task requires a running application")
+        if not isinstance(task, Task):
+            raise TypeError("task must be a Task")
+        if self._current_task_binding is not None:
+            raise RuntimeError("a current Task already exists")
+        if self._active_goal is not None:
+            raise RuntimeError("an unrelated active goal already exists")
+        if task.status is not TaskStatus.PENDING:
+            raise ValueError("Task must be pending")
+
+        running = task.transition_to(TaskStatus.RUNNING)
+        goal = (
+            None
+            if running.goal is None
+            else self._create_active_goal(running.goal.description)
+        )
+        self._current_task_binding = _CurrentTaskBinding(running, goal)
+        LOGGER.info(
+            "[TASK] task=%s status=running goal=%s",
+            running.id,
+            "none" if goal is None else f"G{goal.id}",
+        )
+        return running
+
+    def finish_task(self, status: TaskStatus) -> Task:
+        """End the current Task in one explicitly selected terminal state."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Finishing a Task requires a running application")
+        if not isinstance(status, TaskStatus):
+            raise TypeError("status must be a TaskStatus")
+        if status not in (
+            TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED
+        ):
+            raise ValueError("status must be completed, failed, or stopped")
+        binding = self._current_task_binding
+        if binding is None:
+            raise RuntimeError("no current Task exists")
+
+        terminal = binding.task.transition_to(status)
+        self._release_current_task_binding(binding)
+        LOGGER.info("[TASK] task=%s status=%s", terminal.id, terminal.status.value)
+        return terminal
+
+    def _release_current_task_binding(self, binding: _CurrentTaskBinding) -> None:
+        """Remove volatile Task ownership without changing its domain snapshot."""
+        goal = binding.active_goal
+        if goal is not None:
+            # Identity is intentional: never clear a replacement goal accidentally.
+            if self._active_goal is not goal:
+                raise RuntimeError("current Task ActiveGoal binding is inconsistent")
+            self._active_goal = None
+            self._active_goal_started_monotonic = None
+            self.temporal.cancel("goal_changed")
+        self._current_task_binding = None
 
     def _set_lifecycle(self, lifecycle: LifecycleState) -> None:
         self._runtime_state = replace(self._runtime_state, lifecycle=lifecycle)
@@ -794,6 +884,14 @@ class RobotApplication:
             await self.temporal.stop()
         except BaseException as error:
             failure = error
+        binding = self._current_task_binding
+        if binding is not None:
+            # Session shutdown drops coordination only; the running Task snapshot
+            # is deliberately not transitioned to a semantic terminal state.
+            if binding.active_goal is not None:
+                self._active_goal = None
+                self._active_goal_started_monotonic = None
+            self._current_task_binding = None
         try:
             await self.attention.stop()
         except BaseException as error:
@@ -1977,6 +2075,10 @@ class RobotApplication:
             and (all_effects_applied is True or all_effects_applied == "applied")
             and self.state is LifecycleState.RUNNING
             and self._active_goal is expected_goal
+            and (
+                self._current_task_binding is None
+                or self._current_task_binding.active_goal is not expected_goal
+            )
         ):
             return (COMPLETE_GOAL_TOOL,)
         return ()
@@ -2070,7 +2172,10 @@ class RobotApplication:
             and "orientation" in body.capabilities
         ):
             tools.append(ORIENT_BODY_TOOL)
-        tools.append(SET_GOAL_TOOL if self._active_goal is None else RESOLVE_GOAL_TOOL)
+        if self._current_task_binding is None:
+            tools.append(
+                SET_GOAL_TOOL if self._active_goal is None else RESOLVE_GOAL_TOOL
+            )
         if (
             self.state is LifecycleState.RUNNING
             and self.options.initiative_enabled
