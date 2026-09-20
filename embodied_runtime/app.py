@@ -98,6 +98,58 @@ OPERATOR_SOURCE: ContextVar[str] = ContextVar("operator_source", default="operat
 CAMERA_RESOURCE = ResourceKey("camera")
 CAMERA_CAPTURE_OWNER = ResourceOwner("runtime", "camera_capture")
 VISUAL_PERCEPTION_OWNER = ResourceOwner("runtime", "visual_perception")
+SPEAKER_RESOURCE = ResourceKey("audio.speaker")
+VOICE_SPEAKER_OWNER = ResourceOwner("runtime", "voice")
+
+
+class SpeakerAuthorizedVoiceProvider:
+    """Apply speaker authority to a voice provider's engagement cue only."""
+
+    def __init__(self, provider: VoiceProvider, resources: ResourceArbiter) -> None:
+        self._provider = provider
+        self._resources = resources
+
+    async def listen(self) -> str | None:
+        return await self._provider.listen()
+
+    async def stop_listening(self) -> None:
+        await self._provider.stop_listening()
+
+    async def play_engagement_cue(self) -> None:
+        lease = self._resources.acquire(SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER)
+        try:
+            await self._provider.play_engagement_cue()
+        finally:
+            self._resources.release(lease)
+
+    async def close(self) -> None:
+        await self._provider.close()
+
+
+class SpeakerAuthorizedTextToSpeechProvider:
+    """Apply speaker authority around application-composed TTS operations."""
+
+    def __init__(
+        self, provider: TextToSpeechProvider, resources: ResourceArbiter
+    ) -> None:
+        self._provider = provider
+        self._resources = resources
+
+    async def speak(self, text: str) -> None:
+        lease = self._resources.acquire(SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER)
+        try:
+            await self._provider.speak(text)
+        finally:
+            self._resources.release(lease)
+
+    async def close(self) -> None:
+        # Physical providers defensively disable output here, so cleanup is also
+        # a speaker mutation and must fail fast rather than affect another owner.
+        lease = self._resources.acquire(SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER)
+        try:
+            await self._provider.close()
+        finally:
+            self._resources.release(lease)
 
 ORIENT_BODY_TOOL = CognitionToolDefinition(
     name="orient_body",
@@ -520,9 +572,19 @@ class RobotApplication:
             if persistent_memory_store is not None else None
         )
         self._persistent_memory_closed = False
+        authorized_voice_provider = (
+            SpeakerAuthorizedVoiceProvider(voice_provider, self.resources)
+            if voice_provider is not None else None
+        )
+        authorized_tts_provider = (
+            SpeakerAuthorizedTextToSpeechProvider(
+                text_to_speech_provider, self.resources
+            )
+            if text_to_speech_provider is not None else None
+        )
         self.voice = VoiceInteraction(
-            voice_provider,
-            text_to_speech_provider,
+            authorized_voice_provider,
+            authorized_tts_provider,
             lambda text: self.handle_operator_utterance(
                 text, interaction=VOICE_DIALOGUE
             ),

@@ -15,7 +15,7 @@ import struct
 import subprocess
 import threading
 import time
-from typing import Protocol
+from typing import Protocol, TypeVar
 import wave
 
 
@@ -23,6 +23,24 @@ LOGGER = logging.getLogger(__name__)
 
 _WAKE_CAPTURE_STOP_RETRY_SECONDS = 0.1
 _WAKE_CAPTURE_STOP_TIMEOUT_SECONDS = 2.0
+_T = TypeVar("_T")
+
+
+async def _await_owned_blocking_operation(operation: Callable[[], _T]) -> _T:
+    """Wait for owned blocking work to really finish before cancellation exits."""
+    loop = asyncio.get_running_loop()
+    worker = loop.run_in_executor(None, operation)
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Cancellation cannot stop executor work. Keep ownership until this exact
+        # callable exits, tolerating repeated cancellation, then propagate it.
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        raise
 
 
 class PiperTTSUnavailableError(RuntimeError):
@@ -422,7 +440,7 @@ class FusionHatVoiceProvider:
 
     async def play_engagement_cue(self) -> None:
         """Play the fixed local wake acknowledgement through the HAT speaker."""
-        await asyncio.to_thread(self._play_engagement_cue_sync)
+        await _await_owned_blocking_operation(self._play_engagement_cue_sync)
 
     def _play_engagement_cue_sync(self) -> None:
         try:
@@ -459,22 +477,25 @@ class FusionHatEspeakTTSProvider:
         return self._tts
 
     async def speak(self, text: str) -> None:
-        await asyncio.to_thread(self._speak_sync, text)
+        await _await_owned_blocking_operation(lambda: self._speak_sync(text))
 
     def _speak_sync(self, text: str) -> None:
         try:
-            from fusion_hat.device import enable_speaker
+            from fusion_hat.device import disable_speaker, enable_speaker
         except ImportError as error:
             raise RuntimeError("Fusion HAT speaker control is unavailable") from error
         enable_speaker()
-        self._ensure_tts().say(text)
+        try:
+            self._ensure_tts().say(text)
+        finally:
+            disable_speaker()
 
     async def close(self) -> None:
         try:
             from fusion_hat.device import disable_speaker
         except ImportError:
             return
-        await asyncio.to_thread(disable_speaker)
+        await _await_owned_blocking_operation(disable_speaker)
 
 
 class FusionHatPiperTTSProvider:
@@ -502,7 +523,7 @@ class FusionHatPiperTTSProvider:
         return self._voice
 
     async def speak(self, text: str) -> None:
-        await asyncio.to_thread(self._speak_sync, text)
+        await _await_owned_blocking_operation(lambda: self._speak_sync(text))
 
     def _speak_sync(self, text: str) -> None:
         output = io.BytesIO()
@@ -537,7 +558,7 @@ class FusionHatPiperTTSProvider:
             from fusion_hat.device import disable_speaker
         except ImportError:
             return
-        await asyncio.to_thread(disable_speaker)
+        await _await_owned_blocking_operation(disable_speaker)
 
 
 class FusionHatOpenAITTSProvider:
@@ -564,7 +585,7 @@ class FusionHatOpenAITTSProvider:
             raise RuntimeError("Fusion HAT speaker control is unavailable") from error
 
         # A previous failed session must not leave amplification active during I/O.
-        await asyncio.to_thread(disable_speaker)
+        await _await_owned_blocking_operation(disable_speaker)
         synthesis_started = time.perf_counter()
         response = await self._client.audio.speech.create(
             model=self._model,
@@ -590,7 +611,7 @@ class FusionHatOpenAITTSProvider:
                 disable_speaker()
             LOGGER.info("[TTS] playback_completed duration_ms=%s", playback_ms)
 
-        await asyncio.to_thread(play)
+        await _await_owned_blocking_operation(play)
 
     async def close(self) -> None:
         """Disable output while retaining the reusable OpenAI client."""
@@ -598,7 +619,7 @@ class FusionHatOpenAITTSProvider:
             from fusion_hat.device import disable_speaker
         except ImportError:
             return
-        await asyncio.to_thread(disable_speaker)
+        await _await_owned_blocking_operation(disable_speaker)
 
 
 class FusionHatElevenLabsTTSProvider:
@@ -640,7 +661,7 @@ class FusionHatElevenLabsTTSProvider:
         except ImportError as error:
             raise RuntimeError("Fusion HAT speaker control is unavailable") from error
 
-        await asyncio.to_thread(disable_speaker)
+        await _await_owned_blocking_operation(disable_speaker)
         synthesis_started = time.perf_counter()
         audio_chunks = self._client.text_to_speech.convert(
             voice_id=self._voice_id,
@@ -665,7 +686,7 @@ class FusionHatElevenLabsTTSProvider:
                 disable_speaker()
             LOGGER.info("[TTS] playback_completed duration_ms=%s", playback_ms)
 
-        await asyncio.to_thread(play)
+        await _await_owned_blocking_operation(play)
 
     async def close(self) -> None:
         """Disable output while retaining the reusable ElevenLabs client."""
@@ -673,7 +694,7 @@ class FusionHatElevenLabsTTSProvider:
             from fusion_hat.device import disable_speaker
         except ImportError:
             return
-        await asyncio.to_thread(disable_speaker)
+        await _await_owned_blocking_operation(disable_speaker)
 
 
 def _log_synthesis_completed(synthesis_ms: int, wav_bytes: bytes) -> None:

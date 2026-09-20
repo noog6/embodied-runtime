@@ -53,7 +53,13 @@ checkpoint progress, or persist it. Resource acquisition is currently explicit,
 exclusive, synchronous, and fail-fast; current ownership adds no executor,
 scheduler, waiting policy, persistence, recovery, or autonomous work. One-shot
 camera frame acquisition is integrated with an exclusive, short-lived `camera`
-lease; body and voice paths are not yet integrated with these leases.
+lease. Normal voice speaker output is integrated through the exclusive
+`audio.speaker` lease owned by `runtime:voice`; TTS and the wake cue hold the exact
+lease across their awaited provider operation and release it on success, failure,
+or cancellation. Acquisition is fail-fast and non-reentrant. Providers remain
+unaware of arbitration, and the current TTS boundary conservatively includes
+hosted synthesis as well as playback. Microphone coordination still uses the
+existing local lock and body remains unintegrated.
 
 An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
 or persistent history. It is one transient delivery effect through an

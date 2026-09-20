@@ -80,6 +80,21 @@ coordination while input cleanup remains with the voice provider and speaker
 cleanup remains with the TTS provider; failure to close either one does not
 skip the other cleanup attempt.
 
+At application composition, small provider proxies acquire the canonical
+`audio.speaker` resource as `runtime:voice` around each complete TTS `speak`, wake
+engagement cue, and speaker-affecting TTS cleanup operation. The synchronous,
+exclusive lease remains held across the await and is released in `finally`, so
+provider failure and cancellation cannot strand it. Contention, including a
+second operation by the same semantic owner, fails immediately without waiting,
+retry, borrowing, or preemption. Providers do not know about the arbiter. The
+current TTS API combines synthesis and playback, so hosted synthesis is
+conservatively inside the lease; splitting those stages is deliberately deferred.
+Cancellation waits for any already-started owned blocking speaker worker to
+finish its hardware cleanup before allowing the lease to be released; it does
+not forcibly interrupt that worker.
+The existing local microphone lock remains separate implementation-level capture
+synchronization, and neither microphone nor body authority is integrated yet.
+
 The narrow `TextToSpeechProvider` seam keeps selection from changing the bounded
 conversation architecture. There is no provider probing, fallback, runtime
 switching, streaming synthesis, or TTS text rewriting.
