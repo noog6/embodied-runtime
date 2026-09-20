@@ -16,6 +16,14 @@ There is no continuous capture, stream, preview, video recording, camera tuning
 interface, or vision model. Encoded frames are transient return values: raw frame
 bytes are neither `EventBus` events nor authoritative `RuntimeState` fields.
 
+At the application layer, every normal one-shot physical capture first acquires
+the exclusive canonical `camera` resource. The lease is released immediately
+after `CameraFrame` creation—even when capture raises—and never spans visual-model
+interpretation. Contention fails immediately without waiting, retry, preemption,
+or implicit same-owner reuse. Picamera2 remains a hardware adapter and has no
+knowledge of the runtime arbiter. This authority boundary does not add streaming,
+background vision, or multi-frame acquisition.
+
 The default runtime selection is `--camera none`. Physical selection is explicit
 with `--camera picamera2`; selection never silently falls back when Picamera2 or
 the device is unavailable. A file is created only by the explicit

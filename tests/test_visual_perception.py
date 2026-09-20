@@ -4,8 +4,9 @@ import json
 import unittest
 
 from embodied_runtime.app import (
-    OUTCOME_EVALUATION_REQUEST, VISUAL_FOLLOWUP_REQUEST, ApplicationOptions,
-    OBSERVE_SCENE_TOOL, RobotApplication,
+    CAMERA_RESOURCE, OUTCOME_EVALUATION_REQUEST, VISUAL_FOLLOWUP_REQUEST,
+    VISUAL_PERCEPTION_OWNER, ApplicationOptions, OBSERVE_SCENE_TOOL,
+    RobotApplication,
 )
 from embodied_runtime.attention import (
     ACTION_INITIATIVE_REQUEST, CONTINUATION_INITIATIVE_REQUEST, AttentionStimulus,
@@ -23,8 +24,10 @@ from embodied_runtime.perception import (
     VisualPerceptionBackend, VisualPerceptionResult,
 )
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.resources import ResourceArbiter, ResourceOwner
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.state import LifecycleState
+from embodied_runtime.tasks import Task, TaskGoal
 from tests.test_platform import snapshot
 
 
@@ -68,6 +71,16 @@ class Vision(VisualPerceptionBackend):
         if self.fail:
             raise RuntimeError("failed")
         return VisualPerceptionResult(focus, "A bounded scene.")
+
+
+class RecordingArbiter(ResourceArbiter):
+    def __init__(self):
+        super().__init__()
+        self.acquisitions = []
+
+    def acquire(self, resource, owner):
+        self.acquisitions.append((resource, owner))
+        return super().acquire(resource, owner)
 
 
 class Cognition(TextCognitionBackend):
@@ -203,6 +216,117 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((camera.captures, len(vision.calls)), (1, 1))
         self.assertEqual(cognition.result["status"], "applied")
         self.assertIs(app.runtime_state, before)
+        await app.stop()
+
+    async def test_visual_capture_releases_camera_before_interpretation(self):
+        camera = Camera()
+        resources = RecordingArbiter()
+        observed_leases = []
+
+        class InspectingVision(Vision):
+            async def interpret(inner, frame, focus):
+                observed_leases.append(resources.lease_for(CAMERA_RESOURCE))
+                return await super().interpret(frame, focus)
+
+        vision = InspectingVision()
+        app = self.app(camera, vision, resource_arbiter=resources)
+        await app.start()
+        result, _ = await app._execute_visual_perception(
+            CognitionToolCall("observe_scene", '{"focus":"look"}')
+        )
+        self.assertEqual(json.loads(result.output)["status"], "applied")
+        self.assertEqual(resources.acquisitions, [
+            (CAMERA_RESOURCE, VISUAL_PERCEPTION_OWNER)
+        ])
+        self.assertEqual(observed_leases, [None])
+        self.assertIsNone(resources.lease_for(CAMERA_RESOURCE))
+        await app.stop()
+
+    async def test_contention_rejects_without_capture_interpretation_or_retry(self):
+        camera, vision = Camera(), Vision()
+        app = self.app(camera, vision)
+        await app.start()
+        foreign = app.resources.acquire(
+            CAMERA_RESOURCE, ResourceOwner("runtime", "other_camera_user")
+        )
+
+        result, semantic = await app._execute_visual_perception(
+            CognitionToolCall("observe_scene", '{"focus":"look"}')
+        )
+
+        payload = json.loads(result.output)
+        self.assertEqual(payload, {
+            "status": "rejected", "error": "camera resource is busy"
+        })
+        self.assertIsNone(semantic)
+        self.assertEqual((camera.captures, len(vision.calls)), (0, 0))
+        self.assertIs(app.resources.lease_for(CAMERA_RESOURCE), foreign)
+        self.assertTrue(app.visual_perception_available())
+        app.resources.release(foreign)
+        await app.stop()
+
+    async def test_autonomous_owner_is_task_only_for_exact_task_bound_goal(self):
+        resources = RecordingArbiter()
+        app = self.initiative_app(
+            SequenceCognition([]), Camera(), Vision(), resource_arbiter=resources
+        )
+        await app.start()
+        task = Task("inspect", goal=TaskGoal("look carefully"))
+        running = app.start_task(task)
+        goal = app.active_goal
+        self.assertIsNotNone(goal)
+
+        await app._execute_visual_perception(
+            CognitionToolCall("observe_scene", '{"focus":"look"}'),
+            expected_goal=goal, autonomous=True,
+        )
+        self.assertEqual(
+            resources.acquisitions[-1],
+            (CAMERA_RESOURCE, ResourceOwner("task", str(running.id))),
+        )
+
+        # Operator work remains runtime-owned despite the current Task.
+        await app._execute_visual_perception(
+            CognitionToolCall("observe_scene", '{"focus":"look"}')
+        )
+        self.assertEqual(
+            resources.acquisitions[-1], (CAMERA_RESOURCE, VISUAL_PERCEPTION_OWNER)
+        )
+        await app.stop()
+
+    async def test_standalone_autonomous_visual_capture_is_runtime_owned(self):
+        resources = RecordingArbiter()
+        app = self.initiative_app(
+            SequenceCognition([]), Camera(), Vision(), resource_arbiter=resources
+        )
+        await app.start()
+        goal = app.set_goal("look carefully")
+        await app._execute_visual_perception(
+            CognitionToolCall("observe_scene", '{"focus":"look"}'),
+            expected_goal=goal, autonomous=True,
+        )
+        self.assertEqual(
+            resources.acquisitions[-1], (CAMERA_RESOURCE, VISUAL_PERCEPTION_OWNER)
+        )
+        await app.stop()
+
+    async def test_task_camera_lease_is_not_borrowed_reentrantly(self):
+        camera, vision = Camera(), Vision()
+        app = self.initiative_app(SequenceCognition([]), camera, vision)
+        await app.start()
+        app.start_task(Task("inspect", goal=TaskGoal("look carefully")))
+        goal = app.active_goal
+        lease = app.acquire_task_resource(CAMERA_RESOURCE)
+
+        result, semantic = await app._execute_visual_perception(
+            CognitionToolCall("observe_scene", '{"focus":"look"}'),
+            expected_goal=goal, autonomous=True,
+        )
+        self.assertEqual(json.loads(result.output)["status"], "rejected")
+        self.assertIsNone(semantic)
+        self.assertEqual((camera.captures, len(vision.calls)), (0, 0))
+        self.assertIs(app.resources.lease_for(CAMERA_RESOURCE), lease)
+        app.release_task_resource(lease)
         await app.stop()
 
     async def test_invalid_focus_and_oversize_never_call_backend(self):

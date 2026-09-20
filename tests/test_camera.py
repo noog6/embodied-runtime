@@ -7,12 +7,17 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from embodied_runtime.app import RobotApplication
+from embodied_runtime.app import (
+    CAMERA_CAPTURE_OWNER, CAMERA_RESOURCE, RobotApplication,
+)
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cli import build_camera_backend, build_parser, main
 from embodied_runtime.events import EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.resources import (
+    ResourceArbiter, ResourceBusyError, ResourceOwner,
+)
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.sensing.camera.picamera2 import (
     Picamera2CameraBackend,
@@ -170,8 +175,18 @@ class FakeCamera(CameraBackend):
         return self.frame
 
 
+class RecordingArbiter(ResourceArbiter):
+    def __init__(self):
+        super().__init__()
+        self.acquisitions = []
+
+    def acquire(self, resource, owner):
+        self.acquisitions.append((resource, owner))
+        return super().acquire(resource, owner)
+
+
 class ApplicationCameraTests(unittest.IsolatedAsyncioTestCase):
-    def application(self, camera=None, events=None, body_backend=None):
+    def application(self, camera=None, events=None, body_backend=None, **kwargs):
         return RobotApplication(
             RobotProfile("test", "Test"),
             VirtualHardwareBackend(),
@@ -179,7 +194,51 @@ class ApplicationCameraTests(unittest.IsolatedAsyncioTestCase):
             platform_provider=PlatformProvider(),
             body_backend=body_backend,
             camera_backend=camera,
+            **kwargs,
         )
+
+    async def test_capture_uses_direct_owner_and_releases_camera(self):
+        camera = FakeCamera()
+        resources = RecordingArbiter()
+        app = self.application(camera, resource_arbiter=resources)
+        await app.start()
+
+        frame = app.capture_camera_frame()
+
+        self.assertIs(frame, camera.frame)
+        self.assertEqual(resources.acquisitions, [
+            (CAMERA_RESOURCE, CAMERA_CAPTURE_OWNER)
+        ])
+        self.assertIsNone(resources.lease_for(CAMERA_RESOURCE))
+        await app.stop()
+
+    async def test_busy_camera_blocks_backend_and_preserves_foreign_lease(self):
+        camera = FakeCamera()
+        app = self.application(camera)
+        await app.start()
+        foreign = app.resources.acquire(
+            CAMERA_RESOURCE, ResourceOwner("runtime", "other_camera_user")
+        )
+
+        with self.assertRaises(ResourceBusyError):
+            app.capture_camera_frame()
+        self.assertEqual(camera.captures, 0)
+        self.assertIs(app.resources.lease_for(CAMERA_RESOURCE), foreign)
+
+        app.resources.release(foreign)
+        self.assertIs(app.capture_camera_frame(), camera.frame)
+        self.assertEqual(camera.captures, 1)
+        await app.stop()
+
+    async def test_capture_failure_releases_camera(self):
+        camera = FakeCamera()
+        app = self.application(camera)
+        await app.start()
+        with patch.object(camera, "capture_frame", side_effect=RuntimeError("broken")):
+            with self.assertRaisesRegex(RuntimeError, "broken"):
+                app.capture_camera_frame()
+        self.assertIsNone(app.resources.lease_for(CAMERA_RESOURCE))
+        await app.stop()
 
     async def test_application_owns_camera_and_capture_is_transient(self):
         camera = FakeCamera()
@@ -289,9 +348,21 @@ class CameraCliTests(unittest.TestCase):
 
     def test_diagnostic_writes_exactly_one_returned_frame(self):
         camera = FakeCamera()
+        application_captures = []
+        capture = RobotApplication.capture_camera_frame
+
+        def recording_capture(application):
+            application_captures.append(application)
+            return capture(application)
+
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "frame.jpg"
-            with patch("embodied_runtime.cli.build_camera_backend", return_value=camera):
+            with (
+                patch("embodied_runtime.cli.build_camera_backend", return_value=camera),
+                patch.object(
+                    RobotApplication, "capture_camera_frame", recording_capture
+                ),
+            ):
                 with patch("builtins.print") as printer:
                     result = main([
                         "--camera", "picamera2", "--diagnostics",
@@ -300,6 +371,7 @@ class CameraCliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(output.read_bytes(), JPEG)
             self.assertEqual(camera.captures, 1)
+            self.assertEqual(len(application_captures), 1)
             rendered = " ".join(str(call.args[0]) for call in printer.call_args_list)
             self.assertIn("backend=fake", rendered)
             self.assertIn(f"output={output}", rendered)

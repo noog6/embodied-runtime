@@ -24,6 +24,23 @@ into runtime state and is not an initiative effect. Image bytes are discarded af
 the request; they are not written,
 logged, published, cached, or retained as history.
 
+The canonical exclusive resource for frame acquisition is `camera`, the first
+physical capability integrated with `ResourceArbiter`. Every normal
+application-owned capture goes through one application boundary: direct CLI and
+console capture uses the stable `runtime:camera_capture` owner, while operator and
+standalone autonomous visual perception use `runtime:visual_perception`.
+Autonomous perception uses `task:<Task UUID>` only when its expected goal is the
+exact `ActiveGoal` bound to the current running Task. A Task merely existing, or
+a matching goal description, does not transfer that ownership.
+
+The exclusive lease covers only synchronous physical capture and is released in
+a `finally` block before frame-size validation or asynchronous interpretation.
+Backend capture failure therefore cannot strand the one-shot lease. Contention is
+a bounded, fail-fast rejected acquisition: there is no wait, retry, preemption,
+or same-owner borrowing. It does not make the capability unavailable, because
+availability describes configured runtime capability rather than instantaneous
+authority. The camera adapter remains unaware of resource arbitration.
+
 ## Configuration and availability
 
 Set `[runtime] vision = "openai-responses"` (or use the development override
