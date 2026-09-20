@@ -66,6 +66,9 @@ from embodied_runtime.perception import (
     MAX_CAMERA_FRAME_BYTES, VisualPerceptionBackend, VisualPerceptionResult,
 )
 from embodied_runtime.reflexes import Reflex
+from embodied_runtime.resources import (
+    ResourceArbiter, ResourceKey, ResourceLease, ResourceOwner,
+)
 from embodied_runtime.run_history import (
     MAX_GREP_QUERY_LENGTH, RunHistoryEvidenceReader, canonical_run_id,
 )
@@ -478,6 +481,7 @@ class RobotApplication:
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         persistent_memory_store: PersistentMemoryStore | None = None,
         run_history_evidence: RunHistoryEvidenceReader | None = None,
+        resource_arbiter: ResourceArbiter | None = None,
     ) -> None:
         self.profile = profile
         self.hardware = hardware
@@ -486,6 +490,9 @@ class RobotApplication:
         self._wall_clock = wall_clock
         self.options = options or ApplicationOptions()
         self.events = events or EventBus()
+        self.resources = (
+            resource_arbiter if resource_arbiter is not None else ResourceArbiter()
+        )
         self.body_backend = body_backend
         self.camera_backend = camera_backend
         self._cognition_backend = cognition_backend
@@ -690,6 +697,37 @@ class RobotApplication:
         )
         return running
 
+    @staticmethod
+    def _task_resource_owner(task: Task) -> ResourceOwner:
+        """Derive stable semantic resource ownership from the Task UUID."""
+        return ResourceOwner("task", str(task.id))
+
+    def acquire_task_resource(self, resource: ResourceKey) -> ResourceLease:
+        """Acquire one resource for the current running Task without waiting."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Acquiring a Task resource requires a running application")
+        binding = self._current_task_binding
+        if binding is None:
+            raise RuntimeError("no current Task exists")
+        if binding.task.status is not TaskStatus.RUNNING:
+            raise RuntimeError("current Task must be running")
+        self._validate_current_task_binding(binding)
+        return self.resources.acquire(resource, self._task_resource_owner(binding.task))
+
+    def release_task_resource(self, lease: ResourceLease) -> None:
+        """Release an exact active lease owned by the current Task."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Releasing a Task resource requires a running application")
+        binding = self._current_task_binding
+        if binding is None:
+            raise RuntimeError("no current Task exists")
+        if not isinstance(lease, ResourceLease):
+            raise TypeError("lease must be a ResourceLease")
+        owner = self._task_resource_owner(binding.task)
+        if lease.owner != owner:
+            raise RuntimeError("resource lease is not owned by the current Task")
+        self.resources.release(lease)
+
     def finish_task(self, status: TaskStatus) -> Task:
         """End the current Task in one explicitly selected terminal state."""
         if self.state is not LifecycleState.RUNNING:
@@ -721,6 +759,7 @@ class RobotApplication:
 
         self._validate_current_task_binding(binding)
         paused = binding.task.transition_to(TaskStatus.PAUSED)
+        self._release_task_resources(binding)
         self._release_task_active_goal(binding)
         self._current_task_binding = _CurrentTaskBinding(paused, None)
         LOGGER.info("[TASK] task=%s status=paused", paused.id)
@@ -785,8 +824,13 @@ class RobotApplication:
 
     def _release_current_task_binding(self, binding: _CurrentTaskBinding) -> None:
         """Remove volatile Task ownership without changing its domain snapshot."""
+        self._release_task_resources(binding)
         self._release_task_active_goal(binding)
         self._current_task_binding = None
+
+    def _release_task_resources(self, binding: _CurrentTaskBinding) -> None:
+        """Release all leases belonging to the binding's stable Task identity."""
+        self.resources.release_all(self._task_resource_owner(binding.task))
 
     def _set_lifecycle(self, lifecycle: LifecycleState) -> None:
         self._runtime_state = replace(self._runtime_state, lifecycle=lifecycle)
@@ -955,9 +999,14 @@ class RobotApplication:
         if binding is not None:
             # Session shutdown drops coordination only; the running or paused Task
             # snapshot is deliberately not given a semantic terminal state.
-            if binding.active_goal is not None:
-                self._active_goal = None
-                self._active_goal_started_monotonic = None
+            try:
+                self._release_task_resources(binding)
+            except BaseException as error:
+                failure = failure or error
+            try:
+                self._release_task_active_goal(binding)
+            except BaseException as error:
+                failure = failure or error
             self._current_task_binding = None
         try:
             await self.attention.stop()
