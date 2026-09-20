@@ -24,22 +24,29 @@ outcome of that work; a task goal is neither physical `RuntimeState` nor EventBu
 history. Tasks are immutable, currently session-resident domain values and own no
 runtime machinery. Defining a Task or TaskGoal causes neither execution nor a
 cognition wake. The application may explicitly own one volatile current Task
-binding. While current, a Task's durable `TaskGoal` (when present) is represented
+binding. A running current Task's durable `TaskGoal` (when present) is represented
 by one exact, session-local `ActiveGoal`; neither the binding nor that ActiveGoal
-is stored inside the Task. Generic goal mutation cannot replace or clear a
-Task-bound goal while leaving its Task running. A current Task without a TaskGoal
-has no ActiveGoal and the Task description is not used as an implicit goal.
+is stored inside the Task. Pausing retains current ownership and the `TaskGoal`,
+but releases the exact `ActiveGoal`, clears its age marker, and cancels its temporal
+follow-up. Resuming creates a fresh `ActiveGoal` rather than reusing the prior
+activation. Generic goal mutation cannot replace the current-Task intention slot,
+including while the Task is paused. A current Task without a TaskGoal has no
+ActiveGoal and the Task description is not used as an implicit goal.
 Existing cognition goal closure therefore applies only to standalone ActiveGoals
 in this phase. A Task-owned ActiveGoal is released only through explicit Task
 lifecycle coordination; cognition does not yet complete Tasks. Goal mutation
 capabilities are not projected to cognition while a Task owns the current-intention
 slot.
 
-Finishing the current Task explicitly produces a terminal Task snapshot and
-removes the binding. Application shutdown only removes volatile ownership and
-the Task-bound ActiveGoal; it does not force the running domain snapshot to a
-terminal state. Current ownership provides coordination only: it adds no
-executor, scheduler, pause/resume orchestration, persistence, or autonomous work.
+Finishing the current Task explicitly produces an allowed terminal Task snapshot
+and removes the binding; `stop_task()` uses this path to stop either a running or
+paused Task. Application shutdown only removes volatile ownership and any
+Task-bound ActiveGoal; it does not force a running or paused domain snapshot to a
+terminal state. Pause/resume/stop provide coordination at a safe application
+boundary only. They do not interrupt arbitrary code or in-flight hardware work,
+release resource leases, checkpoint progress, or persist it. Current ownership
+adds no executor, scheduler, resource arbitration, persistence, recovery, or
+autonomous work.
 
 An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
 or persistent history. It is one transient delivery effect through an

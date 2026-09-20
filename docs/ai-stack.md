@@ -36,11 +36,15 @@ or resolves itself.
 A Task's optional `TaskGoal` is durable semantic state belonging to that bounded
 work, not itself a volatile current intention. Explicit application activation
 may bind the one current running Task to an exact session-local `ActiveGoal`
-created from the TaskGoal description. This application-owned binding disappears
-when the Task is explicitly finished or the runtime session shuts down; shutdown
-does not assign a semantic Task outcome. Activation itself does not wake cognition,
-execute capabilities, monitor success, or schedule work, and no executor,
-scheduler, pause/resume orchestration, or persistence is implemented.
+created from the TaskGoal description. Pausing keeps the Task current but removes
+that active intention and its temporal follow-up; resuming creates a fresh
+session-local `ActiveGoal`. Thus no TaskGoal is projected as active while paused,
+and standalone goal capabilities remain unavailable because the Task still owns
+the intention slot. Explicit Task stop is terminal, whereas runtime shutdown only
+discards the volatile binding and assigns no Task outcome. These operations
+coordinate state only: they do not wake cognition, preempt capabilities or
+hardware operations, release resources, schedule work, or persist progress. No
+executor, scheduler, resource arbiter, persistence, or recovery is implemented.
 
 It exists to test the responsibility boundary between the runtime and cognition;
 it does not select the reference robot's permanent AI architecture. The

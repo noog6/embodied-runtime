@@ -220,6 +220,178 @@ class TaskCoordinationTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         await app.stop()
 
+    async def test_pause_retains_task_and_releases_exact_goal_and_followup(self):
+        now = [10.0]
+        app = RobotApplication(
+            RobotProfile("test", "Test"),
+            VirtualHardwareBackend(),
+            platform_provider=StaticPlatform(),
+            monotonic_clock=lambda: now[0],
+        )
+        await app.start()
+        original = Task("work", goal=TaskGoal("finish"))
+        running = app.start_task(original)
+        goal = app.active_goal
+        self.assertIsNotNone(goal)
+        app.temporal.schedule(60, "check", goal)
+
+        with self.assertLogs("embodied_runtime.app", level="INFO") as logs:
+            paused = app.pause_task()
+
+        self.assertIs(paused.status, TaskStatus.PAUSED)
+        self.assertEqual(paused.id, running.id)
+        self.assertEqual(paused.description, running.description)
+        self.assertIs(paused.goal, original.goal)
+        self.assertIs(app.current_task, paused)
+        self.assertIsNone(app.active_goal)
+        self.assertIsNone(app._active_goal_started_monotonic)
+        self.assertIsNone(app.temporal.pending)
+        self.assertIn(
+            f"[TASK] task={original.id} status=paused", "\n".join(logs.output)
+        )
+        await asyncio.sleep(0)
+        await app.stop()
+
+    async def test_goalless_task_pauses_and_resumes_without_active_goal(self):
+        app = self.make_app()
+        await app.start()
+        running = app.start_task(Task("work"))
+
+        paused = app.pause_task()
+        resumed = app.resume_task()
+
+        self.assertIs(paused.status, TaskStatus.PAUSED)
+        self.assertIs(resumed.status, TaskStatus.RUNNING)
+        self.assertEqual(resumed.id, running.id)
+        self.assertIs(app.current_task, resumed)
+        self.assertIsNone(app.active_goal)
+        await app.stop()
+
+    async def test_resume_creates_fresh_next_goal_and_does_not_restore_followup(self):
+        app = self.make_app()
+        await app.start()
+        original = Task("work", goal=TaskGoal("finish"))
+        running = app.start_task(original)
+        first_goal = app.active_goal
+        self.assertIsNotNone(first_goal)
+        app.temporal.schedule(60, "check", first_goal)
+        app.pause_task()
+
+        resumed = app.resume_task()
+        resumed_goal = app.active_goal
+
+        self.assertIs(resumed.status, TaskStatus.RUNNING)
+        self.assertEqual(resumed.id, running.id)
+        self.assertEqual(resumed.description, running.description)
+        self.assertIs(resumed.goal, original.goal)
+        self.assertIs(app.current_task, resumed)
+        self.assertIsNotNone(resumed_goal)
+        self.assertIsNot(resumed_goal, first_goal)
+        self.assertEqual(resumed_goal.description, first_goal.description)
+        self.assertEqual(resumed_goal.id, first_goal.id + 1)
+        self.assertIsNone(app.temporal.pending)
+        await asyncio.sleep(0)
+        await app.stop()
+
+    async def test_pause_resume_require_valid_application_task_and_status(self):
+        app = self.make_app()
+        with self.assertRaisesRegex(RuntimeError, "running application"):
+            app.pause_task()
+        with self.assertRaisesRegex(RuntimeError, "running application"):
+            app.resume_task()
+        await app.start()
+        with self.assertRaisesRegex(RuntimeError, "no current Task"):
+            app.pause_task()
+        with self.assertRaisesRegex(RuntimeError, "no current Task"):
+            app.resume_task()
+        app.start_task(Task("work"))
+        with self.assertRaisesRegex(RuntimeError, "must be paused"):
+            app.resume_task()
+        app.pause_task()
+        with self.assertRaisesRegex(RuntimeError, "must be running"):
+            app.pause_task()
+        await app.stop()
+
+    async def test_resume_fails_closed_for_unrelated_active_goal(self):
+        app = self.make_app()
+        await app.start()
+        paused = app.start_task(Task("work", goal=TaskGoal("finish")))
+        paused = app.pause_task()
+        unrelated = app._create_active_goal("unrelated")
+
+        with self.assertRaisesRegex(RuntimeError, "binding is inconsistent"):
+            app.resume_task()
+
+        self.assertIs(app.current_task, paused)
+        self.assertIs(app.active_goal, unrelated)
+        app._active_goal = None
+        app._active_goal_started_monotonic = None
+        await app.stop()
+
+    async def test_paused_task_keeps_current_intention_slot(self):
+        app = self.make_app()
+        await app.start()
+        paused = app.start_task(Task("first"))
+        paused = app.pause_task()
+
+        with self.assertRaisesRegex(RuntimeError, "current Task"):
+            app.start_task(Task("second"))
+        with self.assertRaisesRegex(RuntimeError, "Task is current"):
+            app.set_goal("standalone")
+        self.assertIs(app.current_task, paused)
+        self.assertNotIn("set_goal", {tool.name for tool in app.cognition_tools()})
+        await app.stop()
+
+    async def test_stop_task_from_running_reuses_terminal_cleanup(self):
+        app = self.make_app()
+        await app.start()
+        app.start_task(Task("work", goal=TaskGoal("finish")))
+        goal = app.active_goal
+        self.assertIsNotNone(goal)
+        app.temporal.schedule(60, "check", goal)
+
+        stopped = app.stop_task()
+
+        self.assertIs(stopped.status, TaskStatus.STOPPED)
+        self.assertIsNone(app.current_task)
+        self.assertIsNone(app.active_goal)
+        self.assertIsNone(app.temporal.pending)
+        await asyncio.sleep(0)
+        await app.stop()
+
+    async def test_stop_task_from_paused_creates_no_goal(self):
+        app = self.make_app()
+        await app.start()
+        app.start_task(Task("work", goal=TaskGoal("finish")))
+        app.pause_task()
+        next_goal_id = app._next_goal_id
+
+        stopped = app.stop_task()
+
+        self.assertIs(stopped.status, TaskStatus.STOPPED)
+        self.assertIsNone(app.current_task)
+        self.assertIsNone(app.active_goal)
+        self.assertEqual(app._next_goal_id, next_goal_id)
+        await app.stop()
+
+    async def test_stop_task_requires_current_task(self):
+        app = self.make_app()
+        await app.start()
+        with self.assertRaisesRegex(RuntimeError, "no current Task"):
+            app.stop_task()
+        await app.stop()
+
+    async def test_paused_task_cannot_complete_or_fail(self):
+        app = self.make_app()
+        await app.start()
+        paused = app.start_task(Task("work"))
+        paused = app.pause_task()
+        for status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            with self.assertRaisesRegex(ValueError, "from paused"):
+                app.finish_task(status)
+            self.assertIs(app.current_task, paused)
+        await app.stop()
+
     async def test_shutdown_drops_binding_without_terminating_running_snapshot(self):
         app = self.make_app()
         await app.start()
@@ -228,6 +400,18 @@ class TaskCoordinationTests(unittest.IsolatedAsyncioTestCase):
         await app.stop()
 
         self.assertIs(running.status, TaskStatus.RUNNING)
+        self.assertIsNone(app.current_task)
+        self.assertIsNone(app.active_goal)
+
+    async def test_shutdown_drops_binding_without_terminating_paused_snapshot(self):
+        app = self.make_app()
+        await app.start()
+        app.start_task(Task("work", goal=TaskGoal("finish")))
+        paused = app.pause_task()
+
+        await app.stop()
+
+        self.assertIs(paused.status, TaskStatus.PAUSED)
         self.assertIsNone(app.current_task)
         self.assertIsNone(app.active_goal)
 
