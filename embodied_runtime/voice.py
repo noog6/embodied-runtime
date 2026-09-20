@@ -18,12 +18,24 @@ import time
 from typing import Protocol, TypeVar
 import wave
 
+from embodied_runtime.resources import (
+    ResourceArbiter,
+    ResourceBusyError,
+    ResourceKey,
+    ResourceOwner,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 
 _WAKE_CAPTURE_STOP_RETRY_SECONDS = 0.1
 _WAKE_CAPTURE_STOP_TIMEOUT_SECONDS = 2.0
+_WAKE_RESOURCE_BUSY_BACKOFF_SECONDS = 0.1
 _T = TypeVar("_T")
+
+MICROPHONE_RESOURCE = ResourceKey("audio.microphone")
+VOICE_MICROPHONE_OWNER = ResourceOwner("runtime", "voice")
+VOICE_WAKE_MICROPHONE_OWNER = ResourceOwner("runtime", "voice_wake")
 
 
 async def _await_owned_blocking_operation(operation: Callable[[], _T]) -> _T:
@@ -92,6 +104,7 @@ class VoiceInteraction:
         policy: VoiceSessionPolicy = VoiceSessionPolicy(),
         *,
         wake_words: list[str] | None = None,
+        resources: ResourceArbiter | None = None,
     ) -> None:
         self._provider = provider
         self._text_to_speech_provider = text_to_speech_provider
@@ -106,6 +119,7 @@ class VoiceInteraction:
         self._wake_listen_task: asyncio.Task[str | None] | None = None
         self._wake_enabled = asyncio.Event()
         self._microphone_lock = asyncio.Lock()
+        self._resources = resources if resources is not None else ResourceArbiter()
         self._stopping = False
         self._session_pending = False
 
@@ -133,16 +147,30 @@ class VoiceInteraction:
         try:
             self._wake_enabled.clear()
             # Cooperatively release a wake capture before waiting for ownership.
-            if self._wake_task is not None and self._provider is not None:
+            wake_capture = self._wake_listen_task
+            if (
+                wake_capture is not None
+                and not wake_capture.done()
+                and self._provider is not None
+            ):
                 await self._provider.stop_listening()
             async with self._microphone_lock:
-                self._session_task = asyncio.create_task(
-                    self._run(source), name="bounded-voice-session"
-                )
                 try:
-                    return await self._session_task
+                    lease = self._resources.acquire(
+                        MICROPHONE_RESOURCE, VOICE_MICROPHONE_OWNER
+                    )
+                except ResourceBusyError:
+                    return "Voice interaction failed: microphone resource is busy."
+                try:
+                    self._session_task = asyncio.create_task(
+                        self._run(source), name="bounded-voice-session"
+                    )
+                    try:
+                        return await self._session_task
+                    finally:
+                        self._session_task = None
                 finally:
-                    self._session_task = None
+                    self._resources.release(lease)
         finally:
             self._session_pending = False
             if not self._stopping and self._wake_task is not None:
@@ -176,16 +204,27 @@ class VoiceInteraction:
                 async with self._microphone_lock:
                     if not self._wake_enabled.is_set() or self._stopping:
                         continue
-                    self._wake_listen_task = asyncio.create_task(
-                        self._provider.listen(), name="voice-wake-capture"
-                    )
                     try:
-                        heard = await asyncio.shield(self._wake_listen_task)
-                    finally:
-                        await asyncio.gather(
-                            self._wake_listen_task, return_exceptions=True
+                        lease = self._resources.acquire(
+                            MICROPHONE_RESOURCE, VOICE_WAKE_MICROPHONE_OWNER
                         )
-                        self._wake_listen_task = None
+                    except ResourceBusyError:
+                        lease = None
+                    if lease is not None:
+                        self._wake_listen_task = asyncio.create_task(
+                            self._provider.listen(), name="voice-wake-capture"
+                        )
+                        try:
+                            heard = await asyncio.shield(self._wake_listen_task)
+                        finally:
+                            await asyncio.gather(
+                                self._wake_listen_task, return_exceptions=True
+                            )
+                            self._wake_listen_task = None
+                            self._resources.release(lease)
+                if lease is None:
+                    await asyncio.sleep(_WAKE_RESOURCE_BUSY_BACKOFF_SECONDS)
+                    continue
                 normalized = heard.strip().casefold() if heard is not None else ""
                 if normalized == "huh":
                     ignored_huhs += 1
@@ -213,8 +252,13 @@ class VoiceInteraction:
         self._stopping = True
         self._wake_enabled.set()
         stop_error: Exception | None = None
+        wake_capture = self._wake_listen_task
+        session_capture = self._listen_task
         try:
-            if self._provider is not None:
+            if self._provider is not None and any(
+                capture is not None and not capture.done()
+                for capture in (wake_capture, session_capture)
+            ):
                 await self._provider.stop_listening()
         except Exception as error:
             stop_error = error
@@ -436,7 +480,7 @@ class FusionHatVoiceProvider:
                 stop.set()
             stt = self._stt
         if stt is not None:
-            await asyncio.to_thread(stt.stop_listening)
+            await _await_owned_blocking_operation(stt.stop_listening)
 
     async def play_engagement_cue(self) -> None:
         """Play the fixed local wake acknowledgement through the HAT speaker."""

@@ -58,8 +58,13 @@ lease. Normal voice speaker output is integrated through the exclusive
 lease across their awaited provider operation and release it on success, failure,
 or cancellation. Acquisition is fail-fast and non-reentrant. Providers remain
 unaware of arbitration, and the current TTS boundary conservatively includes
-hosted synthesis as well as playback. Microphone coordination still uses the
-existing local lock and body remains unintegrated.
+hosted synthesis as well as playback. The canonical `audio.microphone` resource
+is runtime-owned by `runtime:voice` for an entire bounded session or by
+`runtime:voice_wake` for one idle wake capture. Its fail-fast semantic leases are
+separate from the existing local implementation lock, transfer without overlap,
+and remain held until capture cleanup has joined. `stop_listening()` controls the
+existing capture rather than acquiring authority. Contention does not change
+voice capability availability. Body remains unintegrated.
 
 An autonomous `OperatorMessage` is likewise not `RuntimeState`, WorkingMemory,
 or persistent history. It is one transient delivery effect through an

@@ -87,7 +87,10 @@ from embodied_runtime.tasks import Task, TaskStatus
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
 from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
 from embodied_runtime.voice import (
+    MICROPHONE_RESOURCE,
     TextToSpeechProvider,
+    VOICE_MICROPHONE_OWNER,
+    VOICE_WAKE_MICROPHONE_OWNER,
     VoiceInteraction,
     VoiceProvider,
     VoiceSessionPolicy,
@@ -590,6 +593,7 @@ class RobotApplication:
             ),
             voice_policy,
             wake_words=voice_wake_words,
+            resources=self.resources,
         )
         self._active_goal: ActiveGoal | None = None
         self._current_task_binding: _CurrentTaskBinding | None = None

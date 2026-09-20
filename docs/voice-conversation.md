@@ -92,8 +92,21 @@ conservatively inside the lease; splitting those stages is deliberately deferred
 Cancellation waits for any already-started owned blocking speaker worker to
 finish its hardware cleanup before allowing the lease to be released; it does
 not forcibly interrupt that worker.
-The existing local microphone lock remains separate implementation-level capture
-synchronization, and neither microphone nor body authority is integrated yet.
+The canonical `audio.microphone` resource is acquired at the `VoiceInteraction`
+coordination boundary, not in a hardware provider. A bounded conversation owns
+one exact lease as `runtime:voice` across listening, thinking, speaking, later
+turns, and cleanup. Each idle wake capture owns one exact lease as
+`runtime:voice_wake` until its capture task has actually joined. Wake handoff is
+cooperative and non-overlapping: wake capture ends and releases its lease and
+local lock before the bounded session acquires authority. The existing
+`_microphone_lock` remains implementation/session coordination; semantic
+arbitration does not replace it. `stop_listening()` controls an already-owned
+capture rather than acquiring a second lease; the long-lived wake service alone
+does not grant authority to mutate capture state. Blocking capture/cleanup must
+finish before the lease is released. Acquisition is fail-fast and non-reentrant,
+with no preemption, priority, notifications, or wait queue (the long-lived wake
+service merely retries independent attempts after a short backoff). Temporary
+contention does not change `voice.available`. Body authority remains unintegrated.
 
 The narrow `TextToSpeechProvider` seam keeps selection from changing the bounded
 conversation architecture. There is no provider probing, fallback, runtime
