@@ -18,6 +18,7 @@ from embodied_runtime.interaction import (
     CONSOLE_ADMINISTRATIVE, CONSOLE_DIALOGUE, ConsoleOperatorMessageChannel,
     InteractionContext,
 )
+from embodied_runtime.jobs import JobRunStatus, JobTarget
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
 from embodied_runtime.run_history import (
@@ -103,6 +104,8 @@ class RuntimeConsole:
             return self._job_show(words), False
         if vocabulary[:2] == ["job", "runs"]:
             return self._job_runs(words), False
+        if vocabulary and vocabulary[0] == "job":
+            return self._job_command(words), False
         if vocabulary and vocabulary[0] == "memory" and vocabulary != ["memory", "clear"]:
             return self._persistent_memory_command(words), False
         if vocabulary == ["goal"]:
@@ -229,6 +232,13 @@ class RuntimeConsole:
                 "  jobs                           List the entire durable Job catalog",
                 "  job show JOB<n>                Show one Job and its assignment",
                 "  job runs JOB<n>                List durable occurrences of one Job",
+                "  job add <name> [options]       Add an enabled Job definition",
+                "  job enable|disable JOB<n>      Change Job definition state",
+                "  job start JOB<n>               Start a JobRun and bounded Task",
+                "  job current                    Show current JobRun and Task",
+                "  job complete [summary]         Complete current JobRun",
+                "  job fail <error-summary>       Fail current JobRun",
+                "  job stop [summary]             Stop current JobRun",
                 "  memory clear                   Clear session working memory",
                 "  memory persistent              Show persistent-memory state",
                 "  memory entity add <entity_type> <canonical_name> Create a durable entity",
@@ -301,6 +311,121 @@ class RuntimeConsole:
         if not runs:
             lines.append("  none")
         return "\n".join(lines)
+
+    def _job_command(self, words: list[str]) -> str:
+        action = words[1].lower() if len(words) > 1 else ""
+        if action == "add":
+            return self._job_add(words)
+        if action in ("enable", "disable"):
+            return self._job_enable(words, action == "enable")
+        if action == "start":
+            if len(words) != 3 or (job_id := _catalog_id(words[2], "JOB")) is None:
+                return "Usage: job start JOB<n>."
+            try:
+                binding = self._application.start_job_run(job_id)
+            except (KeyError, RuntimeError, TypeError, ValueError) as error:
+                return f"Unable to start Job: {error}."
+            except Exception:
+                return "Unable to start Job: persistence operation failed."
+            return (
+                f"Started JOB{binding.job.id} as RUN{binding.run.id} "
+                f"with Task {binding.task.id}."
+            )
+        if action == "current":
+            if len(words) != 2:
+                return "Usage: job current."
+            return self._job_current()
+        terminal = {
+            "complete": JobRunStatus.COMPLETED,
+            "fail": JobRunStatus.FAILED,
+            "stop": JobRunStatus.STOPPED,
+        }.get(action)
+        if terminal is not None:
+            if (action == "fail" and len(words) < 3) or (
+                action in ("complete", "stop") and len(words) < 2
+            ):
+                return self._job_terminal_usage(action)
+            summary = " ".join(words[2:]) or None
+            try:
+                binding = self._application.finish_job_run(terminal, summary)
+            except (KeyError, RuntimeError, TypeError, ValueError) as error:
+                return f"Unable to {action} Job: {error}."
+            except Exception:
+                return f"Unable to {action} Job: persistence operation failed."
+            return f"Job RUN{binding.run.id} {binding.run.status.value}."
+        return (
+            "Usage: job add|enable|disable|start|current|complete|fail|stop."
+        )
+
+    @staticmethod
+    def _job_terminal_usage(action: str) -> str:
+        if action == "fail":
+            return "Usage: job fail <error-summary>."
+        return f"Usage: job {action} [summary]."
+
+    def _job_add(self, words: list[str]) -> str:
+        if len(words) < 3:
+            return "Usage: job add <name> [--description <text>] [--target <kind>:<identifier>]."
+        name = words[2]
+        description = ""
+        target = None
+        index = 3
+        try:
+            while index < len(words):
+                option = words[index].lower()
+                if option not in ("--description", "--target") or index + 1 >= len(words):
+                    raise ValueError("invalid job add options")
+                value = words[index + 1]
+                if option == "--description":
+                    description = value
+                else:
+                    pieces = value.split(":")
+                    if len(pieces) != 2:
+                        raise ValueError("target must use <kind>:<identifier>")
+                    target = JobTarget(*pieces)
+                index += 2
+            store = self._application.jobs
+            if store is None:
+                raise RuntimeError("Jobs persistence is disabled")
+            job = store.create_job(name, description, target=target)
+        except (KeyError, RuntimeError, TypeError, ValueError):
+            return "Unable to add Job: invalid name, description, or target."
+        except Exception:
+            return "Unable to add Job: persistence operation failed."
+        return f"Added JOB{job.id}: {job.name}."
+
+    def _job_enable(self, words: list[str], enabled: bool) -> str:
+        action = "enable" if enabled else "disable"
+        if len(words) != 3 or (job_id := _catalog_id(words[2], "JOB")) is None:
+            return f"Usage: job {action} JOB<n>."
+        store = self._application.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        try:
+            job = store.set_job_enabled(job_id, enabled)
+        except KeyError:
+            return f"Job not found: JOB{job_id}."
+        except (RuntimeError, TypeError, ValueError):
+            return f"Unable to {action} JOB{job_id}."
+        except Exception:
+            return f"Unable to {action} JOB{job_id}: persistence operation failed."
+        return f"JOB{job.id} {'enabled' if enabled else 'disabled'}."
+
+    def _job_current(self) -> str:
+        binding = self._application.current_job_run
+        if binding is None:
+            return "Current Job\n  none"
+        target = "unassigned" if binding.job.target is None else str(binding.job.target)
+        return "\n".join((
+            "Current Job",
+            f"  job:           JOB{binding.job.id}",
+            f"  run:           RUN{binding.run.id}",
+            f"  name:          {binding.job.name}",
+            f"  target:        {target}",
+            f"  run_status:    {binding.run.status.value}",
+            f"  task_id:       {binding.task.id}",
+            f"  task_status:   {binding.task.status.value}",
+        ))
 
     def _runs(self) -> str:
         run_ids, older = discover_run_ids(self._history_root)
