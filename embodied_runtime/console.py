@@ -31,6 +31,11 @@ class ConsoleTerminalError(RuntimeError):
     """Raised when cancellable terminal input is unavailable."""
 
 
+def _catalog_id(value: str, prefix: str) -> int | None:
+    match = re.fullmatch(fr"(?i:{prefix})([1-9]\d*)", value)
+    return int(match.group(1)) if match else None
+
+
 class RuntimeConsole:
     """Interpret a deliberately small set of local development commands."""
 
@@ -92,6 +97,12 @@ class RuntimeConsole:
             return self._presence(), False
         if vocabulary == ["memory"]:
             return self._memory(), False
+        if vocabulary == ["jobs"]:
+            return self._jobs(), False
+        if vocabulary[:2] == ["job", "show"]:
+            return self._job_show(words), False
+        if vocabulary[:2] == ["job", "runs"]:
+            return self._job_runs(words), False
         if vocabulary and vocabulary[0] == "memory" and vocabulary != ["memory", "clear"]:
             return self._persistent_memory_command(words), False
         if vocabulary == ["goal"]:
@@ -215,6 +226,9 @@ class RuntimeConsole:
                 "  ask <message>                  Send one text cognition request",
                 "  voice                          Start one bounded voice session",
                 "  memory                         Show working-memory metadata",
+                "  jobs                           List the entire durable Job catalog",
+                "  job show JOB<n>                Show one Job and its assignment",
+                "  job runs JOB<n>                List durable occurrences of one Job",
                 "  memory clear                   Clear session working memory",
                 "  memory persistent              Show persistent-memory state",
                 "  memory entity add <entity_type> <canonical_name> Create a durable entity",
@@ -237,6 +251,56 @@ class RuntimeConsole:
                 "  exit                           Stop the console and runtime",
             )
         )
+
+    def _jobs(self) -> str:
+        store = self._application.jobs
+        if store is None:
+            return "Jobs\n  persistence:   disabled"
+        lines = ["Jobs"]
+        jobs = store.list_jobs()
+        if not jobs:
+            lines.append("  none")
+        for job in jobs:
+            target = "unassigned" if job.target is None else str(job.target)
+            state = "enabled" if job.enabled else "disabled"
+            lines.append(f"  JOB{job.id:<5} {state:<8} {target:<20} {job.name}")
+        return "\n".join(lines)
+
+    def _job_show(self, words: list[str]) -> str:
+        if len(words) != 3:
+            return "Usage: job show JOB<n>."
+        job_id = _catalog_id(words[2], "JOB")
+        if job_id is None:
+            return "Usage: job show JOB<n>."
+        store = self._application.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        job = store.get_job(job_id)
+        if job is None:
+            return f"Job not found: JOB{job_id}."
+        return "\n".join(("Job", f"  id:            JOB{job.id}",
+            f"  name:          {job.name}",
+            f"  enabled:       {str(job.enabled).lower()}",
+            f"  target:        {'unassigned' if job.target is None else job.target}",
+            f"  description:   {job.description or '(none)'}"))
+
+    def _job_runs(self, words: list[str]) -> str:
+        if len(words) != 3:
+            return "Usage: job runs JOB<n>."
+        job_id = _catalog_id(words[2], "JOB")
+        if job_id is None:
+            return "Usage: job runs JOB<n>."
+        store = self._application.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        if store.get_job(job_id) is None:
+            return f"Job not found: JOB{job_id}."
+        runs = store.list_runs(job_id)
+        lines = [f"Job runs for JOB{job_id}"]
+        lines.extend(f"  RUN{run.id:<5} {run.status.value:<10} {run.created_at.isoformat()}" for run in runs)
+        if not runs:
+            lines.append("  none")
+        return "\n".join(lines)
 
     def _runs(self) -> str:
         run_ids, older = discover_run_ids(self._history_root)

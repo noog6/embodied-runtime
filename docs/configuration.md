@@ -60,6 +60,10 @@ followup_timeout_seconds = 10
 [memory]
 enabled = true
 database_path = "../data/mira-memory.sqlite3"
+
+[jobs]
+enabled = true
+database_path = "../data/jobs.sqlite3"
 ```
 
 `hardware`, `camera`, and `cognition` accept the same values as their existing
@@ -186,3 +190,11 @@ The optional `[memory]` table accepts `enabled` (boolean) and `database_path`
 resolved from the directory containing the TOML file, and the runtime creates
 the database's parent directory only when enabled. See
 [`persistent-memory.md`](persistent-memory.md) for lifecycle and console use.
+
+# Jobs
+
+The optional `[jobs]` table independently accepts `enabled` (boolean) and
+`database_path` (string). Jobs are disabled when absent or explicitly false;
+enabling them requires a non-empty path. Relative paths resolve from the TOML
+file's directory. Persistent memory need not be enabled. See
+[`jobs.md`](jobs.md) for catalog, assignment, and lifecycle semantics.

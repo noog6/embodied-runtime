@@ -35,6 +35,7 @@ from embodied_runtime.run_history import (
     start_run,
 )
 from embodied_runtime.memory import SQLiteMemoryStore
+from embodied_runtime.jobs import SQLiteJobStore
 from embodied_runtime.interaction import (
     ConsoleOperatorMessageChannel, InteractionChannel,
     OperatorDeliveryDestination, OperatorDeliveryRoute,
@@ -247,6 +248,8 @@ def parse_launch_arguments(
     args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
     args.memory_enabled = effective.memory_enabled
     args.memory_database_path = effective.memory_database_path
+    args.jobs_enabled = effective.jobs_enabled
+    args.jobs_database_path = effective.jobs_database_path
     return parser, args, effective
 
 
@@ -305,6 +308,14 @@ def build_persistent_memory_store(
         return None
     args.memory_database_path.parent.mkdir(parents=True, exist_ok=True)
     return SQLiteMemoryStore(args.memory_database_path)
+
+
+def build_job_store(args: argparse.Namespace) -> SQLiteJobStore | None:
+    """Construct Jobs independently from the persistent-memory subsystem."""
+    if not args.jobs_enabled:
+        return None
+    args.jobs_database_path.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteJobStore(args.jobs_database_path)
 
 
 def build_platform_monitor_policy(
@@ -446,6 +457,7 @@ async def _run_application(
         message_channel,
     ),)) if message_channel is not None else OperatorDeliveryRouteCatalog()
     persistent_memory = build_persistent_memory_store(args)
+    jobs = build_job_store(args)
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
                                               initiative_enabled=args.initiative,
@@ -468,6 +480,7 @@ async def _run_application(
         voice_wake_words=(args.voice_wake_words if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
         timezone_name=args.timezone,
         persistent_memory_store=persistent_memory,
+        job_store=jobs,
         run_history_evidence=history_evidence,
     )
     if args.diagnostics:
