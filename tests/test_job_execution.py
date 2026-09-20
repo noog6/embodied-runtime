@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 import tempfile
@@ -34,9 +35,12 @@ class JobBackend(TextCognitionBackend):
                       tool_executor=None, refreshed_instructions=None):
         self.requests.append((message, instructions, tuple(tool.name for tool in tools)))
         if message == JOB_OUTCOME_EVALUATION_REQUEST and self.outcome_call:
+            readiness = "ready" if self.disposition == "continue" else None
             await tool_executor(CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name,
-                '{"disposition":"%s","summary":"bounded result"}' % self.disposition,
+                json.dumps({"disposition": self.disposition,
+                            "summary": "bounded result", "readiness": readiness,
+                            "delay_seconds": None}),
             ))
         return "bounded work response"
 
@@ -55,7 +59,9 @@ class OutcomeProposalBackend(JobBackend):
         if message == JOB_OUTCOME_EVALUATION_REQUEST:
             self.tool_result = await tool_executor(CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name,
-                '{"disposition":"%s","summary":"done"}' % self.disposition,
+                json.dumps({"disposition": self.disposition, "summary": "done",
+                            "readiness": "ready" if self.disposition == "continue" else None,
+                            "delay_seconds": None}),
             ))
             if self.after_tool is not None:
                 self.after_tool()
@@ -89,7 +95,8 @@ class FirstRequestBlocksBackend(JobBackend):
         elif message == JOB_OUTCOME_EVALUATION_REQUEST:
             await tool_executor(CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name,
-                '{"disposition":"continue","summary":"more work"}',
+                '{"disposition":"continue","summary":"more work",'
+                '"readiness":"ready","delay_seconds":null}',
             ))
         return "bounded response"
 

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from embodied_runtime.jobs.continuation import JobContinuationReadiness
+
 
 class JobWorkDisposition(StrEnum):
     COMPLETED = "completed"
@@ -22,3 +24,5 @@ class JobWorkOutcome:
     response: str
     action: str | None
     action_status: str | None
+    readiness: JobContinuationReadiness | None = None
+    delay_seconds: int | None = None
