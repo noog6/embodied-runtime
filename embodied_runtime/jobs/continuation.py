@@ -12,6 +12,8 @@ from uuid import UUID
 # Prompt projection is intentionally smaller than the 2,000-character durable
 # run-summary limit.  It carries only the immediately preceding episode's context.
 MAX_JOB_CONTINUITY_SUMMARY_CHARS = 750
+MIN_JOB_CONTINUATION_DELAY_SECONDS = 1
+MAX_JOB_CONTINUATION_DELAY_SECONDS = 86_400
 
 
 def project_job_continuity_summary(summary: str | None) -> str | None:
@@ -46,6 +48,14 @@ class JobContinuationState(str, Enum):
     AWAITING_OPERATOR = "awaiting_operator"
 
 
+class JobContinuationReadiness(str, Enum):
+    """Model-described condition for another useful bounded work episode."""
+
+    READY = "ready"
+    AFTER_DELAY = "after_delay"
+    WAIT_FOR_OPERATOR = "wait_for_operator"
+
+
 @dataclass(frozen=True, slots=True)
 class JobContinuation:
     """Volatile authority for one exact Job/Run/Task association."""
@@ -56,6 +66,8 @@ class JobContinuation:
     state: JobContinuationState
     automatic_steps_remaining: int
     last_summary: str | None
+    readiness: JobContinuationReadiness
+    eligible_at_monotonic: float | None = None
 
 
 class JobContinuationController:

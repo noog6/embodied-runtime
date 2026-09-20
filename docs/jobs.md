@@ -147,6 +147,26 @@ rows nor discovers or starts enabled Jobs. Restart does not resume work, and
 there are no execution claims, multi-runtime adoption, or persistent
 continuation records.
 
+### Continuation readiness
+
+A continuing Job occurrence separates its non-terminal outcome from when
+another bounded work episode is useful. `ready` permits work at the next
+ordinary heartbeat opportunity. `after_delay` suppresses autonomous work until
+a bounded delay of 1 through 86,400 seconds has elapsed on the monotonic clock;
+the heartbeat may run it later, and expiry neither bypasses operator fairness
+nor consumes an automatic step. `wait_for_operator` suppresses autonomous work
+until the operator explicitly invokes `job work`. Unrelated operator interaction
+does not resume it. Explicit work may override either waiting readiness and
+receives the latest valid semantic continuity summary.
+
+Readiness is volatile, belongs to one exact JobRun/Task binding, and is removed
+on terminal state or restart. A daily schedule starts a new occurrence;
+`after_delay` only gates another episode of the same occurrence and is not a
+calendar schedule. Event readiness (`wait_for_event`) is not implemented. Work
+that genuinely depends on an external event may use a reasonable bounded
+`after_delay` polling interval, but must not mislabel that dependency as operator
+involvement.
+
 ### Semantic continuity
 
 A continuing Job occurrence may carry the latest work summary into its next

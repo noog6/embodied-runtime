@@ -32,7 +32,9 @@ class SummaryBackend(JobBackend):
             disposition, summary = next(self.outcomes)
             await tool_executor(CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name,
-                json.dumps({"disposition": disposition, "summary": summary}),
+                json.dumps({"disposition": disposition, "summary": summary,
+                            "readiness": "ready" if disposition == "continue" else None,
+                            "delay_seconds": None}),
             ))
         return "current episode commentary"
 
@@ -58,7 +60,9 @@ class PriorContextCannotTerminalizeBackend(SummaryBackend):
                                   tuple(tool.name for tool in kwargs.get("tools", ()))))
             await kwargs["tool_executor"](CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name,
-                json.dumps({"disposition": disposition, "summary": summary}),
+                json.dumps({"disposition": disposition, "summary": summary,
+                            "readiness": "ready" if disposition == "continue" else None,
+                            "delay_seconds": None}),
             ))
             return "evaluation"
         return await super().respond(message, **kwargs)
