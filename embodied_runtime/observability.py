@@ -230,6 +230,24 @@ class RunObservability:
                          and (since_monotonic is None
                               or item.monotonic_seconds >= since_monotonic))
 
+    def recent_events(
+        self, *, component: str | None = None, severity: str | None = None,
+        since_seconds_ago: float | None = None,
+    ) -> tuple[RuntimeEvent, ...]:
+        """Return ring-local events using this recorder's monotonic time domain."""
+        if (since_seconds_ago is not None
+                and (isinstance(since_seconds_ago, bool)
+                     or not isinstance(since_seconds_ago, (int, float))
+                     or since_seconds_ago < 0)):
+            raise ValueError("since_seconds_ago must be a non-negative number or None")
+        threshold = (
+            None if since_seconds_ago is None
+            else self._monotonic() - since_seconds_ago
+        )
+        return self.events(
+            component=component, severity=severity, since_monotonic=threshold
+        )
+
     def _build_snapshot_locked(self, stopped: datetime, status: str | None,
                                shutdown: str | None) -> dict[str, Any]:
         return {

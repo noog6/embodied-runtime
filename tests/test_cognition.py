@@ -270,7 +270,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(app.runtime_state, state)
         self.assertEqual(published, [])
-        self.assertEqual([tool.name for tool in tools], ["set_goal", "inspect_self"])
+        self.assertEqual([tool.name for tool in tools], ["set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         self.assertIsNotNone(executor)
         self.assertIsNotNone(refresh)
         await app.stop()
@@ -389,7 +389,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(tool.parameters["additionalProperties"])
         self.assertEqual(
             [tool.name for tool in self.make_application(FakeCognition()).cognition_tools()],
-            ["set_goal", "inspect_self"],
+            ["set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"],
         )
 
         class NoOrientation(VirtualBodyBackend):
@@ -399,11 +399,11 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
             is_physical = True
 
         self.assertEqual([tool.name for tool in self.make_application(
-            FakeCognition(), body=NoOrientation()).cognition_tools()], ["set_goal", "inspect_self"])
+            FakeCognition(), body=NoOrientation()).cognition_tools()], ["set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         physical = self.make_application(
             FakeCognition(), body=PhysicalOrientation()
         )
-        self.assertEqual([tool.name for tool in physical.cognition_tools()], ["set_goal", "inspect_self"])
+        self.assertEqual([tool.name for tool in physical.cognition_tools()], ["set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         await physical.start()
         result = await physical._execute_cognition_tool(CognitionToolCall(
             "orient_body", '{"yaw_degrees":35,"pitch_degrees":-10}'

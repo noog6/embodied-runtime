@@ -4,7 +4,7 @@ import json
 import unittest
 
 from embodied_runtime.app import (
-    ADDRESS_OPERATOR_TOOL, INSPECT_SELF_TOOL, ORIENT_BODY_TOOL, SCHEDULE_FOLLOWUP_TOOL, ApplicationOptions, RobotApplication, deliver_message_tool,
+    ADDRESS_OPERATOR_TOOL, INSPECT_SELF_TOOL, DIAGNOSTIC_TOOLS, ORIENT_BODY_TOOL, SCHEDULE_FOLLOWUP_TOOL, ApplicationOptions, RobotApplication, deliver_message_tool,
 )
 from embodied_runtime.attention import ACTION_INITIATIVE_REQUEST, AttentionStimulus
 from embodied_runtime.body.virtual import VirtualBodyBackend
@@ -556,7 +556,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                             body=PhysicalBody())
         await app.start()
         app.set_goal("goal")
-        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL, ADDRESS_OPERATOR_TOOL,))
+        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, *DIAGNOSTIC_TOOLS, SCHEDULE_FOLLOWUP_TOOL, ADDRESS_OPERATOR_TOOL,))
         self.assertEqual(ADDRESS_OPERATOR_TOOL.parameters, {
             "type": "object",
             "properties": {"message": {
@@ -685,7 +685,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instructions.count("Available operator notification"), 1)
         self.assertEqual(instructions.count("Notification policy"), 1)
         self.assertEqual([tool.name for tool in backend.requests[0][2]],
-                         ["inspect_self", "schedule_followup", "address_operator"])
+                         ["inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime", "schedule_followup", "address_operator"])
         self.assertEqual((sink.messages[0].text, sink.messages[0].source),
                          ("I noticed the reflex.", "initiative"))
         self.assertEqual(sink.messages[0].interaction, CONSOLE_NOTIFICATION)
@@ -746,7 +746,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("id: E0", instructions)
         self.assertEqual(backend.requests[0][1], tools_before)
         self.assertEqual(backend.requests[1][1], (
-            "inspect_self", "schedule_followup", "address_operator",
+            "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime", "schedule_followup", "address_operator",
         ))
         self.assertEqual(len(sink.messages), 1)
         self.assertEqual(sink.messages[0].interaction, CONSOLE_NOTIFICATION)
@@ -821,7 +821,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         app.set_goal("goal")
         self.assertEqual(
             [tool.name for tool in app.initiative_tools()],
-            ["inspect_self", "schedule_followup", "orient_body", "address_operator"],
+            ["inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime", "schedule_followup", "orient_body", "address_operator"],
         )
 
         await app._request_initiative(AttentionStimulus(
@@ -857,7 +857,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_app(ScriptedBackend(), None)
         await app.start()
         app.set_goal("goal")
-        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,))
+        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, *DIAGNOSTIC_TOOLS, SCHEDULE_FOLLOWUP_TOOL,))
         result = await app._execute_initiative_tool(CognitionToolCall(
             "address_operator", '{"message":"hello"}'
         ))
