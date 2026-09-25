@@ -68,6 +68,7 @@ from embodied_runtime.memory import (
     MemoryRecallProjector, PersistentMemoryStore,
 )
 from embodied_runtime.observations import SemanticObservation, SemanticObservationFact
+from embodied_runtime.observability import RunObservability
 from embodied_runtime.inspection import (
     HostSelfInspector, SELF_INSPECTION_AREAS, SelfInspectionFact,
     SelfInspectionResult, SelfInspector,
@@ -144,15 +145,35 @@ class SpeakerAuthorizedTextToSpeechProvider:
     """Apply speaker authority around application-composed TTS operations."""
 
     def __init__(
-        self, provider: TextToSpeechProvider, resources: ResourceArbiter
+        self, provider: TextToSpeechProvider, resources: ResourceArbiter,
+        observability: RunObservability | None = None,
     ) -> None:
         self._provider = provider
         self._resources = resources
+        self._observability = observability
 
     async def speak(self, text: str) -> None:
         lease = self._resources.acquire(SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER)
         try:
             await self._provider.speak(text)
+            if self._observability is not None:
+                provider = getattr(self._provider, "identifier", type(self._provider).__name__)
+                self._observability.increment(
+                    "tts_generations", dimension=("tts_providers", str(provider))
+                )
+                self._observability.increment("tts_characters", len(text))
+                self._observability.event("voice", "tts_generation", "completed",
+                    source=str(provider), metadata={"characters": len(text)})
+        except asyncio.CancelledError:
+            if self._observability is not None:
+                self._observability.event("voice", "tts_generation", "cancelled")
+            raise
+        except BaseException as error:
+            if self._observability is not None:
+                self._observability.increment("voice_failures")
+                self._observability.event("voice", "tts_generation", "failed",
+                    severity="error", error=type(error).__name__)
+            raise
         finally:
             self._resources.release(lease)
 
@@ -634,8 +655,12 @@ class RobotApplication:
         job_store: JobStore | None = None,
         run_history_evidence: RunHistoryEvidenceReader | None = None,
         resource_arbiter: ResourceArbiter | None = None,
+        observability: RunObservability | None = None,
     ) -> None:
         self.profile = profile
+        self.observability = observability or RunObservability()
+        if cognition_backend is not None and hasattr(cognition_backend, "observability"):
+            cognition_backend.observability = self.observability
         self.hardware = hardware
         self._timezone_name = timezone_name
         self._timezone = ZoneInfo(timezone_name)
@@ -684,7 +709,7 @@ class RobotApplication:
         )
         authorized_tts_provider = (
             SpeakerAuthorizedTextToSpeechProvider(
-                text_to_speech_provider, self.resources
+                text_to_speech_provider, self.resources, self.observability
             )
             if text_to_speech_provider is not None else None
         )
@@ -723,7 +748,9 @@ class RobotApplication:
             current_goal=lambda: self._active_goal, sleep=temporal_sleep,
             monotonic_clock=self._monotonic,
         )
-        self.episode_coordinator = AttentionEpisodeCoordinator(self._monotonic)
+        self.episode_coordinator = AttentionEpisodeCoordinator(
+            self._monotonic, self.observability
+        )
         self._job_continuation_controller = (
             JobContinuationController(
                 self.options.jobs_heartbeat_seconds,
@@ -923,6 +950,10 @@ class RobotApplication:
             "[JOBS] job=JOB%s run=RUN%s task=%s status=started",
             job.id, running_run.id, running_task.id,
         )
+        self.observability.increment("job_runs_started")
+        self.observability.event("jobs", "job_run", "started",
+            identifiers={"job_id": job.id, "job_run_id": running_run.id,
+                         "task_id": running_task.id})
         return binding
 
     async def _offer_scheduled_job(self) -> None:
@@ -1075,6 +1106,13 @@ class RobotApplication:
             "[JOBS] job=JOB%s run=RUN%s task=%s status=%s",
             binding.job.id, run.id, task.id, status.value,
         )
+        counter = {JobRunStatus.COMPLETED: "job_runs_completed",
+                   JobRunStatus.FAILED: "job_runs_failed",
+                   JobRunStatus.STOPPED: "job_runs_stopped"}[status]
+        self.observability.increment(counter)
+        self.observability.event("jobs", "job_run", status.value,
+            identifiers={"job_id": binding.job.id, "job_run_id": run.id,
+                         "task_id": task.id})
         return finished
 
     async def work_current_job_once(self) -> JobWorkOutcome:
@@ -1185,6 +1223,19 @@ class RobotApplication:
                 "[JOBS] job=JOB%s run=RUN%s episode=E%s work=completed disposition=%s",
                 binding.job.id, binding.run.id, episode.id, disposition.value,
             )
+            self.observability.increment(
+                "manual_job_work" if invocation == "manual" else "automatic_job_work",
+                dimension=("job_work_outcomes", disposition.value),
+            )
+            if invocation not in ("manual", "scheduled"):
+                self.observability.increment("continuations_accepted")
+            self.observability.event("jobs", "work_episode", "completed",
+                source=invocation,
+                identifiers={"job_id": binding.job.id,
+                             "job_run_id": binding.run.id,
+                             "task_id": binding.task.id,
+                             "episode_id": episode.id},
+                metadata={"outcome": disposition.value})
             return JobWorkOutcome(
                 binding.job.id, binding.run.id, binding.task.id, episode.id,
                 disposition, summary, initiative.response,
@@ -2290,9 +2341,27 @@ class RobotApplication:
             raise RuntimeError("Camera capture requires a running application")
         if self.camera_backend is None:
             raise RuntimeError("No camera backend is configured")
-        lease = self.resources.acquire(CAMERA_RESOURCE, owner)
         try:
-            return self.camera_backend.capture_frame()
+            lease = self.resources.acquire(CAMERA_RESOURCE, owner)
+        except BaseException as error:
+            self.observability.increment("camera_failures")
+            self.observability.increment("resource_failures")
+            self.observability.event("camera", "capture", "failed", severity="error",
+                                     error=type(error).__name__)
+            raise
+        try:
+            frame = self.camera_backend.capture_frame()
+            self.observability.increment("camera_captures")
+            self.observability.event("camera", "capture", "completed", metadata={
+                "backend": self.camera_backend.identifier,
+                "bytes": len(frame.data), "width": frame.width, "height": frame.height,
+            })
+            return frame
+        except BaseException as error:
+            self.observability.increment("camera_failures")
+            self.observability.event("camera", "capture", "failed", severity="error",
+                                     error=type(error).__name__)
+            raise
         finally:
             self.resources.release(lease)
 
@@ -3819,6 +3888,8 @@ class RobotApplication:
                 focus, description[:2000], truncated, observed_at
             )
         except ResourceBusyError:
+            self.observability.increment("vision_failures")
+            self.observability.event("perception", "vision_acquisition", "rejected")
             error = RuntimeError("camera resource is busy")
             LOGGER.info("[PERCEPTION] modality=visual status=rejected")
             if autonomous:
@@ -3829,6 +3900,9 @@ class RobotApplication:
                 "status": "rejected", "error": str(error),
             }, sort_keys=True)), None
         except Exception as error:
+            self.observability.increment("vision_failures")
+            self.observability.event("perception", "vision_acquisition", "failed",
+                                     severity="error", error=type(error).__name__)
             LOGGER.info("[PERCEPTION] modality=visual status=rejected")
             if autonomous:
                 self.attention.record_visual(
@@ -3841,6 +3915,9 @@ class RobotApplication:
             "[PERCEPTION] modality=visual status=applied description_chars=%s",
             len(result.description),
         )
+        self.observability.increment("vision_acquisitions")
+        self.observability.event("perception", "vision_acquisition", "completed",
+                                 source=backend.identifier)
         if autonomous:
             self.attention.record_visual(state="completed", focus=focus, status="applied")
         return CognitionToolResult(json.dumps({

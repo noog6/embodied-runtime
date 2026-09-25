@@ -22,6 +22,7 @@ from embodied_runtime.observations import (
     observation_from_body_orientation, observation_from_platform_transition,
     observation_from_temporal_followup,
 )
+from embodied_runtime.observability import RunObservability
 
 LOGGER = logging.getLogger(__name__)
 
@@ -82,7 +83,8 @@ class AttentionEpisode:
 class AttentionEpisodeCoordinator:
     """Own the session-local episode namespace and minimal single-flight fence."""
 
-    def __init__(self, monotonic_clock: Callable[[], float] = monotonic) -> None:
+    def __init__(self, monotonic_clock: Callable[[], float] = monotonic,
+                 observability: RunObservability | None = None) -> None:
         self._next_id = 1
         self._current: AttentionEpisode | None = None
         self._last: AttentionEpisode | None = None
@@ -90,6 +92,7 @@ class AttentionEpisodeCoordinator:
         self._monotonic = monotonic_clock
         self._operator_waiters = 0
         self._condition = asyncio.Condition()
+        self._observability = observability
 
     @property
     def current(self) -> AttentionEpisode | None:
@@ -135,6 +138,20 @@ class AttentionEpisodeCoordinator:
         goal = "none" if goal_id is None else f"G{goal_id}"
         LOGGER.info("[ATTENTION] episode=E%s status=started trigger=%s source=%s goal=%s",
                     episode.id, trigger_kind, trigger_source, goal)
+        if self._observability is not None:
+            self._observability.increment(
+                "attention_episodes_started",
+                dimension=("attention_sources", trigger_source),
+            )
+            self._observability.increment(
+                "operator_attention_episodes" if trigger_kind == "operator_utterance"
+                else "automatic_attention_episodes"
+            )
+            self._observability.event("attention", "episode", "started",
+                source=trigger_source,
+                identifiers={"episode_id": episode.id, **(
+                    {} if goal_id is None else {"goal_id": goal_id})},
+                metadata={"trigger": trigger_kind})
         return episode
 
     def close(self, episode: AttentionEpisode,
@@ -148,6 +165,16 @@ class AttentionEpisodeCoordinator:
         goal = "none" if episode.goal_id is None else f"G{episode.goal_id}"
         LOGGER.info("[ATTENTION] episode=E%s status=closed reason=%s goal=%s",
                     episode.id, reason, goal)
+        if self._observability is not None:
+            self._observability.increment(
+                "attention_episodes_completed",
+                dimension=("attention_completion_reasons", reason),
+            )
+            self._observability.event("attention", "episode", "closed",
+                source=episode.trigger_source,
+                identifiers={"episode_id": episode.id, **(
+                    {} if episode.goal_id is None else {"goal_id": episode.goal_id})},
+                metadata={"reason": reason})
         # close() is synchronous so autonomous completion callbacks cannot race it;
         # wake explicit waiters on the next loop turn.
         asyncio.get_running_loop().create_task(self._notify_idle())
