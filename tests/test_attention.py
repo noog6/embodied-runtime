@@ -3,7 +3,7 @@ import unittest
 from datetime import UTC, datetime
 
 from embodied_runtime.app import (
-    COMPLETE_GOAL_TOOL, ORIENT_BODY_TOOL, INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,
+    COMPLETE_GOAL_TOOL, ORIENT_BODY_TOOL, INSPECT_SELF_TOOL, DIAGNOSTIC_TOOLS, SCHEDULE_FOLLOWUP_TOOL,
     ApplicationOptions, RobotApplication,
 )
 from embodied_runtime.attention import ACTION_INITIATIVE_REQUEST, INITIATIVE_REQUEST
@@ -135,7 +135,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Temporal context", instructions)
         self.assertIn("local_datetime: 2026-09-10T18:07:42-04:00", instructions)
         self.assertIn("timezone: America/Toronto", instructions)
-        self.assertEqual(tools, (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,))
+        self.assertEqual(tools, (INSPECT_SELF_TOOL, *DIAGNOSTIC_TOOLS, SCHEDULE_FOLLOWUP_TOOL,))
         self.assertIsNotNone(executor)
         self.assertIsNotNone(refresh)
         self.assertEqual(app.runtime_state.body, BodyState(0.0, 0.0))
@@ -174,7 +174,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Active goal timing\n  state: active\n  id: G1\n  age_s: 300",
                       instructions)
         self.assertEqual(tuple(tool.name for tool in backend.requests[0][2]),
-                         ("inspect_self", "schedule_followup"))
+                         ("inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime", "schedule_followup"))
         await app.stop()
 
     async def test_episode_is_active_single_flight_and_ids_increase(self):
@@ -271,14 +271,14 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         self.assertEqual(app.initiative_tools(), ())
         app.set_goal("opaque")
-        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL, ORIENT_BODY_TOOL,))
-        self.assertEqual([tool.name for tool in app.initiative_tools()], ["inspect_self", "schedule_followup", "orient_body"])
+        self.assertEqual(app.initiative_tools(), (INSPECT_SELF_TOOL, *DIAGNOSTIC_TOOLS, SCHEDULE_FOLLOWUP_TOOL, ORIENT_BODY_TOOL,))
+        self.assertEqual([tool.name for tool in app.initiative_tools()], ["inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime", "schedule_followup", "orient_body"])
         await app.stop()
 
         physical = self.make_app(FakeCognition(), actions=True, body=PhysicalBody())
         await physical.start()
         physical.set_goal("opaque")
-        self.assertEqual(physical.initiative_tools(), (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL,))
+        self.assertEqual(physical.initiative_tools(), (INSPECT_SELF_TOOL, *DIAGNOSTIC_TOOLS, SCHEDULE_FOLLOWUP_TOOL,))
         await physical.stop()
 
     async def test_reflex_can_trigger_one_autonomous_orientation_without_mutating_goal_or_memory(self):
@@ -318,7 +318,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(backend.requests), 1)
         message, initial, tools, executor, refresh = backend.requests[0]
         self.assertEqual(message, ACTION_INITIATIVE_REQUEST)
-        self.assertEqual(tools, (INSPECT_SELF_TOOL, SCHEDULE_FOLLOWUP_TOOL, ORIENT_BODY_TOOL,))
+        self.assertEqual(tools, (INSPECT_SELF_TOOL, *DIAGNOSTIC_TOOLS, SCHEDULE_FOLLOWUP_TOOL, ORIENT_BODY_TOOL,))
         self.assertIsNotNone(executor)
         self.assertIsNotNone(refresh)
         self.assertIn("yaw_deg: 0.0", initial)

@@ -99,28 +99,28 @@ class GoalApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dynamic_tools_and_physical_gate(self):
         no_body = self.make_app()
-        self.assertEqual([t.name for t in no_body.cognition_tools()], ["set_goal", "inspect_self"])
+        self.assertEqual([t.name for t in no_body.cognition_tools()], ["set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         await no_body.start()
         no_body.set_goal("A")
-        self.assertEqual([t.name for t in no_body.cognition_tools()], ["resolve_goal", "inspect_self"])
+        self.assertEqual([t.name for t in no_body.cognition_tools()], ["resolve_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         await no_body.stop()
 
         virtual = self.make_app(body=VirtualBodyBackend())
         self.assertEqual([t.name for t in virtual.cognition_tools()],
-                         ["orient_body", "set_goal", "inspect_self"])
+                         ["orient_body", "set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         await virtual.start()
         virtual.set_goal("A")
         self.assertEqual([t.name for t in virtual.cognition_tools()],
-                         ["orient_body", "resolve_goal", "inspect_self"])
+                         ["orient_body", "resolve_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         await virtual.stop()
 
         class Physical(VirtualBodyBackend):
             is_physical = True
         physical = self.make_app(body=Physical())
-        self.assertEqual([t.name for t in physical.cognition_tools()], ["set_goal", "inspect_self"])
+        self.assertEqual([t.name for t in physical.cognition_tools()], ["set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         await physical.start()
         physical.set_goal("A")
-        self.assertEqual([t.name for t in physical.cognition_tools()], ["resolve_goal", "inspect_self"])
+        self.assertEqual([t.name for t in physical.cognition_tools()], ["resolve_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
         rejected = await physical._execute_cognition_tool(CognitionToolCall(
             "orient_body", '{"yaw_degrees":1,"pitch_degrees":2}'))
         self.assertEqual(json.loads(rejected.output)["status"], "rejected")

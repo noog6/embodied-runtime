@@ -115,6 +115,13 @@ CAMERA_CAPTURE_OWNER = ResourceOwner("runtime", "camera_capture")
 VISUAL_PERCEPTION_OWNER = ResourceOwner("runtime", "visual_perception")
 SPEAKER_RESOURCE = ResourceKey("audio.speaker")
 VOICE_SPEAKER_OWNER = ResourceOwner("runtime", "voice")
+MAX_DIAGNOSTIC_EVENTS = 25
+MAX_DIAGNOSTIC_LOOKBACK_SECONDS = 3600
+DIAGNOSTIC_SEVERITIES = ("debug", "info", "warning", "error", "critical")
+_SENSITIVE_EVENT_KEY_PARTS = (
+    "prompt", "transcript", "response", "audio", "image", "credential",
+    "secret", "token", "password", "api_key",
+)
 
 
 class SpeakerAuthorizedVoiceProvider:
@@ -342,6 +349,52 @@ INSPECT_SELF_TOOL = CognitionToolDefinition(
         "required": ["area"],
         "additionalProperties": False,
     },
+)
+
+INSPECT_RUNTIME_HEALTH_TOOL = CognitionToolDefinition(
+    name="inspect_runtime_health",
+    description="Read a bounded current runtime and platform health snapshot.",
+    parameters={"type": "object", "properties": {}, "required": [],
+                "additionalProperties": False},
+)
+
+INSPECT_EVENTS_TOOL = CognitionToolDefinition(
+    name="inspect_events",
+    description=("Read recent sanitized events from the bounded in-memory current-run "
+                 "event ring, newest first."),
+    parameters={
+        "type": "object",
+        "properties": {
+            "component": {"type": ["string", "null"], "maxLength": 40},
+            "severity": {"type": ["string", "null"],
+                         "enum": [*DIAGNOSTIC_SEVERITIES, None]},
+            "since_seconds_ago": {"type": ["number", "null"], "minimum": 0,
+                                  "maximum": MAX_DIAGNOSTIC_LOOKBACK_SECONDS},
+            "limit": {"type": ["integer", "null"], "minimum": 1,
+                      "maximum": MAX_DIAGNOSTIC_EVENTS},
+        },
+        "required": ["component", "severity", "since_seconds_ago", "limit"],
+        "additionalProperties": False,
+    },
+)
+
+INSPECT_EFFECTIVE_CONFIG_TOOL = CognitionToolDefinition(
+    name="inspect_effective_config",
+    description="Read the explicitly whitelisted effective configuration for this run.",
+    parameters={"type": "object", "properties": {}, "required": [],
+                "additionalProperties": False},
+)
+
+INSPECT_JOB_RUNTIME_TOOL = CognitionToolDefinition(
+    name="inspect_job_runtime",
+    description="Read the current Job/Task/continuation/progress state; never history.",
+    parameters={"type": "object", "properties": {}, "required": [],
+                "additionalProperties": False},
+)
+
+DIAGNOSTIC_TOOLS = (
+    INSPECT_RUNTIME_HEALTH_TOOL, INSPECT_EVENTS_TOOL,
+    INSPECT_EFFECTIVE_CONFIG_TOOL, INSPECT_JOB_RUNTIME_TOOL,
 )
 
 OBSERVE_SCENE_TOOL = CognitionToolDefinition(
@@ -579,6 +632,11 @@ class ApplicationOptions:
     jobs_heartbeat_seconds: float = 30.0
     jobs_max_auto_steps: int = 3
     jobs_scheduler_poll_seconds: float = 30.0
+    voice_enabled: bool = False
+    voice_wake_word_enabled: bool = False
+    voice_tts_mode: str = "none"
+    cognition_backend: str = "none"
+    camera_backend: str = "none"
 
 
 @dataclass(frozen=True)
@@ -724,6 +782,7 @@ class RobotApplication:
             resources=self.resources,
             observability=self.observability,
         )
+        self._voice_wake_words = tuple(voice_wake_words or ())
         self._active_goal: ActiveGoal | None = None
         self._current_task_binding: _CurrentTaskBinding | None = None
         self._current_job_run: CurrentJobRun | None = None
@@ -2513,6 +2572,9 @@ class RobotApplication:
                             result = self._execute_run_history_inspection(
                                 call, episode_id=episode.id)
                             inspection = perception = None
+                        elif call.name in {tool.name for tool in DIAGNOSTIC_TOOLS}:
+                            result = self._execute_diagnostic(call)
+                            inspection = perception = None
                         else:
                             result = self._execute_memory_recall(call)
                             inspection = perception = None
@@ -2923,6 +2985,10 @@ class RobotApplication:
                 result = self._execute_run_history_inspection(
                     call, expected_goal=expected_goal, autonomous=True,
                     episode_id=episode.id)
+            elif call.name in {tool.name for tool in DIAGNOSTIC_TOOLS}:
+                result = self._execute_diagnostic(
+                    call, expected_goal=expected_goal, autonomous=True
+                )
             else:
                 action = call.name
                 if self._active_goal is not expected_goal:
@@ -3146,6 +3212,10 @@ class RobotApplication:
                     result = self._execute_run_history_inspection(
                         call, expected_goal=expected_goal, autonomous=True,
                         episode_id=episode.id)
+                elif call.name in {tool.name for tool in DIAGNOSTIC_TOOLS}:
+                    result = self._execute_diagnostic(
+                        call, expected_goal=expected_goal, autonomous=True
+                    )
                 else:
                     result = self._execute_memory_recall(
                         call, expected_goal=expected_goal, autonomous=True
@@ -3603,11 +3673,12 @@ class RobotApplication:
         recall = (RECALL_MEMORY_TOOL,) if self._memory_recall is not None else ()
         history = ((INSPECT_RUN_HISTORY_TOOL,)
                    if self._run_history_evidence is not None else ())
-        return (INSPECT_SELF_TOOL, *visual, *recall, *history)
+        return (INSPECT_SELF_TOOL, *DIAGNOSTIC_TOOLS, *visual, *recall, *history)
 
     @staticmethod
     def _acquisition_tool_names() -> tuple[str, ...]:
-        return (INSPECT_SELF_TOOL.name, OBSERVE_SCENE_TOOL.name,
+        return (INSPECT_SELF_TOOL.name, *(tool.name for tool in DIAGNOSTIC_TOOLS),
+                OBSERVE_SCENE_TOOL.name,
                 RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name)
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
@@ -3663,6 +3734,7 @@ class RobotApplication:
         ):
             tools.append(SCHEDULE_FOLLOWUP_TOOL)
         tools.append(INSPECT_SELF_TOOL)
+        tools.extend(DIAGNOSTIC_TOOLS)
         if self.visual_perception_available():
             tools.append(OBSERVE_SCENE_TOOL)
         if self._memory_recall is not None:
@@ -3756,6 +3828,8 @@ class RobotApplication:
         if call.name == INSPECT_SELF_TOOL.name:
             result, _ = self._execute_self_inspection(call)
             return result
+        if call.name in {tool.name for tool in DIAGNOSTIC_TOOLS}:
+            return self._execute_diagnostic(call)
         if call.name == OBSERVE_SCENE_TOOL.name:
             result, _ = await self._execute_visual_perception(call)
             return result
@@ -3964,6 +4038,217 @@ class RobotApplication:
             "observed_at": result.observed_at.isoformat(timespec="seconds"),
             "facts": [{"name": fact.name, "value": fact.value} for fact in result.facts],
         }, sort_keys=True)), result
+
+    def _execute_diagnostic(
+        self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
+        autonomous: bool = False,
+    ) -> CognitionToolResult:
+        """Execute one read-only projection of already runtime-owned evidence."""
+        try:
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("diagnostics require a running application")
+            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+                raise RuntimeError("expected active goal is no longer current")
+            if call.name == INSPECT_EVENTS_TOOL.name:
+                result = self._diagnostic_events(call)
+            else:
+                self._tool_arguments(call, set())
+                if call.name == INSPECT_RUNTIME_HEALTH_TOOL.name:
+                    result = self._diagnostic_runtime_health()
+                elif call.name == INSPECT_EFFECTIVE_CONFIG_TOOL.name:
+                    result = self._diagnostic_effective_config()
+                elif call.name == INSPECT_JOB_RUNTIME_TOOL.name:
+                    result = self._diagnostic_job_runtime()
+                else:
+                    raise ValueError("unknown diagnostic tool")
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
+            result = {"status": "rejected", "reason": "invalid_tool_arguments",
+                      "error": str(error)[:160]}
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _diagnostic_runtime_health(self) -> dict[str, object]:
+        platform = self.runtime_state.platform
+        metrics = self.observability.snapshot()
+        counters = metrics["metrics"]
+        camera = self.camera_backend
+        body = self.body_backend
+        return {
+            "status": "ok", "observed_at": self._aware_wall_clock().isoformat(),
+            "source": "current_runtime", "run_id": self.observability.run_id,
+            "runtime": {
+                "lifecycle_state": self.state.value,
+                "elapsed_seconds": metrics["run"]["elapsed_seconds"],
+                "profile": self.profile.identifier,
+                "hardware_backend": self.hardware.identifier,
+                "is_physical": self.hardware.is_physical,
+            },
+            "platform": None if platform is None else {
+                "hostname": platform.hostname, "system": platform.system,
+                "release": platform.release, "machine": platform.machine,
+                "python_version": platform.python_version, "model": platform.model,
+                "host_uptime_seconds": platform.uptime_seconds,
+                "load_averages": platform.load_averages,
+                "memory_total_bytes": platform.memory_total_bytes,
+                "memory_available_bytes": platform.memory_available_bytes,
+                "cpu_temperature_celsius": platform.cpu_temperature_celsius,
+                "throttling": None,
+            },
+            "capabilities": {
+                "camera_available": camera is not None and camera.is_running,
+                "camera_backend": None if camera is None else camera.identifier,
+                "voice_available": self.voice.available,
+                "cognition_backend": (None if self._cognition_backend is None
+                                      else self._cognition_backend.identifier),
+                "body_backend": None if body is None else body.identifier,
+                "persistent_memory_available": self.persistent_memory is not None,
+                "jobs_available": self.jobs is not None,
+            },
+            "observability": {
+                key: counters[key] for key in (
+                    "provider_requests", "provider_failures", "runtime_errors",
+                    "attention_episodes_started", "attention_episodes_completed",
+                    "job_runs_started", "job_runs_failed", "voice_failures",
+                    "camera_failures", "vision_failures", "resource_failures",
+                )
+            },
+        }
+
+    def _diagnostic_events(self, call: CognitionToolCall) -> dict[str, object]:
+        arguments = json.loads(call.arguments)
+        allowed = {"component", "severity", "since_seconds_ago", "limit"}
+        if not isinstance(arguments, dict) or not set(arguments) <= allowed:
+            raise ValueError("arguments contain unsupported fields")
+        component = arguments.get("component")
+        severity = arguments.get("severity")
+        lookback = arguments.get("since_seconds_ago", MAX_DIAGNOSTIC_LOOKBACK_SECONDS)
+        limit = arguments.get("limit", 20)
+        lookback = MAX_DIAGNOSTIC_LOOKBACK_SECONDS if lookback is None else lookback
+        limit = 20 if limit is None else limit
+        if component is not None and (type(component) is not str or not component
+                                      or len(component) > 40
+                                      or not all(c.isalnum() or c in "_-" for c in component)):
+            raise ValueError("component must be a simple string of at most 40 characters")
+        if severity is not None and severity not in DIAGNOSTIC_SEVERITIES:
+            raise ValueError("severity is not supported")
+        if (isinstance(lookback, bool) or not isinstance(lookback, (int, float))
+                or not math.isfinite(lookback)
+                or not 0 <= lookback <= MAX_DIAGNOSTIC_LOOKBACK_SECONDS):
+            raise ValueError("since_seconds_ago is outside the diagnostic bound")
+        if type(limit) is not int or not 1 <= limit <= MAX_DIAGNOSTIC_EVENTS:
+            raise ValueError("limit is outside the diagnostic bound")
+        matching = self.observability.recent_events(
+            component=component, severity=severity, since_seconds_ago=lookback
+        )
+        selected = tuple(reversed(matching))[:limit]
+        def safe_pairs(pairs):
+            return {key: value for key, value in pairs
+                    if not any(part in key.lower() for part in _SENSITIVE_EVENT_KEY_PARTS)}
+        events = [{
+            "timestamp": item.timestamp, "component": item.component,
+            "operation": item.operation, "status": item.status,
+            "severity": item.severity, "source": item.source,
+            "duration_ms": item.duration_ms, "error": item.error,
+            "identifiers": safe_pairs(item.identifiers),
+            "metadata": safe_pairs(item.metadata),
+        } for item in selected]
+        return {
+            "status": "ok", "source": "current_run_event_ring",
+            "run_id": self.observability.run_id, "ordering": "newest_first",
+            "events": events, "returned": len(events),
+            "truncated": len(matching) > limit,
+        }
+
+    def _diagnostic_effective_config(self) -> dict[str, object]:
+        camera = self.camera_backend
+        cognition = self._cognition_backend
+        body = self.body_backend
+        return {
+            "status": "ok", "observed_at": self._aware_wall_clock().isoformat(),
+            "source": "effective_runtime", "run_id": self.observability.run_id,
+            "runtime": {"profile": self.profile.identifier,
+                        "hardware_backend": self.hardware.identifier,
+                        "timezone": self.timezone_name},
+            "initiative": {
+                "enabled": self.options.initiative_enabled,
+                "platform_attention_enabled": self.options.initiative_platform_attention_enabled,
+                "actions_enabled": self.options.initiative_actions_enabled,
+                "messages_enabled": self.options.initiative_messages_enabled,
+                "continuation_enabled": self.options.initiative_continuation_enabled,
+                "goal_closure_enabled": self.options.initiative_goal_closure_enabled,
+            },
+            "jobs": {"available": self.jobs is not None,
+                     "auto_continue": self.options.jobs_auto_continue,
+                     "heartbeat_seconds": self.options.jobs_heartbeat_seconds,
+                     "max_automatic_steps": self.options.jobs_max_auto_steps,
+                     "scheduler_poll_seconds": self.options.jobs_scheduler_poll_seconds},
+            "voice": {"enabled": self.options.voice_enabled,
+                      "available": self.voice.available,
+                      "wake_word_enabled": self.options.voice_wake_word_enabled,
+                      "wake_words": list(self._voice_wake_words),
+                      "tts_mode": self.options.voice_tts_mode},
+            "backends": {
+                "camera": (camera.identifier if camera is not None
+                           else self.options.camera_backend),
+                "cognition": (cognition.identifier if cognition is not None
+                              else self.options.cognition_backend),
+                "body": None if body is None else body.identifier,
+            },
+            "persistent_memory": {"available": self.persistent_memory is not None},
+        }
+
+    def _diagnostic_job_runtime(self) -> dict[str, object]:
+        current = self.current_job_run
+        if current is None:
+            return {"status": "idle", "observed_at": self._aware_wall_clock().isoformat(),
+                    "source": "current_runtime", "run_id": self.observability.run_id,
+                    "current_job": None}
+        continuation = self.job_continuation
+        progress = self.job_progress
+        goal = current.task.goal
+        return {
+            "status": "ok", "observed_at": self._aware_wall_clock().isoformat(),
+            "source": "current_runtime", "run_id": self.observability.run_id,
+            "current_job": {
+                "job": {"job_id": current.job.id, "name": current.job.name,
+                        "enabled": current.job.enabled,
+                        "target": None if current.job.target is None else str(current.job.target)},
+                "job_run": {"run_id": current.run.id,
+                            "status": current.run.status.value},
+                "task": {"task_id": str(current.task.id),
+                         "status": current.task.status.value},
+                "goal": None if goal is None else {
+                    "goal_id": (None if self.active_goal is None else self.active_goal.id),
+                    "description": goal.description,
+                },
+                "continuation": None if continuation is None else {
+                    "state": continuation.state.value,
+                    "readiness": continuation.readiness.value,
+                    "automatic_steps_remaining": continuation.automatic_steps_remaining,
+                    "configured_max_auto_steps": self.options.jobs_max_auto_steps,
+                    "heartbeat_seconds": self.options.jobs_heartbeat_seconds,
+                    "delay_remaining_seconds": self.job_continuation_delay_remaining(),
+                    "awaited_event_type": (None if continuation.event_type is None
+                                           else continuation.event_type.value),
+                    "event_satisfied": continuation.event_satisfied,
+                },
+                "progress": {"evidence_basis": "accepted_runtime_episode_evidence",
+                             "counters": ([] if progress is None else [
+                                 {"name": item.name, "value": item.value}
+                                 for item in progress.counters])},
+                "semantic_continuity": {
+                    "summary_exists": continuation is not None
+                    and project_job_continuity_summary(continuation.last_summary) is not None,
+                    "summary": (None if continuation is None else
+                                project_job_continuity_summary(continuation.last_summary)),
+                    "authoritative": False,
+                },
+                "wake_evidence": (None if continuation is None
+                                  or continuation.wake_event is None else {
+                                      "event_type": continuation.wake_event.event_type.value,
+                                      "present": continuation.wake_event.present,
+                                  }),
+            },
+        }
 
     def _inspect_area(self, area: str) -> SelfInspectionResult:
         if area in ("network", "storage"):

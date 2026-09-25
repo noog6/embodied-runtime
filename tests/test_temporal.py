@@ -517,7 +517,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         await app.start(); app.set_goal("Goal")
         self.assertEqual(
             [tool.name for tool in app.initiative_tools()],
-            ["inspect_self", "schedule_followup"],
+            ["inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime", "schedule_followup"],
         )
         self.assertEqual(
             [tool.name for tool in app.effect_tools()], ["schedule_followup"]
