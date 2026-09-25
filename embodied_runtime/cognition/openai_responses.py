@@ -165,6 +165,9 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         cached = getattr(details, "cached_tokens", None)
         if isinstance(cached, int) and not isinstance(cached, bool):
             fields.append(f"cached_input_tokens={cached}")
+        cache_write = getattr(details, "cache_write_tokens", None)
+        if isinstance(cache_write, int) and not isinstance(cache_write, bool):
+            fields.append(f"cache_write_tokens={cache_write}")
         return fields
 
     async def respond(

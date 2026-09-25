@@ -11,6 +11,10 @@ transcripts, credentials, media, or model responses. Summary writing is best eff
 cannot prevent
 ordinary shutdown; `run.json` remains the authority for existing run-history status.
 
+The `interruptions` counter is incremented once only when the top-level process result
+is the authoritative interrupted exit code (130). Task cancellation and lower-level
+cleanup do not increment it; completed and other failed runs leave it at zero.
+
 Raw usage is authoritative. Monetary cost is `unavailable` (not zero) unless every
 used provider/model has a rate in an explicitly identified `PricingCatalog`. Rates
 independently cover input, cached-input, and output tokens and no network pricing lookup
@@ -19,7 +23,9 @@ ordinary input rate is applied, so input categories are mutually exclusive. Stru
 inconsistent usage, a missing provider/model rate, or cache-write usage without a
 cache-write rate makes the estimate unavailable. The OpenAI Responses adapter records
 provider-reported cached reads and cache writes when present; absent detail fields are
-recorded as zero. Local speech activity is not assigned hosted cost.
+recorded as zero. Normal provider request log lines likewise include
+`cache_write_tokens=<n>` when that valid provider detail is present. Local speech
+activity is not assigned hosted cost.
 
 Summary persistence reports `written`, `failed`, or `not_requested` to the runtime. A
 failure is logged with its bounded exception class and never changes authoritative

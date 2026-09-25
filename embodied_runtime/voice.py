@@ -18,6 +18,7 @@ import time
 from typing import Protocol, TypeVar
 import wave
 
+from embodied_runtime.observability import RunObservability
 from embodied_runtime.resources import (
     ResourceArbiter,
     ResourceBusyError,
@@ -105,6 +106,7 @@ class VoiceInteraction:
         *,
         wake_words: list[str] | None = None,
         resources: ResourceArbiter | None = None,
+        observability: RunObservability | None = None,
     ) -> None:
         self._provider = provider
         self._text_to_speech_provider = text_to_speech_provider
@@ -120,6 +122,7 @@ class VoiceInteraction:
         self._wake_enabled = asyncio.Event()
         self._microphone_lock = asyncio.Lock()
         self._resources = resources if resources is not None else ResourceArbiter()
+        self._observability = observability
         self._stopping = False
         self._session_pending = False
 
@@ -214,6 +217,8 @@ class VoiceInteraction:
                         self._wake_listen_task = asyncio.create_task(
                             self._provider.listen(), name="voice-wake-capture"
                         )
+                        if self._observability is not None:
+                            self._observability.increment("wake_capture_attempts")
                         try:
                             heard = await asyncio.shield(self._wake_listen_task)
                         finally:
@@ -229,6 +234,8 @@ class VoiceInteraction:
                 if normalized == "huh":
                     ignored_huhs += 1
                 elif normalized in self._wake_words:
+                    if self._observability is not None:
+                        self._observability.increment("wake_captures")
                     LOGGER.info("[VOICE] wake_detected heard=%r", heard.strip())
                     await self.start(source="wake_word")
                 elif normalized:
@@ -351,12 +358,16 @@ class VoiceInteraction:
                     LOGGER.info("[VOICE] timeout turn=%s", turn)
                     return "Voice session closed."
                 text = text.strip()
+                if self._observability is not None:
+                    self._observability.increment("stt_captures")
                 LOGGER.info("[VOICE] heard turn=%s text=%r", turn, text)
                 LOGGER.info("[VOICE] thinking turn=%s", turn)
                 response = await self._handle_utterance(text)
                 LOGGER.info("[VOICE] response turn=%s text=%r", turn, response)
                 LOGGER.info("[VOICE] speaking turn=%s", turn)
                 await self._text_to_speech_provider.speak(response)
+                if self._observability is not None:
+                    self._observability.increment("voice_turns")
                 reason = "max_turns" if turn == 2 else reason
             return "Voice session closed."
         except asyncio.CancelledError:

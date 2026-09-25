@@ -722,6 +722,7 @@ class RobotApplication:
             voice_policy,
             wake_words=voice_wake_words,
             resources=self.resources,
+            observability=self.observability,
         )
         self._active_goal: ActiveGoal | None = None
         self._current_task_binding: _CurrentTaskBinding | None = None
