@@ -350,10 +350,12 @@ class SpeakerAuthorityTests(unittest.IsolatedAsyncioTestCase):
         authorized = SpeakerAuthorizedTextToSpeechProvider(
             provider, ResourceArbiter(), observed
         )
-        await authorized.speak("hello")
+        for response in ("one", "two", "three", "four"):
+            await authorized.speak(response)
         metrics = observed.snapshot()["metrics"]
-        self.assertEqual(metrics["tts_generations"], 1)
-        self.assertEqual(metrics["tts_characters"], 5)
+        self.assertEqual(metrics["tts_generations"], 4)
+        self.assertEqual(metrics["tts_characters"], 15)
+        self.assertEqual(metrics["voice_turns"], 0)
         self.assertEqual(metrics["voice_failures"], 0)
 
     async def test_tts_cancellation_is_not_a_voice_failure(self):
@@ -477,11 +479,12 @@ class SpeakerAuthorityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
-    def interaction(self, provider, cognition):
+    def interaction(self, provider, cognition, *, observability=None):
         return VoiceInteraction(
             provider, provider.tts, cognition,
             VoiceSessionPolicy(initial_timeout_seconds=0.01,
                                followup_timeout_seconds=0.01),
+            observability=observability,
         )
 
     def test_microphone_resource_and_semantic_owners_are_canonical(self):
@@ -689,6 +692,41 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.close_calls, 1)
         self.assertEqual(provider.tts.close_calls, 1)
 
+    async def test_two_completed_turns_account_stt_and_turns_exactly_once(self):
+        observed = RunObservability()
+        provider = FakeVoiceProvider(["first", "follow up"])
+        voice = self.interaction(
+            provider, AsyncMock(side_effect=["one", "two"]),
+            observability=observed,
+        )
+
+        await voice.start(source="console")
+
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(metrics["stt_captures"], 2)
+        self.assertEqual(metrics["voice_turns"], 2)
+        self.assertEqual(metrics["tts_generations"], 0)
+
+    async def test_shutdown_after_transcript_creates_no_completed_voice_turn(self):
+        observed = RunObservability()
+        provider = FakeVoiceProvider(["question"])
+        cognition_started = asyncio.Event()
+
+        async def cognition(_text):
+            cognition_started.set()
+            await asyncio.Event().wait()
+
+        voice = self.interaction(provider, cognition, observability=observed)
+        running = asyncio.create_task(voice.start())
+        await cognition_started.wait()
+        await voice.stop()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(metrics["stt_captures"], 1)
+        self.assertEqual(metrics["voice_turns"], 0)
+
     async def test_followup_timeout_does_not_call_cognition_again(self):
         provider = FakeVoiceProvider(["first"])
         cognition = AsyncMock(return_value="answer")
@@ -860,6 +898,32 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.max_active_listeners, 1)
         await voice.stop()
         self.assertFalse(voice.wake_active)
+
+    async def test_wake_attempts_and_accepted_capture_are_accounted_at_boundary(self):
+        observed = RunObservability()
+        provider = CoordinatedVoiceProvider()
+        voice = VoiceInteraction(
+            provider, provider.tts, AsyncMock(return_value="answer"),
+            VoiceSessionPolicy(0.05, 0.01), wake_words=["mira"],
+            observability=observed,
+        )
+        voice.start_wake_listener()
+        await provider.wait_for_listens(1)
+        await provider.feed("huh")
+        await provider.wait_for_listens(2)
+        await provider.feed("not mira")
+        await provider.wait_for_listens(3)
+        await provider.feed("mira")
+        await provider.wait_for_listens(4)
+        await provider.feed(None)
+        await provider.wait_for_listens(5)
+        await voice.stop()
+
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(metrics["wake_capture_attempts"], 4)
+        self.assertEqual(metrics["wake_captures"], 1)
+        self.assertEqual(metrics["stt_captures"], 0)
+        self.assertEqual(metrics["voice_turns"], 0)
 
     async def test_wake_matching_is_case_insensitive_and_trimmed(self):
         provider = CoordinatedVoiceProvider()

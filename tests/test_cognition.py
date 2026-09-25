@@ -843,7 +843,9 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_usage_metadata_is_logged_and_absence_is_harmless(self):
         usage = SimpleNamespace(
             input_tokens=100, output_tokens=7, total_tokens=107,
-            input_tokens_details=SimpleNamespace(cached_tokens=80),
+            input_tokens_details=SimpleNamespace(
+                cached_tokens=80, cache_write_tokens=12,
+            ),
         )
         responses = FakeResponses(results=[
             SimpleNamespace(output_text="one", output=[], id="one", usage=usage),
@@ -857,7 +859,7 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
             await backend.respond("second")
         self.assertIn(
             "input_tokens=100 output_tokens=7 total_tokens=107 "
-            "cached_input_tokens=80", logs.output[0],
+            "cached_input_tokens=80 cache_write_tokens=12", logs.output[0],
         )
         self.assertNotIn("input_tokens=", logs.output[1])
 

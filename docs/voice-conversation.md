@@ -112,6 +112,19 @@ The narrow `TextToSpeechProvider` seam keeps selection from changing the bounded
 conversation architecture. There is no provider probing, fallback, runtime
 switching, streaming synthesis, or TTS text rewriting.
 
+Run observability counts voice activity only at runtime-owned boundaries:
+
+- `wake_capture_attempts` counts each wake-listener `listen()` operation started after
+  microphone authority is acquired, not resource-contention retries or recognizer
+  internals.
+- `wake_captures` counts an exact configured wake phrase accepted by the listener;
+  rejected text, empty results, and ignored `"huh"` results do not count.
+- `stt_captures` counts each non-empty conversational transcript accepted for the
+  operator/cognition path, excluding wake recognition and recognizer retries.
+- `voice_turns` counts each such transcript whose cognition response completes the
+  existing speech response path. A cancellation or failure before successful speech
+  creates no completed turn. TTS generation and character counters remain independent.
+
 Hosted speech is an explicit third option:
 
 ```toml

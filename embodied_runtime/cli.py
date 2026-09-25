@@ -668,6 +668,8 @@ def main(
             )
     status = "completed" if result == 0 else "interrupted" if result == 130 else "failed"
     shutdown = "normal" if result == 0 else "interrupted" if result == 130 else "failed"
+    if result == 130:
+        observability.increment("interruptions")
     summary = observability.finalize(
         status, shutdown=shutdown,
         directory=history.directory if history is not None else None,

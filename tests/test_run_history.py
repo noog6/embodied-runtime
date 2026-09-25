@@ -364,6 +364,8 @@ class HistoryLoggingTests(unittest.TestCase):
                             log.index("[RUN] id=R1 status=completed"))
             self.assertLess(log.index("[RUN] id=R1 status=completed"),
                             log.index("[PROCESS] main status=returning exit_code=0"))
+            summary = json.loads((Path(temporary) / "R1" / "summary.json").read_text())
+            self.assertEqual(summary["metrics"]["interruptions"], 0)
 
     def test_cli_persists_interrupted_final_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, patch(
@@ -380,6 +382,19 @@ class HistoryLoggingTests(unittest.TestCase):
                 "[RUN] id=R1 status=interrupted exit_code=130",
                 (directory / "runtime.log").read_text(),
             )
+            summary = json.loads((directory / "summary.json").read_text())
+            self.assertEqual(summary["metrics"]["interruptions"], 1)
+
+    def test_cli_failed_run_does_not_count_an_interruption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "embodied_runtime.cli._run_application", new=AsyncMock(return_value=7)
+        ):
+            self.assertEqual(main(["--diagnostics"], history_root=Path(temporary)), 7)
+            summary = json.loads(
+                (Path(temporary) / "R1" / "summary.json").read_text()
+            )
+            self.assertEqual(summary["run"]["status"], "failed")
+            self.assertEqual(summary["metrics"]["interruptions"], 0)
 
     def test_invalid_launch_does_not_allocate_history(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, patch("sys.stderr"):
