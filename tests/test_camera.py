@@ -206,6 +206,7 @@ class ApplicationCameraTests(unittest.IsolatedAsyncioTestCase):
         frame = app.capture_camera_frame()
 
         self.assertIs(frame, camera.frame)
+        self.assertEqual(app.observability.snapshot()["metrics"]["camera_captures"], 1)
         self.assertEqual(resources.acquisitions, [
             (CAMERA_RESOURCE, CAMERA_CAPTURE_OWNER)
         ])

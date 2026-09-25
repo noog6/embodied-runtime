@@ -1,5 +1,30 @@
 # Run history
 
+Each authoritative run directory also receives `summary.json` during process
+finalization. This schema-versioned document contains run identity/timing/status,
+aggregate operational counters, bounded dimensions, and a `provider_usage` array. Each
+provider/model item contains `requests`, `input_tokens`, `cached_input_tokens`,
+`cache_write_tokens`, `output_tokens`, `total_tokens`, and `duration_ms`, in addition to
+the bounded provider and model identifiers. These are raw provider-reported usage totals.
+The document also includes an explicitly derived cost result. It contains no prompts,
+transcripts, credentials, media, or model responses. Summary writing is best effort and
+cannot prevent
+ordinary shutdown; `run.json` remains the authority for existing run-history status.
+
+Raw usage is authoritative. Monetary cost is `unavailable` (not zero) unless every
+used provider/model has a rate in an explicitly identified `PricingCatalog`. Rates
+independently cover input, cached-input, and output tokens and no network pricing lookup
+is performed. Cached reads and cache writes are subtracted from total input before the
+ordinary input rate is applied, so input categories are mutually exclusive. Structurally
+inconsistent usage, a missing provider/model rate, or cache-write usage without a
+cache-write rate makes the estimate unavailable. The OpenAI Responses adapter records
+provider-reported cached reads and cache writes when present; absent detail fields are
+recorded as zero. Local speech activity is not assigned hosted cost.
+
+Summary persistence reports `written`, `failed`, or `not_requested` to the runtime. A
+failure is logged with its bounded exception class and never changes authoritative
+`run.json` status or blocks shutdown.
+
 A **run** is one validated invocation that enters runtime execution. Help,
 argument errors, and invalid launch combinations are not runs. By default each
 run has a durable local directory under `data/runs/`:

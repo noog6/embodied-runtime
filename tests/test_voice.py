@@ -19,6 +19,7 @@ from embodied_runtime.cli import build_text_to_speech_provider
 from embodied_runtime.resources import (
     ResourceArbiter, ResourceBusyError, ResourceKey, ResourceOwner,
 )
+from embodied_runtime.observability import RunObservability
 from embodied_runtime.voice import (
     FusionHatElevenLabsTTSProvider, FusionHatEspeakTTSProvider,
     FusionHatOpenAITTSProvider,
@@ -342,6 +343,34 @@ class SpeakerAuthorityTests(unittest.IsolatedAsyncioTestCase):
         provider.release.set()
         await operation
         self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+
+    async def test_tts_success_is_accounted_exactly_once(self):
+        observed = RunObservability()
+        provider = FakeTextToSpeechProvider()
+        authorized = SpeakerAuthorizedTextToSpeechProvider(
+            provider, ResourceArbiter(), observed
+        )
+        await authorized.speak("hello")
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(metrics["tts_generations"], 1)
+        self.assertEqual(metrics["tts_characters"], 5)
+        self.assertEqual(metrics["voice_failures"], 0)
+
+    async def test_tts_cancellation_is_not_a_voice_failure(self):
+        provider = self.BlockingTTS()
+        observed = RunObservability()
+        authorized = SpeakerAuthorizedTextToSpeechProvider(
+            provider, ResourceArbiter(), observed
+        )
+        operation = asyncio.create_task(authorized.speak("hello"))
+        await provider.entered.wait()
+        operation.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await operation
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(metrics["tts_generations"], 0)
+        self.assertEqual(metrics["voice_failures"], 0)
+        self.assertEqual(len(observed.events(component="voice")), 1)
 
     async def test_engagement_cue_holds_same_lease_until_playback_finishes(self):
         resources = ResourceArbiter()

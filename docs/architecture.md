@@ -1,5 +1,19 @@
 # Architecture
 
+## Runtime observability
+
+`RunObservability` is the session-local authority for operational measurements. It
+records completed provider usage, selected voice/perception activity, attention and
+Job lifecycle counts, failures, and run timing without consulting cognition output or
+scraping logs. Its snapshots are detached, serialization-safe values for a future
+bounded diagnostics interface. Structured events are retained in a 200-entry in-memory
+ring by default; fields, metadata item counts, and string values are bounded.
+
+Observability never retains prompts, transcripts, response bodies, credentials, audio,
+or images. Physical camera captures and model-facing visual acquisitions are separate
+measurements. Instrumentation is best effort and does not participate in admission or
+resource arbitration.
+
 The optional speech path is a runtime-owned, two-turn interaction rather than
 an execution backbone; see [Bounded voice conversation](voice-conversation.md).
 

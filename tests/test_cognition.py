@@ -30,6 +30,7 @@ from embodied_runtime.cognition.openai_responses import (
 from embodied_runtime.events import ApplicationStarted, EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.observability import RunObservability
 from embodied_runtime.run_history import RunHistoryEvidenceReader
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.state import LifecycleState
@@ -552,6 +553,48 @@ class FakeResponses:
 
 
 class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_authority_accounts_completion_exactly_once(self):
+        response = SimpleNamespace(
+            output_text="ok", output=[], id="response", usage=SimpleNamespace(
+                input_tokens=15_000, output_tokens=500, total_tokens=15_500,
+                input_tokens_details=SimpleNamespace(
+                    cached_tokens=12_000, cache_write_tokens=3_000,
+                ),
+            ))
+        observed = RunObservability()
+        backend = OpenAIResponsesBackend(
+            client=SimpleNamespace(responses=FakeResponses(results=[response])),
+            observability=observed,
+        )
+        self.assertEqual(await backend.respond("hello"), "ok")
+        snapshot = observed.snapshot()
+        metrics = snapshot["metrics"]
+        self.assertEqual((metrics["provider_requests"], metrics["input_tokens"],
+                          metrics["cached_input_tokens"],
+                          metrics["cache_write_tokens"], metrics["output_tokens"],
+                          metrics["total_tokens"]),
+                         (1, 15_000, 12_000, 3_000, 500, 15_500))
+        self.assertEqual(snapshot["provider_usage"], [{
+            "provider": "openai-responses", "model": DEFAULT_MODEL,
+            "requests": 1, "input_tokens": 15_000,
+            "cached_input_tokens": 12_000, "cache_write_tokens": 3_000,
+            "output_tokens": 500, "total_tokens": 15_500,
+            "duration_ms": metrics["provider_duration_ms"],
+        }])
+
+    async def test_provider_authority_failure_adds_no_usage(self):
+        observed = RunObservability()
+        backend = OpenAIResponsesBackend(
+            client=SimpleNamespace(responses=FakeResponses(error=RuntimeError("no"))),
+            observability=observed,
+        )
+        with self.assertRaises(CognitionError):
+            await backend.respond("hello")
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(metrics["provider_failures"], 1)
+        self.assertEqual(metrics["provider_requests"], 0)
+        self.assertEqual(metrics["total_tokens"], 0)
+
     async def test_prepare_eagerly_initializes_once_and_prewarm_is_minimal(self):
         responses = FakeResponses(results=[SimpleNamespace(
             output_text="discard me", output=[], id="do-not-retain",

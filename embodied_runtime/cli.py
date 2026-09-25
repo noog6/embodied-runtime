@@ -34,6 +34,7 @@ from embodied_runtime.run_history import (
     DEFAULT_HISTORY_ROOT, RunHistory, RunHistoryEvidenceReader, RunHistorySetupError,
     start_run,
 )
+from embodied_runtime.observability import RunObservability
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.jobs import SQLiteJobStore
 from embodied_runtime.interaction import (
@@ -448,6 +449,7 @@ async def _run_application(
     args: argparse.Namespace, profile: RobotProfile,
     history_root: Path = DEFAULT_HISTORY_ROOT,
     history_evidence: RunHistoryEvidenceReader | None = None,
+    observability: RunObservability | None = None,
 ) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
@@ -490,6 +492,7 @@ async def _run_application(
         persistent_memory_store=persistent_memory,
         job_store=jobs,
         run_history_evidence=history_evidence,
+        observability=observability,
     )
     if args.diagnostics:
         try:
@@ -625,6 +628,8 @@ def main(
     if args.config is not None:
         LOGGER.info("[CONFIG] source=%s status=loaded", args.config)
 
+    observability = RunObservability(history.run_id if history is not None else None)
+    LOGGER.info("[OBS] status=ready")
     try:
         result = _run_with_asyncio_cleanup(
             _run_application(
@@ -632,7 +637,7 @@ def main(
                 RunHistoryEvidenceReader(history_root, history.run_id,
                                          timezone_name=args.timezone)
                 if history is not None else RunHistoryEvidenceReader(
-                    history_root, timezone_name=args.timezone),
+                    history_root, timezone_name=args.timezone), observability,
             )
         )
     except (
@@ -661,5 +666,20 @@ def main(
                 status,
                 result,
             )
+    status = "completed" if result == 0 else "interrupted" if result == 130 else "failed"
+    shutdown = "normal" if result == 0 else "interrupted" if result == 130 else "failed"
+    summary = observability.finalize(
+        status, shutdown=shutdown,
+        directory=history.directory if history is not None else None,
+    )
+    persistence, persistence_error = observability.summary_persistence
+    if persistence == "written" and history is not None:
+        LOGGER.info("[OBS] summary_written run=%s path=%s", history.run_id,
+                    history.directory / "summary.json")
+    elif persistence == "failed" and history is not None:
+        LOGGER.warning("[OBS] summary_write_failed run=%s path=%s error=%s",
+                       history.run_id, history.directory / "summary.json",
+                       persistence_error)
+    LOGGER.info("\n%s", observability.banner(summary))
     LOGGER.info("[PROCESS] main status=returning exit_code=%s", result)
     return result

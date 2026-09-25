@@ -155,6 +155,9 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         outcome = await app.work_current_job_once()
 
         self.assertIs(outcome.disposition, JobWorkDisposition.CONTINUE)
+        metrics = app.observability.snapshot()["metrics"]
+        self.assertEqual((metrics["manual_job_work"],
+                          metrics["automatic_job_work"]), (1, 0))
         self.assertEqual(len(backend.requests), 2)
         initial = backend.requests[0]
         self.assertIn("Full durable description", initial[1])

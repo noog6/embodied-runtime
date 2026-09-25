@@ -120,6 +120,10 @@ class JobContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.store.get_run(binding.run.id).status,
                       JobRunStatus.COMPLETED)
         self.assertIsNone(app.current_task)
+        metrics = app.observability.snapshot()["metrics"]
+        self.assertEqual(metrics["manual_job_work"], 1)
+        self.assertEqual(metrics["automatic_job_work"], 2)
+        self.assertEqual(metrics["continuations_accepted"], 2)
         await self._tick(timer)
         self.assertEqual(len(backend.requests), 6)
         await app.stop()

@@ -214,6 +214,12 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         before = app.runtime_state
         await app.request_cognition("What do you see?")
         self.assertEqual((camera.captures, len(vision.calls)), (1, 1))
+        metrics = app.observability.snapshot()["metrics"]
+        self.assertEqual((metrics["camera_captures"],
+                          metrics["vision_acquisitions"]), (1, 1))
+        self.assertEqual((metrics["attention_episodes_started"],
+                          metrics["attention_episodes_completed"]), (1, 1))
+        self.assertEqual(metrics["operator_attention_episodes"], 1)
         self.assertEqual(cognition.result["status"], "applied")
         self.assertIs(app.runtime_state, before)
         await app.stop()

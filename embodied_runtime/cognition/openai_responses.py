@@ -15,6 +15,7 @@ from embodied_runtime.cognition.base import (
     InstructionsProvider,
     TextCognitionBackend,
 )
+from embodied_runtime.observability import RunObservability
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 PREWARM_INPUT = "Reply ready."
@@ -26,12 +27,14 @@ class OpenAIResponsesBackend(TextCognitionBackend):
 
     identifier = "openai-responses"
 
-    def __init__(self, *, model: str | None = None, client: Any = None) -> None:
+    def __init__(self, *, model: str | None = None, client: Any = None,
+                 observability: RunObservability | None = None) -> None:
         self.model = model or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
         self._client = client
         self._client_init_measured = client is not None
         self._provider_request_ordinal = 0
         self._preparation_attempted = False
+        self.observability = observability
 
     async def prepare(self) -> None:
         """Initialize the client and make one tool-free provider prewarm request."""
@@ -92,16 +95,42 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         started = time.perf_counter()
         try:
             response = await client.responses.create(**arguments)
-        except Exception:
+        except Exception as error:
             self._log_provider_request(
                 kind, ordinal, cold, "failed", started, message_chars,
                 instruction_chars, tools,
             )
+            if self.observability is not None:
+                self.observability.provider_failed(
+                    self.identifier, self.model, kind,
+                    duration_ms=int((time.perf_counter() - started) * 1_000),
+                    error=type(error).__name__,
+                )
             raise
         self._log_provider_request(
             kind, ordinal, cold, "completed", started, message_chars,
             instruction_chars, tools, response,
         )
+        if self.observability is not None:
+            usage = getattr(response, "usage", None)
+            details = getattr(usage, "input_tokens_details", None)
+            def token(name: str, owner: Any = usage) -> int:
+                value = getattr(owner, name, 0) if owner is not None else 0
+                return value if isinstance(value, int) and not isinstance(value, bool) else 0
+            self.observability.provider_completed(
+                self.identifier, self.model, kind,
+                input_tokens=token("input_tokens"),
+                cached_input_tokens=token("cached_tokens", details),
+                cache_write_tokens=token("cache_write_tokens", details),
+                output_tokens=token("output_tokens"),
+                total_tokens=token("total_tokens"),
+                duration_ms=int((time.perf_counter() - started) * 1_000),
+                usage_available=(usage is not None and all(
+                    isinstance(getattr(usage, name, None), int)
+                    and not isinstance(getattr(usage, name, None), bool)
+                    for name in ("input_tokens", "output_tokens", "total_tokens")
+                )),
+            )
         return response
 
     def _log_provider_request(
