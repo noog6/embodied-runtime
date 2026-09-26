@@ -10,7 +10,7 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _SCHEMA = (
     """CREATE TABLE jobs (
        id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
@@ -23,7 +23,7 @@ _SCHEMA = (
        id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
        status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','stopped')),
        created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
-       outcome_summary TEXT, error_summary TEXT)""",
+       outcome_summary TEXT, error_summary TEXT, result_report TEXT)""",
     "CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)",
     """CREATE TABLE job_schedules (
        job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
@@ -53,11 +53,13 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
-        if version == 1:
+        if version in (1, 2):
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                self._connection.execute(_SCHEMA[-1])
-                self._connection.execute("PRAGMA user_version = 2")
+                if version == 1:
+                    self._connection.execute(_SCHEMA[-1])
+                self._connection.execute("ALTER TABLE job_runs ADD COLUMN result_report TEXT")
+                self._connection.execute("PRAGMA user_version = 3")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -209,9 +211,19 @@ class SQLiteJobStore:
         ).fetchall()
         return tuple(_run(row) for row in rows)
 
+    def get_latest_completed_run(self, job_id: int) -> JobRun | None:
+        """Return the newest completed occurrence, excluding every other state."""
+        _id(job_id, "job")
+        row = self._connection.execute(
+            """SELECT * FROM job_runs WHERE job_id = ? AND status = 'completed'
+               ORDER BY id DESC LIMIT 1""", (job_id,)
+        ).fetchone()
+        return _run(row) if row is not None else None
+
     def transition_run(self, run_id: int, status: JobRunStatus, *,
                        outcome_summary: str | None = None,
-                       error_summary: str | None = None) -> JobRun:
+                       error_summary: str | None = None,
+                       result_report: str | None = None) -> JobRun:
         _id(run_id, "job run")
         if not isinstance(status, JobRunStatus):
             raise TypeError("status must be a JobRunStatus")
@@ -229,13 +241,16 @@ class SQLiteJobStore:
             finished = now if status in TERMINAL_RUN_STATUSES else None
             # Validate summaries and timestamp invariants before updating.
             next_run = JobRun(current.id, current.job_id, status, current.created_at,
-                              started, finished, outcome_summary, error_summary)
+                              started, finished, outcome_summary, error_summary,
+                              result_report)
             cursor = self._connection.execute(
                 """UPDATE job_runs SET status=?, started_at=?, finished_at=?,
-                   outcome_summary=?, error_summary=? WHERE id=? AND status=?""",
+                   outcome_summary=?, error_summary=?, result_report=?
+                   WHERE id=? AND status=?""",
                 (status.value, _format(started) if started else None,
                  _format(finished) if finished else None, next_run.outcome_summary,
-                 next_run.error_summary, run_id, current.status.value),
+                 next_run.error_summary, next_run.result_report,
+                 run_id, current.status.value),
             )
             if cursor.rowcount != 1:
                 raise InvalidJobRunTransitionError("job run changed concurrently")
@@ -279,7 +294,7 @@ def _run(row: sqlite3.Row) -> JobRun:
     return JobRun(row["id"], row["job_id"], JobRunStatus(row["status"]),
                   _parse(row["created_at"]), _parse(row["started_at"]),
                   _parse(row["finished_at"]), row["outcome_summary"],
-                  row["error_summary"])  # type: ignore[arg-type]
+                  row["error_summary"], row["result_report"])  # type: ignore[arg-type]
 
 
 def _schedule(row: sqlite3.Row) -> JobSchedule:

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 MAX_JOB_NAME_CHARS = 200
 MAX_JOB_DESCRIPTION_CHARS = 2000
 MAX_RUN_SUMMARY_CHARS = 2000
+MAX_RUN_REPORT_CHARS = 8_000
 _TOKEN = re.compile(r"^[^\W\d][\w-]*$", re.UNICODE)
 _LOCAL_TIME = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 
@@ -146,6 +147,7 @@ class JobRun:
     finished_at: datetime | None = None
     outcome_summary: str | None = None
     error_summary: str | None = None
+    result_report: str | None = None
 
     def __post_init__(self) -> None:
         _positive_id(self.id, "job run ID")
@@ -161,9 +163,15 @@ class JobRun:
             value = getattr(self, field)
             if value is not None:
                 object.__setattr__(self, field, _text(value, field, MAX_RUN_SUMMARY_CHARS))
+        if self.result_report is not None:
+            object.__setattr__(self, "result_report", _text(
+                self.result_report, "result_report", MAX_RUN_REPORT_CHARS
+            ))
         if self.status in TERMINAL_RUN_STATUSES and self.finished_at is None:
             raise ValueError("terminal job runs require finished_at")
         if self.status not in TERMINAL_RUN_STATUSES and self.finished_at is not None:
             raise ValueError("non-terminal job runs cannot have finished_at")
+        if self.status not in TERMINAL_RUN_STATUSES and self.result_report is not None:
+            raise ValueError("non-terminal job runs cannot have a result report")
         if self.status is JobRunStatus.PENDING and self.started_at is not None:
             raise ValueError("pending job runs cannot have started_at")

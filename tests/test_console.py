@@ -137,11 +137,19 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("task_status:   running", current)
             self.assertEqual(console.execute('job complete "Reviewed logs"')[0],
                              "Job RUN1 completed.")
+            exact = console.execute("job result RUN1")[0]
+            self.assertIn("job:           JOB1 (Review logs)", exact)
+            self.assertIn("status:        completed", exact)
+            self.assertIn("summary:       Reviewed logs", exact)
+            self.assertIn("report:        none", exact)
 
             console.execute('job add "Failure"')
             console.execute("job start JOB2")
             self.assertEqual(console.execute('job fail "sensor error"')[0],
                              "Job RUN2 failed.")
+            self.assertIn("RUN1", console.execute("job latest-result JOB1")[0])
+            self.assertIn("summary:       sensor error",
+                          console.execute("job result RUN2")[0])
             console.execute('job add "Stop"')
             console.execute("job start JOB3")
             self.assertEqual(console.execute("job stop")[0], "Job RUN3 stopped.")
@@ -168,6 +176,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  jobs                           List the entire durable Job catalog\n"
             "  job show JOB<n>                Show one Job and its assignment\n"
             "  job runs JOB<n>                List durable occurrences of one Job\n"
+            "  job result RUN<n>              Show one durable JobRun result\n"
+            "  job latest-result JOB<n>       Show latest completed JobRun result\n"
             "  job add <name> [options]       Add an enabled Job definition\n"
             "  job enable|disable JOB<n>      Change Job definition state\n"
             "  job start JOB<n>               Start a JobRun and bounded Task\n"

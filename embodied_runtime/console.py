@@ -18,7 +18,7 @@ from embodied_runtime.interaction import (
     CONSOLE_ADMINISTRATIVE, CONSOLE_DIALOGUE, ConsoleOperatorMessageChannel,
     InteractionContext,
 )
-from embodied_runtime.jobs import JobRunStatus, JobTarget
+from embodied_runtime.jobs import JobRun, JobRunStatus, JobTarget
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
 from embodied_runtime.run_history import (
@@ -106,6 +106,10 @@ class RuntimeConsole:
             return self._job_show(words), False
         if vocabulary[:2] == ["job", "runs"]:
             return self._job_runs(words), False
+        if vocabulary[:2] == ["job", "result"]:
+            return self._job_result(words), False
+        if vocabulary[:2] == ["job", "latest-result"]:
+            return self._job_latest_result(words), False
         if vocabulary and vocabulary[0] == "job":
             return self._job_command(words), False
         if vocabulary and vocabulary[0] == "memory" and vocabulary != ["memory", "clear"]:
@@ -253,6 +257,8 @@ class RuntimeConsole:
                 "  jobs                           List the entire durable Job catalog",
                 "  job show JOB<n>                Show one Job and its assignment",
                 "  job runs JOB<n>                List durable occurrences of one Job",
+                "  job result RUN<n>              Show one durable JobRun result",
+                "  job latest-result JOB<n>       Show latest completed JobRun result",
                 "  job add <name> [options]       Add an enabled Job definition",
                 "  job enable|disable JOB<n>      Change Job definition state",
                 "  job start JOB<n>               Start a JobRun and bounded Task",
@@ -335,6 +341,45 @@ class RuntimeConsole:
         if not runs:
             lines.append("  none")
         return "\n".join(lines)
+
+    def _render_job_result(self, run: JobRun) -> str:
+        store = self._application.jobs
+        assert store is not None
+        job = store.get_job(run.job_id)
+        assert job is not None
+        summary = (
+            run.error_summary
+            if run.status is JobRunStatus.FAILED else run.outcome_summary
+        )
+        return "\n".join((
+            "Job result", f"  job:           JOB{job.id} ({job.name})",
+            f"  run:           RUN{run.id}", f"  status:        {run.status.value}",
+            f"  started_at:    {run.started_at.isoformat() if run.started_at else 'none'}",
+            f"  finished_at:   {run.finished_at.isoformat() if run.finished_at else 'none'}",
+            f"  summary:       {summary or 'none'}",
+            f"  report:        {run.result_report or 'none'}",
+        ))
+
+    def _job_result(self, words: list[str]) -> str:
+        if len(words) != 3 or (run_id := _catalog_id(words[2], "RUN")) is None:
+            return "Usage: job result RUN<n>."
+        store = self._application.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        run = store.get_run(run_id)
+        return f"JobRun not found: RUN{run_id}." if run is None else self._render_job_result(run)
+
+    def _job_latest_result(self, words: list[str]) -> str:
+        if len(words) != 3 or (job_id := _catalog_id(words[2], "JOB")) is None:
+            return "Usage: job latest-result JOB<n>."
+        store = self._application.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        if store.get_job(job_id) is None:
+            return f"Job not found: JOB{job_id}."
+        run = store.get_latest_completed_run(job_id)
+        return (f"No completed result for JOB{job_id}." if run is None
+                else self._render_job_result(run))
 
     def _job_command(self, words: list[str]) -> str:
         action = words[1].lower() if len(words) > 1 else ""

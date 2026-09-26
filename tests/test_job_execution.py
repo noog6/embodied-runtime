@@ -12,7 +12,9 @@ from embodied_runtime.app import (
 )
 from embodied_runtime.cognition import CognitionToolCall, TextCognitionBackend
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
-from embodied_runtime.jobs import JobRunStatus, JobWorkDisposition, SQLiteJobStore
+from embodied_runtime.jobs import (
+    MAX_RUN_REPORT_CHARS, JobRunStatus, JobWorkDisposition, SQLiteJobStore,
+)
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.tasks import TaskStatus
 from tests.test_platform import snapshot
@@ -39,7 +41,8 @@ class JobBackend(TextCognitionBackend):
             await tool_executor(CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name,
                 json.dumps({"disposition": self.disposition,
-                            "summary": "bounded result", "readiness": readiness,
+                            "summary": "bounded result", "report": None,
+                            "readiness": readiness,
                             "delay_seconds": None}),
             ))
         return "bounded work response"
@@ -47,11 +50,12 @@ class JobBackend(TextCognitionBackend):
 
 class OutcomeProposalBackend(JobBackend):
     def __init__(self, disposition="completed", *, after_tool=None,
-                 fail_after_tool=False):
+                 fail_after_tool=False, report=None):
         super().__init__(disposition)
         self.after_tool = after_tool
         self.fail_after_tool = fail_after_tool
         self.tool_result = None
+        self.report = report
 
     async def respond(self, message, *, instructions=None, tools=(),
                       tool_executor=None, refreshed_instructions=None):
@@ -60,6 +64,7 @@ class OutcomeProposalBackend(JobBackend):
             self.tool_result = await tool_executor(CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name,
                 json.dumps({"disposition": self.disposition, "summary": "done",
+                            "report": self.report,
                             "readiness": "ready" if self.disposition == "continue" else None,
                             "delay_seconds": None}),
             ))
@@ -95,7 +100,7 @@ class FirstRequestBlocksBackend(JobBackend):
         elif message == JOB_OUTCOME_EVALUATION_REQUEST:
             await tool_executor(CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name,
-                '{"disposition":"continue","summary":"more work",'
+                '{"disposition":"continue","summary":"more work","report":null,'
                 '"readiness":"ready","delay_seconds":null}',
             ))
         return "bounded response"
@@ -206,6 +211,55 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("complete_goal", backend.requests[-1][2])
         await app.stop()
 
+    async def test_completed_report_survives_fresh_store_and_application(self):
+        report = (
+            "No failed application entries were found. The previous run ended with "
+            "an operator interrupt and completed cleanup with no non-daemon threads."
+        )
+        backend = OutcomeProposalBackend("completed", report=report)
+        job = self.store.create_job("Nightly Self Log Reviewer")
+        app = self.app(backend)
+        await app.start()
+        binding = app.start_job_run(job.id)
+        outcome = await app.work_current_job_once()
+        self.assertEqual(outcome.report, report)
+        await app.stop()
+        self.store.close()
+
+        self.store = SQLiteJobStore(self.path)
+        fresh_app = self.app(JobBackend(outcome_call=False))
+        persisted = fresh_app.jobs.get_run(binding.run.id)
+        self.assertEqual(persisted.outcome_summary, "done")
+        self.assertEqual(persisted.result_report, report)
+
+    async def test_continue_with_report_is_rejected_and_not_persisted(self):
+        backend = OutcomeProposalBackend("continue", report="not terminal")
+        job = self.store.create_job("Continue")
+        app = self.app(backend)
+        await app.start()
+        binding = app.start_job_run(job.id)
+        outcome = await app.work_current_job_once()
+        self.assertIs(outcome.disposition, JobWorkDisposition.CONTINUE)
+        self.assertIsNone(outcome.report)
+        self.assertIsNone(self.store.get_run(binding.run.id).result_report)
+        self.assertIn('"status": "rejected"', backend.tool_result.output)
+        await app.stop()
+
+    async def test_overlong_terminal_report_is_rejected_and_not_persisted(self):
+        backend = OutcomeProposalBackend(
+            "completed", report="x" * (MAX_RUN_REPORT_CHARS + 1)
+        )
+        job = self.store.create_job("Bound report")
+        app = self.app(backend)
+        await app.start()
+        binding = app.start_job_run(job.id)
+        outcome = await app.work_current_job_once()
+        self.assertIs(outcome.disposition, JobWorkDisposition.CONTINUE)
+        self.assertIs(self.store.get_run(binding.run.id).status, JobRunStatus.RUNNING)
+        self.assertIsNone(self.store.get_run(binding.run.id).result_report)
+        self.assertIn('"status": "rejected"', backend.tool_result.output)
+        await app.stop()
+
     async def test_backend_failure_after_accepted_proposal_does_not_commit(self):
         app = None
 
@@ -214,7 +268,8 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(app.current_task.status, TaskStatus.RUNNING)
 
         backend = OutcomeProposalBackend(
-            after_tool=assert_still_running_during_callback, fail_after_tool=True
+            after_tool=assert_still_running_during_callback, fail_after_tool=True,
+            report="must not persist",
         )
         job = self.store.create_job("Remain running")
         app = self.app(backend)
@@ -227,11 +282,14 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(app.current_task, binding.task)
         self.assertIs(app.active_goal, goal)
         self.assertIs(self.store.get_run(binding.run.id).status, JobRunStatus.RUNNING)
+        self.assertIsNone(self.store.get_run(binding.run.id).result_report)
         await app.stop()
 
     async def test_terminal_proposal_stale_before_commit_becomes_continue(self):
         app = None
-        backend = OutcomeProposalBackend(after_tool=lambda: app.pause_task())
+        backend = OutcomeProposalBackend(
+            after_tool=lambda: app.pause_task(), report="stale report"
+        )
         job = self.store.create_job("Become stale")
         app = self.app(backend)
         await app.start()
@@ -239,6 +297,7 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         outcome = await app.work_current_job_once()
         self.assertIs(outcome.disposition, JobWorkDisposition.CONTINUE)
         self.assertIs(self.store.get_run(binding.run.id).status, JobRunStatus.RUNNING)
+        self.assertIsNone(self.store.get_run(binding.run.id).result_report)
         self.assertIs(app.current_task.status, TaskStatus.PAUSED)
         self.assertIsNone(app.active_goal)
         await app.stop()

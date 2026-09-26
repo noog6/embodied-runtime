@@ -1,6 +1,9 @@
 """Durable Job domain and persistence APIs."""
 
-from .model import InvalidJobRunTransitionError, Job, JobRun, JobRunStatus, JobSchedule, JobTarget
+from .model import (
+    MAX_RUN_REPORT_CHARS, InvalidJobRunTransitionError, Job, JobRun, JobRunStatus,
+    JobSchedule, JobTarget,
+)
 from .execution import JobWorkDisposition, JobWorkOutcome
 from .progress import (
     JOB_PROGRESS_BASES, MAX_JOB_PROGRESS_COUNTER_NAME_CHARS,
@@ -31,3 +34,4 @@ __all__ = ["InvalidJobRunTransitionError", "Job", "JobRun", "JobRunStatus", "Job
            "MAX_JOB_CONTINUATION_DELAY_SECONDS",
            "project_job_continuity_summary", "render_job_continuity",
            "ScheduledJobController"]
+__all__.append("MAX_RUN_REPORT_CHARS")
