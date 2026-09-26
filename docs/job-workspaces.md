@@ -1,5 +1,19 @@
 # Job Workspaces
 
+## Report snapshots
+
+An operator may retrieve one exact logical Workspace path as a retained report.
+Containment, no-symlink, regular-file, and Job ownership checks remain enforced by
+`JobWorkspaceStore`; physical paths are never model-facing. Retrieval reads the
+whole UTF-8 artifact up to the explicit 8,000-character report-delivery limit.
+Larger artifacts are rejected rather than truncated.
+
+The returned volatile reference binds the exact text and its `content_version`.
+Later replacement or append operations do not change that captured snapshot, so
+delivery means “retrieve version X, inspect version X, deliver version X.” The
+snapshot and reference are discarded after the operator cognition episode and are
+never persisted in the Workspace or Jobs database.
+
 Phase 7B implements one durable Workspace for each durable Job. Every occurrence
 of a Job uses the same Workspace; a Workspace is not owned by a JobRun. An
 artifact is a regular, bounded UTF-8 text file identified by its canonical

@@ -1,5 +1,24 @@
 # Interaction identity
 
+## Operator-directed retained-report delivery
+
+`deliver_report(report_ref, destination)` is distinct from the model-authored
+`deliver_message(destination, message)` effect. The model supplies only an ephemeral
+reference obtained in the same operator episode and a semantic destination. The
+runtime composes deterministic plain-text provenance framing around the exact
+captured body and reuses `OperatorDeliveryRouteCatalog`, `OperatorMessageSink`, and
+the `delivery` interaction identity (`initiator=operator`,
+`response_expected=false`). The originating dialogue source remains `console` or
+`voice`; delivering to console does not change a voice conversation's identity.
+
+The authorized destination set is captured for the episode, while execution
+re-resolves the current route. Removed or channel-incompatible routes reject without
+fallback; a compatible replacement route is used. Report delivery shares the one
+ordinary operator-effect opportunity with `deliver_message` and Workspace writes.
+Route acceptance is request-local evidence of acceptance only, never evidence that
+the operator read or acknowledged the content. P1 adds no queue, retry, receipt, or
+durable delivery history.
+
 Phase 20.6 adds operator-directed cross-channel text delivery while keeping the
 current dialogue and autonomous notifications separate.
 
