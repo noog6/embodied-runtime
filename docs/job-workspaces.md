@@ -89,11 +89,31 @@ case-sensitive Unicode code-point equality, never substring, fuzzy, semantic,
 vector, or temporal matching; duplicate exact names return bounded ambiguity.
 
 Both tools share the ordinary maximum of two operator acquisitions and existing
-identical-call reuse. They are acquisitions, never effects, and expose no write,
-create, append, replace, delete, move, or directory-creation operation. They are
+identical-call reuse. They are acquisitions, never effects. They are
 available only when both Jobs and Workspace persistence exist and are absent
 from initiative, bounded Job work, automatic continuation, scheduled cognition,
 and all other autonomous projections.
+
+The same explicit operator-dialogue projection offers one effect,
+`workspace_write(job, path, mode, content)`, with strict `create`, `replace`, and
+`append` modes and an 8,000-character model-facing ceiling. It is available only
+when Jobs and Workspace persistence both exist, and is never an acquisition or
+autonomous/Job-work capability. The current request must explicitly request or
+clearly authorize the durable write; cognition must not take notes proactively,
+invent a destination, or create a Job. The finite operator grammar permits one
+such effect per episode, including after ordinary acquisitions, with no edit loop.
+
+Create rejects an existing artifact; replace and append report a missing
+artifact rather than creating one. Only an applied, published, durability-
+confirmed result supports an unqualified success acknowledgement. Rejection or
+unavailability does not prove a change. An indeterminate published result means
+the artifact may already have changed but durability was not confirmed, so it
+supports neither confirmed durable success nor confirmed failure.
+
+There is no model-facing delete, move, batch write, or `expected_version`, and no
+autonomous or bounded Job-work Workspace access. A Workspace write neither
+admits persistent memory nor creates or modifies a JobRun, Task, progress, or
+immutable terminal result.
 
 Workspace text is authored working material, not runtime or sensor evidence,
 BRD evidence, persistent memory, Job progress, semantic continuity,

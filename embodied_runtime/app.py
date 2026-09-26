@@ -61,7 +61,8 @@ from embodied_runtime.jobs import (
     MAX_RUN_REPORT_CHARS,
     MIN_JOB_CONTINUATION_DELAY_SECONDS,
     JobRun, JobRunStatus, JobStore, JobWorkspaceStore, JobWorkDisposition, JobWorkOutcome,
-    WorkspaceBackendError, WorkspaceNotFoundError, WorkspaceUnsafeError,
+    WorkspaceBackendError, WorkspaceConflictError, WorkspaceDurabilityError,
+    WorkspaceNotFoundError, WorkspaceQuotaError, WorkspaceUnsafeError,
     WorkspaceValidationError,
     JOB_PROGRESS_BASES, JobProgress, JobProgressUpdate, validate_counter_name,
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
@@ -122,6 +123,7 @@ VOICE_SPEAKER_OWNER = ResourceOwner("runtime", "voice")
 MAX_DIAGNOSTIC_EVENTS = 25
 MAX_DIAGNOSTIC_LOOKBACK_SECONDS = 3600
 MAX_DIAGNOSTIC_RESULT_CHARS = 24_000
+MAX_WORKSPACE_COGNITION_WRITE_CHARS = 8_000
 DIAGNOSTIC_SEVERITIES = ("debug", "info", "warning", "error", "critical")
 _SENSITIVE_EVENT_KEY_PARTS = (
     "prompt", "transcript", "response", "audio", "image", "credential",
@@ -450,6 +452,23 @@ WORKSPACE_READ_TOOL = CognitionToolDefinition(
 )
 
 WORKSPACE_ACQUISITION_TOOLS = (WORKSPACE_LIST_TOOL, WORKSPACE_READ_TOOL)
+
+WORKSPACE_WRITE_TOOL = CognitionToolDefinition(
+    name="workspace_write",
+    description=("Create, replace, or append one bounded UTF-8 text artifact in an "
+                 "exact Job's durable Workspace when the operator authorizes it."),
+    parameters={
+        "type": "object",
+        "properties": {
+            "job": {"type": "string", "minLength": 1, "maxLength": 200},
+            "path": {"type": "string", "minLength": 1, "maxLength": 240},
+            "mode": {"type": "string", "enum": ["create", "replace", "append"]},
+            "content": {"type": "string", "maxLength": MAX_WORKSPACE_COGNITION_WRITE_CHARS},
+        },
+        "required": ["job", "path", "mode", "content"],
+        "additionalProperties": False,
+    },
+)
 
 DIAGNOSTIC_TOOLS = (
     INSPECT_RUNTIME_HEALTH_TOOL, INSPECT_EVENTS_TOOL,
@@ -2727,6 +2746,9 @@ class RobotApplication:
                                 call, message, episode.trigger_source,
                                 episode_id=episode.id,
                             )
+                        elif call.name == WORKSPACE_WRITE_TOOL.name:
+                            result = self._execute_workspace_write(
+                                call, episode_id=episode.id)
                         else:
                             result = await self._execute_cognition_tool(
                                 call, expected_goal=grounded_goal
@@ -2953,6 +2975,22 @@ class RobotApplication:
                 "artifact prose is authored working material, not persistent memory or fresh "
                 "runtime/current-world evidence merely because it is durable. Attribute it as "
                 "what the Workspace artifact says."
+            )
+            lines.append(
+                "workspace_write changes durable Job Workspace material. Use it only "
+                "when the current operator request explicitly requests or clearly "
+                "authorizes creating, replacing, appending, updating, recording, saving, "
+                "or writing material in a Job Workspace. Never take notes proactively. "
+                "A durable write needs an identified Job and artifact path; ask for a "
+                "missing destination rather than inventing a Job or default file. Only "
+                "status=applied with published=true and durability_confirmed=true permits "
+                "an unqualified success acknowledgement. Rejected or unavailable means do "
+                "not claim the artifact changed. Indeterminate durability means publication "
+                "may have happened: claim neither confirmed failure nor confirmed durable "
+                "success. Attempted text, operator intent, and WorkingMemory are not proof. "
+                "Workspace prose remains non-authoritative authored working material; a "
+                "Workspace write is not persistent memory and does not alter a JobRun result. "
+                "Durability certifies neither truth nor freshness."
             )
         if acquisitions:
             lines.append("Ordered acquisition evidence:")
@@ -3894,6 +3932,7 @@ class RobotApplication:
             tools.append(INSPECT_JOB_RESULT_TOOL)
             if self.job_workspaces is not None:
                 tools.extend(WORKSPACE_ACQUISITION_TOOLS)
+                tools.append(WORKSPACE_WRITE_TOOL)
         return tuple(tools)
 
     def _execute_memory_admission(
@@ -4193,6 +4232,129 @@ class RobotApplication:
             f"JOB{job.id}" if job is not None else "none",
             "directory" if operation == "list" else "path", detail_chars,
             result["status"], extra,
+        )
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _execute_workspace_write(
+        self, call: CognitionToolCall, *, episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        """Apply one explicitly authorized operator Workspace text mutation."""
+        job: Job | None = None
+        mode = "invalid"
+        path_chars = 0
+        written_bytes = 0
+        artifact_metadata: dict[str, object] | None = None
+        if self.state is not LifecycleState.RUNNING:
+            result: dict[str, object] = {
+                "status": "unavailable", "reason": "application_not_running"}
+        elif self.jobs is None:
+            result = {"status": "unavailable", "reason": "jobs_persistence_unavailable"}
+        elif self.job_workspaces is None:
+            result = {"status": "unavailable", "reason": "workspace_persistence_unavailable"}
+        else:
+            try:
+                arguments = json.loads(call.arguments)
+                if not isinstance(arguments, dict) or set(arguments) != {
+                    "job", "path", "mode", "content"
+                }:
+                    raise ValueError("invalid arguments")
+                raw_selector = arguments["job"]
+                path, mode, content = (arguments["path"], arguments["mode"],
+                                       arguments["content"])
+                if any(type(value) is not str for value in
+                       (raw_selector, path, mode, content)):
+                    raise ValueError("invalid arguments")
+                selector = raw_selector.strip()
+                if (not selector or len(selector) > 200 or any(
+                        unicodedata.category(character) == "Cc"
+                        for character in selector)):
+                    raise ValueError("invalid selector")
+                if mode not in ("create", "replace", "append"):
+                    raise ValueError("invalid mode")
+                if len(content) > MAX_WORKSPACE_COGNITION_WRITE_CHARS:
+                    raise ValueError("content too large")
+                try:
+                    content.encode("utf-8", "strict")
+                except UnicodeError as error:
+                    raise ValueError("invalid artifact text") from error
+                if "\0" in content:
+                    raise ValueError("invalid artifact text")
+                path_chars = len(path)
+                job, resolution = self._resolve_exact_job_selector(selector)
+                if resolution is not None:
+                    result = resolution
+                elif job is None:
+                    result = {"status": "not_found", "reason": "job_not_found"}
+                else:
+                    artifact = self.job_workspaces.write(job.id, path, mode, content)
+                    written_bytes = artifact.size_bytes
+                    artifact_metadata = {
+                        "path": artifact.path, "mode": artifact.mode,
+                        "size_bytes": artifact.size_bytes,
+                        "content_version": artifact.content_version,
+                    }
+                    result = {
+                        "status": "applied", "source": "job_workspace",
+                        "scope": "workspace_artifact_write",
+                        "record_authority": "runtime",
+                        "content_authority":
+                            "authored_working_material_non_authoritative",
+                        "job": {"id": job.id, "name": job.name},
+                        "artifact": artifact_metadata,
+                        "published": artifact.published,
+                        "durability_confirmed": artifact.durability_confirmed,
+                    }
+            except WorkspaceDurabilityError:
+                artifact_metadata = {"path": path, "mode": mode}
+                result = {
+                    "status": "indeterminate", "reason": "durability_unconfirmed",
+                    "source": "job_workspace", "scope": "workspace_artifact_write",
+                    "record_authority": "runtime",
+                    "content_authority": "authored_working_material_non_authoritative",
+                    "job": {"id": job.id, "name": job.name} if job else None,
+                    "artifact": artifact_metadata,
+                    "published": True, "durability_confirmed": False,
+                }
+            except WorkspaceQuotaError:
+                result = {"status": "rejected", "reason": "workspace_quota_exceeded",
+                          "published": False, "durability_confirmed": False}
+            except WorkspaceConflictError:
+                reason = "artifact_exists" if mode == "create" else "artifact_conflict"
+                result = {"status": "rejected", "reason": reason,
+                          "published": False, "durability_confirmed": False}
+            except WorkspaceNotFoundError:
+                result = {"status": "not_found", "reason": "artifact_not_found",
+                          "published": False, "durability_confirmed": False}
+            except WorkspaceValidationError:
+                result = {"status": "rejected", "reason": "invalid_logical_path",
+                          "published": False, "durability_confirmed": False}
+            except WorkspaceUnsafeError:
+                result = {"status": "unsafe", "reason": "unsafe_workspace_entry",
+                          "published": False, "durability_confirmed": False}
+            except WorkspaceBackendError:
+                result = {"status": "unavailable", "reason": "backend_unavailable",
+                          "published": False, "durability_confirmed": False}
+            except (json.JSONDecodeError, TypeError, ValueError) as error:
+                if "selector" in str(error):
+                    reason = "invalid_job_selector"
+                elif "mode" in str(error):
+                    reason = "invalid_write_mode"
+                elif "too large" in str(error):
+                    reason = "write_request_too_large"
+                elif "artifact text" in str(error):
+                    reason = "invalid_artifact_text"
+                else:
+                    reason = "invalid_tool_arguments"
+                result = {"status": "rejected", "reason": reason,
+                          "published": False, "durability_confirmed": False}
+        LOGGER.info(
+            "[WORKSPACE] episode=%s op=write job=%s mode=%s path_chars=%s "
+            "status=%s bytes=%s published=%s durability_confirmed=%s",
+            f"E{episode_id}" if episode_id is not None else "none",
+            f"JOB{job.id}" if job is not None else "none", mode, path_chars,
+            result["status"], written_bytes,
+            str(result.get("published", False)).lower(),
+            str(result.get("durability_confirmed", False)).lower(),
         )
         return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
