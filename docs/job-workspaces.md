@@ -78,8 +78,22 @@ JobRun last modified an artifact once operational logs are unavailable.
 
 The console offers read-only `job files JOB<n> [directory]` and
 `job file JOB<n> <logical-path> [offset_chars]` inspection. It uses the same
-bounded store and exact existing Job check. Phase 7B exposes no model-facing
-Workspace tools and grants no cognition filesystem authority.
+bounded store and exact existing Job check.
+
+During explicit operator dialogue, cognition may deliberately use two read-only
+acquisitions: `workspace_list(job, directory="", cursor=null)` lists one
+non-recursive directory, and `workspace_read(job, path, offset_chars=0)` reads
+at most 8,000 Unicode characters. The Job selector is exact `JOB<n>` or an exact
+Job name after surrounding whitespace is trimmed. Name comparison is
+case-sensitive Unicode code-point equality, never substring, fuzzy, semantic,
+vector, or temporal matching; duplicate exact names return bounded ambiguity.
+
+Both tools share the ordinary maximum of two operator acquisitions and existing
+identical-call reuse. They are acquisitions, never effects, and expose no write,
+create, append, replace, delete, move, or directory-creation operation. They are
+available only when both Jobs and Workspace persistence exist and are absent
+from initiative, bounded Job work, automatic continuation, scheduled cognition,
+and all other autonomous projections.
 
 Workspace text is authored working material, not runtime or sensor evidence,
 BRD evidence, persistent memory, Job progress, semantic continuity,
@@ -88,6 +102,13 @@ freshness. A note saying that a current temperature is 21 C proves only what the
 note contains; a current-world claim still needs fresh supported evidence.
 `JobRun.result_report` remains separate immutable terminal historical work
 product and is not replaced by an artifact.
+
+Structured acquisition results distinguish these authority classes: Job
+identity, logical paths, entry kinds, byte sizes, content versions, modification
+times, pagination/read offsets, and retrieval time are runtime-observed storage
+metadata. Artifact text is `authored_working_material` with
+`content_authority=non_authoritative`; cognition should attribute it as what the
+Workspace artifact says rather than as a fresh observation.
 
 Workspace content survives JobRun terminal states, Job disable/enable,
 application shutdown, and application restart. Reopening it does not restore or

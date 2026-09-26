@@ -61,6 +61,8 @@ from embodied_runtime.jobs import (
     MAX_RUN_REPORT_CHARS,
     MIN_JOB_CONTINUATION_DELAY_SECONDS,
     JobRun, JobRunStatus, JobStore, JobWorkspaceStore, JobWorkDisposition, JobWorkOutcome,
+    WorkspaceBackendError, WorkspaceNotFoundError, WorkspaceUnsafeError,
+    WorkspaceValidationError,
     JOB_PROGRESS_BASES, JobProgress, JobProgressUpdate, validate_counter_name,
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
 )
@@ -414,6 +416,40 @@ INSPECT_JOB_RESULT_TOOL = CognitionToolDefinition(
         "additionalProperties": False,
     },
 )
+
+WORKSPACE_LIST_TOOL = CognitionToolDefinition(
+    name="workspace_list",
+    description=("List one non-recursive, bounded directory in an exact Job's durable "
+                 "Workspace. Workspace material is independent of JobRun results."),
+    parameters={
+        "type": "object",
+        "properties": {
+            "job": {"type": "string", "minLength": 1, "maxLength": 200},
+            "directory": {"type": ["string", "null"], "maxLength": 240},
+            "cursor": {"type": ["string", "null"], "maxLength": 512},
+        },
+        "required": ["job", "directory", "cursor"],
+        "additionalProperties": False,
+    },
+)
+
+WORKSPACE_READ_TOOL = CognitionToolDefinition(
+    name="workspace_read",
+    description=("Read at most 8,000 Unicode characters from one exact Job Workspace "
+                 "artifact. Artifact prose is non-authoritative authored material."),
+    parameters={
+        "type": "object",
+        "properties": {
+            "job": {"type": "string", "minLength": 1, "maxLength": 200},
+            "path": {"type": "string", "minLength": 1, "maxLength": 240},
+            "offset_chars": {"type": ["integer", "null"], "minimum": 0},
+        },
+        "required": ["job", "path", "offset_chars"],
+        "additionalProperties": False,
+    },
+)
+
+WORKSPACE_ACQUISITION_TOOLS = (WORKSPACE_LIST_TOOL, WORKSPACE_READ_TOOL)
 
 DIAGNOSTIC_TOOLS = (
     INSPECT_RUNTIME_HEALTH_TOOL, INSPECT_EVENTS_TOOL,
@@ -2651,6 +2687,10 @@ class RobotApplication:
                             result = self._execute_job_result_inspection(
                                 call, episode_id=episode.id)
                             inspection = perception = None
+                        elif call.name in {tool.name for tool in WORKSPACE_ACQUISITION_TOOLS}:
+                            result = self._execute_workspace_acquisition(
+                                call, episode_id=episode.id)
+                            inspection = perception = None
                         elif call.name in {tool.name for tool in DIAGNOSTIC_TOOLS}:
                             result = self._execute_diagnostic(call)
                             inspection = perception = None
@@ -2900,6 +2940,19 @@ class RobotApplication:
                 "supports that memory claim. Do not claim it describes current "
                 "conditions unless independent fresh evidence establishes the current "
                 "claim."
+            )
+        if self.jobs is not None and self.job_workspaces is not None:
+            lines.append(
+                "A Job Workspace is durable mutable working material owned by the Job, "
+                "not by one JobRun, and may exist when the Job has never run and has no "
+                "active or completed occurrence. Use workspace_list/workspace_read for "
+                "Workspace files and contents; do not infer them from inspect_job_runtime, "
+                "inspect_job_result, persistent memory, semantic continuity, or conversation "
+                "history when direct inspection is available. JobRun results do not represent "
+                "Workspace contents. Workspace metadata is runtime-observed storage state; "
+                "artifact prose is authored working material, not persistent memory or fresh "
+                "runtime/current-world evidence merely because it is durable. Attribute it as "
+                "what the Workspace artifact says."
             )
         if acquisitions:
             lines.append("Ordered acquisition evidence:")
@@ -3772,7 +3825,8 @@ class RobotApplication:
         return (INSPECT_SELF_TOOL.name, *(tool.name for tool in DIAGNOSTIC_TOOLS),
                 OBSERVE_SCENE_TOOL.name,
                 RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name,
-                INSPECT_JOB_RESULT_TOOL.name)
+                INSPECT_JOB_RESULT_TOOL.name,
+                *(tool.name for tool in WORKSPACE_ACQUISITION_TOOLS))
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project only currently permitted autonomous semantic effects."""
@@ -3838,6 +3892,8 @@ class RobotApplication:
             tools.append(INSPECT_RUN_HISTORY_TOOL)
         if self.jobs is not None:
             tools.append(INSPECT_JOB_RESULT_TOOL)
+            if self.job_workspaces is not None:
+                tools.extend(WORKSPACE_ACQUISITION_TOOLS)
         return tuple(tools)
 
     def _execute_memory_admission(
@@ -3935,6 +3991,8 @@ class RobotApplication:
             return self._execute_run_history_inspection(call)
         if call.name == INSPECT_JOB_RESULT_TOOL.name:
             return self._execute_job_result_inspection(call)
+        if call.name in {tool.name for tool in WORKSPACE_ACQUISITION_TOOLS}:
+            return self._execute_workspace_acquisition(call)
         return self._rejected_tool(call.name, "tool is not available")
 
     def _execute_job_result_inspection(
@@ -3977,27 +4035,10 @@ class RobotApplication:
                     else:
                         result = self._project_job_result(resolved_run)
                 else:
-                    ambiguous = False
-                    if match is not None:
-                        job = self.jobs.get_job(int(match.group(2)))
-                    elif re.match(r"^(?:RUN|JOB)", selector):
-                        raise ValueError
+                    job, resolution = self._resolve_exact_job_selector(selector)
+                    if resolution is not None:
+                        result = resolution
                     else:
-                        matches = tuple(job for job in self.jobs.list_jobs()
-                                        if job.name == selector)
-                        if len(matches) > 1:
-                            candidates = [
-                                {"id": job.id, "name": job.name} for job in matches[:10]
-                            ]
-                            result = {"status": "ambiguous",
-                                      "reason": "ambiguous_job_name",
-                                      "candidates": candidates,
-                                      "candidates_truncated": len(matches) > 10}
-                            ambiguous = True
-                            job = None
-                        else:
-                            job = matches[0] if matches else None
-                    if not ambiguous:
                         if job is None:
                             result = {"status": "not_found", "reason": "job_not_found"}
                         else:
@@ -4015,6 +4056,143 @@ class RobotApplication:
             f"E{episode_id}" if episode_id is not None else "none", selector,
             f"RUN{resolved_run.id}" if resolved_run is not None else "none",
             result["status"],
+        )
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _resolve_exact_job_selector(
+        self, selector: str,
+    ) -> tuple[Job | None, dict[str, object] | None]:
+        """Resolve JOB<n> or an exact case-sensitive Job name without approximation."""
+        assert self.jobs is not None
+        match = re.fullmatch(r"JOB([1-9][0-9]*)", selector)
+        if match is not None:
+            return self.jobs.get_job(int(match.group(1))), None
+        if re.match(r"^(?:RUN|JOB)", selector):
+            raise ValueError("invalid Job selector")
+        matches = tuple(job for job in self.jobs.list_jobs() if job.name == selector)
+        if len(matches) > 1:
+            return None, {
+                "status": "ambiguous", "reason": "ambiguous_job_name",
+                "candidates": [{"id": job.id, "name": job.name} for job in matches[:10]],
+                "candidates_truncated": len(matches) > 10,
+            }
+        return (matches[0] if matches else None), None
+
+    def _execute_workspace_acquisition(
+        self, call: CognitionToolCall, *, episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        """Project a bounded read-only view of one Job-owned Workspace."""
+        operation = "list" if call.name == WORKSPACE_LIST_TOOL.name else "read"
+        job: Job | None = None
+        result: dict[str, object]
+        detail_chars = 0
+        if self.state is not LifecycleState.RUNNING:
+            result = {"status": "unavailable", "reason": "application_not_running"}
+        elif self.jobs is None:
+            result = {"status": "unavailable", "reason": "jobs_persistence_unavailable"}
+        elif self.job_workspaces is None:
+            result = {"status": "unavailable", "reason": "workspace_persistence_unavailable"}
+        else:
+            try:
+                arguments = json.loads(call.arguments)
+                if not isinstance(arguments, dict):
+                    raise ValueError("invalid arguments")
+                required = {"job"} if operation == "list" else {"job", "path"}
+                optional = {"directory", "cursor"} if operation == "list" else {"offset_chars"}
+                if not required <= set(arguments) or not set(arguments) <= required | optional:
+                    raise ValueError("invalid arguments")
+                raw_selector = arguments["job"]
+                if type(raw_selector) is not str:
+                    raise ValueError("invalid selector")
+                selector = raw_selector.strip()
+                if not selector or len(selector) > 200 or any(
+                    unicodedata.category(character) == "Cc" for character in selector
+                ):
+                    raise ValueError("invalid selector")
+                job, resolution = self._resolve_exact_job_selector(selector)
+                if resolution is not None:
+                    result = resolution
+                elif job is None:
+                    result = {"status": "not_found", "reason": "job_not_found"}
+                elif operation == "list":
+                    directory = arguments.get("directory") or ""
+                    cursor = arguments.get("cursor")
+                    if type(directory) is not str or (cursor is not None and type(cursor) is not str):
+                        raise ValueError("invalid arguments")
+                    detail_chars = len(directory)
+                    listing = self.job_workspaces.list_entries(job.id, directory, cursor)
+                    result = {
+                        "status": "ok", "source": "job_workspace",
+                        "scope": "current_stored_workspace_snapshot",
+                        "retrieved_at": self._aware_wall_clock().astimezone(UTC).isoformat(),
+                        "record_authority": "runtime",
+                        "content_authority": "authored_working_material_non_authoritative",
+                        "job": {"id": job.id, "name": job.name},
+                        "directory": listing.directory,
+                        "entries": [{
+                            "path": entry.path, "name": entry.name, "kind": entry.kind,
+                            "size_bytes": entry.size_bytes,
+                            "modified_at": entry.modified_at.isoformat(),
+                            "content_version": entry.content_version,
+                        } for entry in listing.entries],
+                        "next_cursor": listing.next_cursor,
+                    }
+                else:
+                    path = arguments["path"]
+                    offset = arguments.get("offset_chars")
+                    offset = 0 if offset is None else offset
+                    if type(path) is not str or type(offset) is not int:
+                        raise ValueError("invalid arguments")
+                    detail_chars = len(path)
+                    artifact = self.job_workspaces.read(job.id, path, offset)
+                    result = {
+                        "status": "ok", "source": "job_workspace",
+                        "scope": "current_stored_workspace_artifact",
+                        "retrieved_at": self._aware_wall_clock().astimezone(UTC).isoformat(),
+                        "record_authority": "runtime",
+                        "content_provenance": "authored_working_material",
+                        "content_authority": "non_authoritative",
+                        "job": {"id": job.id, "name": job.name},
+                        "artifact": {
+                            "path": artifact.path, "size_bytes": artifact.size_bytes,
+                            "content_version": artifact.content_version,
+                            "offset_chars": artifact.offset_chars,
+                            "next_offset_chars": artifact.next_offset_chars,
+                            "total_chars": artifact.total_chars,
+                            "truncated": artifact.truncated, "content": artifact.content,
+                        },
+                    }
+            except WorkspaceValidationError as error:
+                message = str(error)
+                if "cursor" in message:
+                    reason = "invalid_cursor"
+                elif "offset" in message or "range" in message:
+                    reason = "invalid_read_offset"
+                else:
+                    reason = "invalid_logical_path"
+                result = {"status": "rejected", "reason": reason}
+            except WorkspaceNotFoundError as error:
+                reason = "directory_not_found" if operation == "list" else "artifact_not_found"
+                result = {"status": "not_found", "reason": reason}
+            except WorkspaceUnsafeError:
+                result = {"status": "unsafe", "reason": "unsafe_workspace_entry"}
+            except WorkspaceBackendError:
+                result = {"status": "unavailable", "reason": "backend_unavailable"}
+            except (json.JSONDecodeError, TypeError, ValueError) as error:
+                reason = "invalid_job_selector" if "selector" in str(error) else "invalid_tool_arguments"
+                result = {"status": "rejected", "reason": reason}
+        extra = "entries=%s" % len(result.get("entries", [])) if operation == "list" else (
+            "bytes=%s truncated=%s" % (
+                result.get("artifact", {}).get("size_bytes", 0),
+                str(result.get("artifact", {}).get("truncated", False)).lower(),
+            )
+        )
+        LOGGER.info(
+            "[WORKSPACE] episode=%s op=%s job=%s %s_chars=%s status=%s %s",
+            f"E{episode_id}" if episode_id is not None else "none", operation,
+            f"JOB{job.id}" if job is not None else "none",
+            "directory" if operation == "list" else "path", detail_chars,
+            result["status"], extra,
         )
         return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
