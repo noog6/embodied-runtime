@@ -15,6 +15,19 @@ MAX_OPERATOR_DELIVERY_DESTINATION_DESCRIPTION_CHARS = 256
 class InteractionChannel(StrEnum):
     CONSOLE = "console"
     VOICE = "voice"
+    REMOTE_TEXT = "remote_text"
+
+
+class InteractionEnvironment(StrEnum):
+    WORKSTATION = "workstation"
+    COMPANION = "companion"
+    UNATTENDED = "unattended"
+    REMOTE = "remote"
+
+
+class InteractionCadence(StrEnum):
+    BOUNDED_TURN = "bounded_turn"
+    REALTIME_SESSION = "realtime_session"
 
 
 class InteractionMode(StrEnum):
@@ -26,6 +39,7 @@ class InteractionMode(StrEnum):
 
 class InteractionInitiator(StrEnum):
     OPERATOR = "operator"
+    EXTERNAL_PARTICIPANT = "external_participant"
     RUNTIME = "runtime"
 
 
@@ -37,6 +51,13 @@ class InteractionContext:
     mode: InteractionMode
     initiator: InteractionInitiator
     response_expected: bool
+    cadence: InteractionCadence | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode == InteractionMode.DIALOGUE and self.cadence is None:
+            raise ValueError("dialogue interaction requires cadence")
+        if self.mode != InteractionMode.DIALOGUE and self.cadence is not None:
+            raise ValueError("non-dialogue interaction must not specify cadence")
 
     def render(self) -> str:
         """Render bounded, provider-neutral grounding for this interaction."""
@@ -44,9 +65,30 @@ class InteractionContext:
             "Interaction context",
             f"  channel: {self.channel.value}",
             f"  mode: {self.mode.value}",
+            f"  cadence: {self.cadence.value if self.cadence is not None else 'none'}",
             f"  initiator: {self.initiator.value}",
             f"  response_expected: {str(self.response_expected).lower()}",
         ))
+
+
+_ENVIRONMENT_EXPLANATIONS = {
+    InteractionEnvironment.WORKSTATION: "The robot is operated primarily through local interactive tools; an operator need not be continuously present.",
+    InteractionEnvironment.COMPANION: "The robot has an embodied local companion posture where conversation may occur intermittently; this does not establish current presence.",
+    InteractionEnvironment.UNATTENDED: "The robot may continue runtime-owned responsibilities without assuming an active local operator dialogue.",
+    InteractionEnvironment.REMOTE: "Interaction may principally arrive through remote infrastructure; no participant, transport, destination, or tool is thereby authorized.",
+}
+
+
+def render_interaction_environment(environment: InteractionEnvironment) -> str:
+    """Render bounded grounding for the runtime's configured interaction posture."""
+    if not isinstance(environment, InteractionEnvironment):
+        raise TypeError("environment must be an InteractionEnvironment")
+    return "\n".join((
+        "Interaction environment",
+        f"  environment: {environment.value}",
+        _ENVIRONMENT_EXPLANATIONS[environment],
+        "This runtime-owned environment does not prove a person's physical presence, grant capabilities, change process authority, or imply that any communication route exists.",
+    ))
 
 
 def render_dialogue_policy(interaction: InteractionContext) -> str:
@@ -78,6 +120,15 @@ def render_dialogue_policy(interaction: InteractionContext) -> str:
             "Use readable text-native structure, including paragraphs and lists when useful, without assuming a Markdown renderer.",
             "Include exact URLs, paths, hashes, identifiers, command lines, and code-like text when useful.",
             "Provide technical detail when appropriate to the request, but verbosity is not required.",
+        ))
+    if interaction.channel == InteractionChannel.REMOTE_TEXT:
+        return "\n".join((
+            "Dialogue policy",
+            "  medium: remote text",
+            "The final response will be delivered as text through a remote conversation channel.",
+            "Use readable text-native structure without assuming a Markdown renderer.",
+            "Exact URLs, paths, hashes, identifiers, command lines, and code may be provided when useful.",
+            "Do not assume the participant has access to the robot's local terminal, filesystem, display, clipboard, or physical controls merely because the conversation is textual.",
         ))
     raise ValueError(f"unsupported operator dialogue channel: {interaction.channel}")
 
@@ -157,11 +208,11 @@ def resolve_notification_route(
 
 CONSOLE_DIALOGUE = InteractionContext(
     InteractionChannel.CONSOLE, InteractionMode.DIALOGUE,
-    InteractionInitiator.OPERATOR, True,
+    InteractionInitiator.OPERATOR, True, InteractionCadence.BOUNDED_TURN,
 )
 VOICE_DIALOGUE = InteractionContext(
     InteractionChannel.VOICE, InteractionMode.DIALOGUE,
-    InteractionInitiator.OPERATOR, True,
+    InteractionInitiator.OPERATOR, True, InteractionCadence.BOUNDED_TURN,
 )
 CONSOLE_NOTIFICATION = runtime_notification(InteractionChannel.CONSOLE)
 CONSOLE_DELIVERY = operator_delivery(InteractionChannel.CONSOLE)

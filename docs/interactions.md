@@ -1,5 +1,54 @@
 # Interaction identity
 
+## Provider-neutral dimensional model
+
+The runtime classifies interaction along independent dimensions:
+
+| Dimension | Question | Values |
+| --- | --- | --- |
+| environment | How is the robot currently deployed for interaction? | `workstation`, `companion`, `unattended`, `remote` |
+| channel | Where is this communication happening? | `console`, `voice`, `remote_text` |
+| cadence | Is dialogue a bounded turn or a realtime session? | `bounded_turn`, `realtime_session` |
+| mode | What kind of interaction is this? | `dialogue`, `notification`, `delivery`, `administrative` |
+| initiator | Who initiated it? | `operator`, `external_participant`, `runtime` |
+| response expected | Does it owe a direct reply? | true or false |
+
+`[interaction].environment` configures the application-lifetime posture and
+defaults to `workstation`. It is runtime state, not sensed presence, model state,
+WorkingMemory, or persistent state. `companion` permits intermittent local
+conversation, `unattended` permits existing runtime-owned responsibilities without
+assuming active dialogue, and `remote` describes a posture in which communication
+may principally arrive through remote infrastructure. None changes capabilities,
+budgets, process authority, safety constraints, routes, or autonomy.
+
+> **The channel does not establish identity or authority.**
+
+> **Interaction cadence does not establish authority.** It grants no tools, Task
+> or Job authority, or resources.
+
+> **Interaction environment does not establish physical presence or authority.**
+
+> **Transport-specific adapters resolve identity and runtime policy before
+> constructing an `InteractionContext`.** The model never authenticates a person.
+
+> **External participants are advisory by default and cannot enter the
+> operator-authorized cognition path.**
+
+Dialogue must specify a cadence; non-dialogue interactions have none. Current
+console and voice production interactions are operator `bounded_turn` dialogue.
+The bounded cognition executor also accepts a structurally supplied operator
+`remote_text` bounded turn, while rejecting an `external_participant` or
+`realtime_session` before provider cognition and effects. A realtime cadence does
+not imply voice, and voice does not imply realtime.
+
+`remote_text` is a provider-neutral semantic channel. No remote transport,
+identity system, notification route, or delivery destination exists yet.
+`realtime_session` is likewise structural only: bounded-turn cognition is the only
+current dialogue executor. Future realtime and remote adapters must reuse these
+authority semantics rather than bypass them. An environment of `remote` does not
+turn an external participant into an operator, and merely adding a channel never
+creates an outbound route.
+
 ## Operator-directed retained-report delivery
 
 `deliver_report(report_ref, destination)` is distinct from the model-authored

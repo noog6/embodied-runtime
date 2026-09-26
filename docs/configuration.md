@@ -35,7 +35,7 @@ automatic fallback when ElevenLabs credentials or service are unavailable.
 
 ## Schema
 
-Only these four tables and keys are accepted:
+Only the documented tables and keys are accepted:
 
 ```toml
 [runtime]
@@ -46,6 +46,9 @@ cognition = "openai-responses"
 vision = "openai-responses"
 mode = "console"
 timezone = "America/Toronto"
+
+[interaction]
+environment = "workstation"
 
 [initiative]
 enabled = true
@@ -75,6 +78,10 @@ heartbeat_seconds = 30
 max_auto_steps = 3
 scheduler_poll_seconds = 30
 ```
+
+`interaction.environment` is one of `workstation`, `companion`, `unattended`,
+or `remote`, and defaults to `workstation`. It is a fixed runtime interaction
+posture, not physical-presence evidence or a permission setting.
 
 `hardware`, `camera`, and `cognition` accept the same values as their existing
 CLI options. `runtime.mode` is exactly one of `run`, `console`, or `diagnostics`;

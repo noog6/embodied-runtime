@@ -7,6 +7,9 @@ vision = "openai-responses"
 mode = "console"
 timezone = "America/Toronto"
 
+[interaction]
+environment = "workstation"
+
 [voice]
 enabled = true
 wake_word_enabled = true
