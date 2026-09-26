@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import re
+import secrets
 import unicodedata
 from time import monotonic, monotonic_ns
 from datetime import UTC, datetime
@@ -113,6 +114,7 @@ from embodied_runtime.voice import (
     VoiceSessionPolicy,
 )
 
+MAX_REPORT_DELIVERY_CHARS = 8_000
 LOGGER = logging.getLogger(__name__)
 OPERATOR_SOURCE: ContextVar[str] = ContextVar("operator_source", default="operator")
 CAMERA_RESOURCE = ResourceKey("camera")
@@ -256,6 +258,32 @@ def deliver_message_tool(
                 "message": {"type": "string", "maxLength": MAX_OPERATOR_MESSAGE_CHARS},
             },
             "required": ["destination", "message"],
+            "additionalProperties": False,
+        },
+    )
+
+
+def deliver_report_tool(
+    destinations: Sequence[OperatorDeliveryDestination],
+) -> CognitionToolDefinition:
+    """Build the operator-only retained-report delivery effect."""
+    return CognitionToolDefinition(
+        name="deliver_report",
+        description=(
+            "Deliver a report_ref returned by retrieve_report only when the operator "
+            "explicitly requests or clearly authorizes delivery to an offered semantic "
+            "destination. The runtime supplies the exact retained body. Applied means "
+            "the route accepted it, not that the operator read or acknowledged it."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "report_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+                "destination": {
+                    "type": "string", "enum": [item.name for item in destinations],
+                },
+            },
+            "required": ["report_ref", "destination"],
             "additionalProperties": False,
         },
     )
@@ -415,6 +443,27 @@ INSPECT_JOB_RESULT_TOOL = CognitionToolDefinition(
             "type": "string", "minLength": 1, "maxLength": 200,
         }},
         "required": ["selector"],
+        "additionalProperties": False,
+    },
+)
+
+RETRIEVE_REPORT_TOOL = CognitionToolDefinition(
+    name="retrieve_report",
+    description=(
+        "Retrieve one bounded exact retained textual source for possible operator-requested "
+        "delivery. The returned report_ref denotes this request-local snapshot. Retained "
+        "authored content is historical work product, not fresh authoritative runtime evidence."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "source_kind": {"type": "string", "enum": [
+                "job_run_result", "workspace_artifact",
+            ]},
+            "selector": {"type": "string", "minLength": 1, "maxLength": 200},
+            "path": {"type": ["string", "null"], "maxLength": 240},
+        },
+        "required": ["source_kind", "selector", "path"],
         "additionalProperties": False,
     },
 )
@@ -823,6 +872,19 @@ class CurrentJobRun:
     job: Job
     run: JobRun
     task: Task
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedReportSnapshot:
+    """One volatile, operator-episode-scoped retained report snapshot."""
+
+    source_kind: str
+    job_id: int
+    job_name: str
+    content: str
+    run_id: int | None = None
+    path: str | None = None
+    content_version: str | None = None
 
 
 class RobotApplication:
@@ -2765,6 +2827,8 @@ class RobotApplication:
         tool_outcomes: list[WorkingMemoryToolOutcome] = []
         acquisitions: list[InitiativeAcquisitionOutcome] = []
         acquisition_requests: dict[tuple[str, str], CognitionToolResult] = {}
+        report_references: dict[str, RetainedReportSnapshot] = {}
+        delivery_destinations = self._operator_delivery_routes.destinations
         stage_name = "initial"
         try:
             # Explicitly bounded grammar: initial decision, then at most two
@@ -2776,7 +2840,6 @@ class RobotApplication:
                 acquired = False
                 capability_consumed = False
                 grounded_goal = self._active_goal
-                delivery_destinations = self._operator_delivery_routes.destinations
                 tools = self._operator_episode_tools(
                     len(acquisitions), delivery_destinations
                 )
@@ -2846,6 +2909,10 @@ class RobotApplication:
                             result = self._execute_job_result_inspection(
                                 call, episode_id=episode.id)
                             inspection = perception = None
+                        elif call.name == RETRIEVE_REPORT_TOOL.name:
+                            result = self._execute_report_retrieval(
+                                call, report_references, episode_id=episode.id)
+                            inspection = perception = None
                         elif call.name in {tool.name for tool in WORKSPACE_ACQUISITION_TOOLS}:
                             result = self._execute_workspace_acquisition(
                                 call, episode_id=episode.id)
@@ -2879,6 +2946,11 @@ class RobotApplication:
                         if call.name == "deliver_message":
                             result = await self._execute_deliver_message(
                                 call, tools, delivery_destinations,
+                                episode.trigger_source, episode_id=episode.id,
+                            )
+                        elif call.name == "deliver_report":
+                            result = await self._execute_deliver_report(
+                                call, tools, delivery_destinations, report_references,
                                 episode.trigger_source, episode_id=episode.id,
                             )
                         elif call.name == REMEMBER_TOOL.name:
@@ -3005,7 +3077,8 @@ class RobotApplication:
         destinations = tuple(delivery_destinations or ())
         tools = self.cognition_tools()
         if destinations:
-            tools = (*tools, deliver_message_tool(destinations))
+            tools = (*tools, deliver_message_tool(destinations),
+                     deliver_report_tool(destinations))
         if acquisitions_used >= 2:
             return tuple(tool for tool in tools
                          if tool.name not in self._acquisition_tool_names())
@@ -3038,6 +3111,7 @@ class RobotApplication:
                 "Operator delivery policy",
                 "These available effects are destinations to which the operator may explicitly request content be delivered.",
                 "Use deliver_message only when the current request explicitly requests or clearly authorizes delivery.",
+                "Use deliver_report only for an exact report_ref acquired in this episode; never reproduce its body as a message argument.",
                 "The destination is semantic and runtime-owned; do not invent account, recipient, transport, or credential identifiers.",
                 "Write a self-contained message suitable for its destination; the console is plain text and has no assumed Markdown rendering.",
                 "Delivery is separate from the current dialogue response and does not change that response's medium.",
@@ -4061,7 +4135,7 @@ class RobotApplication:
         return (INSPECT_SELF_TOOL.name, *(tool.name for tool in DIAGNOSTIC_TOOLS),
                 OBSERVE_SCENE_TOOL.name,
                 RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name,
-                INSPECT_JOB_RESULT_TOOL.name,
+                INSPECT_JOB_RESULT_TOOL.name, RETRIEVE_REPORT_TOOL.name,
                 *(tool.name for tool in WORKSPACE_ACQUISITION_TOOLS))
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
@@ -4128,6 +4202,7 @@ class RobotApplication:
             tools.append(INSPECT_RUN_HISTORY_TOOL)
         if self.jobs is not None:
             tools.append(INSPECT_JOB_RESULT_TOOL)
+            tools.append(RETRIEVE_REPORT_TOOL)
             if self.job_workspaces is not None:
                 tools.extend(WORKSPACE_ACQUISITION_TOOLS)
                 tools.append(WORKSPACE_WRITE_TOOL)
@@ -4314,6 +4389,116 @@ class RobotApplication:
                 "candidates_truncated": len(matches) > 10,
             }
         return (matches[0] if matches else None), None
+
+    def _execute_report_retrieval(
+        self, call: CognitionToolCall,
+        references: dict[str, RetainedReportSnapshot], *, episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        """Capture one exact retained source in a volatile episode registry."""
+        result: dict[str, object]
+        try:
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("application_not_running")
+            if self.jobs is None:
+                raise RuntimeError("jobs_persistence_unavailable")
+            arguments = json.loads(call.arguments)
+            if not isinstance(arguments, dict) or not {"source_kind", "selector"} <= set(arguments):
+                raise ValueError("invalid_tool_arguments")
+            if not set(arguments) <= {"source_kind", "selector", "path"}:
+                raise ValueError("invalid_tool_arguments")
+            source_kind, raw_selector = arguments["source_kind"], arguments["selector"]
+            path = arguments.get("path")
+            if source_kind not in ("job_run_result", "workspace_artifact"):
+                raise ValueError("invalid_source_kind")
+            if type(raw_selector) is not str:
+                raise ValueError("invalid_selector")
+            selector = raw_selector.strip()
+            if (not selector or len(selector) > 200 or any(
+                    unicodedata.category(character) == "Cc" for character in selector)):
+                raise ValueError("invalid_selector")
+
+            if source_kind == "job_run_result":
+                if path is not None:
+                    raise ValueError("path_not_allowed")
+                match = re.fullmatch(r"(RUN|JOB)([1-9][0-9]*)", selector)
+                if match is not None and match.group(1) == "RUN":
+                    run = self.jobs.get_run(int(match.group(2)))
+                    if run is None:
+                        result = {"status": "not_found", "reason": "job_run_not_found"}
+                        return CognitionToolResult(json.dumps(result, sort_keys=True))
+                    if run.status not in (
+                        JobRunStatus.COMPLETED, JobRunStatus.FAILED,
+                        JobRunStatus.STOPPED, JobRunStatus.INTERRUPTED,
+                    ):
+                        result = {"status": "unavailable", "reason": "job_run_not_terminal"}
+                        return CognitionToolResult(json.dumps(result, sort_keys=True))
+                    job = self.jobs.get_job(run.job_id)
+                else:
+                    job, resolution = self._resolve_exact_job_selector(selector)
+                    if resolution is not None:
+                        return CognitionToolResult(json.dumps(resolution, sort_keys=True))
+                    if job is None:
+                        result = {"status": "not_found", "reason": "job_not_found"}
+                        return CognitionToolResult(json.dumps(result, sort_keys=True))
+                    run = self.jobs.get_latest_completed_run(job.id)
+                    if run is None:
+                        result = {"status": "unavailable", "reason": "job_has_no_completed_run"}
+                        return CognitionToolResult(json.dumps(result, sort_keys=True))
+                if job is None:
+                    result = {"status": "not_found", "reason": "job_not_found"}
+                    return CognitionToolResult(json.dumps(result, sort_keys=True))
+                if run.result_report is None:
+                    result = {"status": "no_report", "reason": "result_report_absent",
+                              "job": f"JOB{job.id}", "run": f"RUN{run.id}"}
+                    return CognitionToolResult(json.dumps(result, sort_keys=True))
+                snapshot = RetainedReportSnapshot(
+                    source_kind, job.id, job.name, run.result_report, run_id=run.id)
+            else:
+                if self.job_workspaces is None:
+                    raise RuntimeError("workspace_persistence_unavailable")
+                if type(path) is not str:
+                    raise ValueError("path_required")
+                job, resolution = self._resolve_exact_job_selector(selector)
+                if resolution is not None:
+                    return CognitionToolResult(json.dumps(resolution, sort_keys=True))
+                if job is None:
+                    result = {"status": "not_found", "reason": "job_not_found"}
+                    return CognitionToolResult(json.dumps(result, sort_keys=True))
+                artifact = self.job_workspaces.read(
+                    job.id, path, 0, MAX_REPORT_DELIVERY_CHARS)
+                if artifact.truncated or artifact.total_chars > MAX_REPORT_DELIVERY_CHARS:
+                    result = {"status": "rejected", "reason": "too_large"}
+                    return CognitionToolResult(json.dumps(result, sort_keys=True))
+                snapshot = RetainedReportSnapshot(
+                    source_kind, job.id, job.name, artifact.content,
+                    path=artifact.path, content_version=artifact.content_version)
+
+            report_ref = "RR-" + secrets.token_urlsafe(24)
+            references[report_ref] = snapshot
+            result = {
+                "status": "applied", "report_ref": report_ref,
+                "source_kind": snapshot.source_kind, "job": f"JOB{snapshot.job_id}",
+                "chars": len(snapshot.content), "content": snapshot.content,
+            }
+            if snapshot.run_id is not None:
+                result["run"] = f"RUN{snapshot.run_id}"
+            else:
+                result.update(path=snapshot.path, content_version=snapshot.content_version)
+        except WorkspaceValidationError:
+            result = {"status": "rejected", "reason": "invalid_logical_path"}
+        except WorkspaceNotFoundError:
+            result = {"status": "not_found", "reason": "artifact_not_found"}
+        except WorkspaceUnsafeError:
+            result = {"status": "rejected", "reason": "unsafe_workspace_entry"}
+        except WorkspaceBackendError:
+            result = {"status": "unavailable", "reason": "backend_unavailable"}
+        except RuntimeError as error:
+            result = {"status": "unavailable", "reason": str(error)}
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            result = {"status": "rejected", "reason": str(error) or "invalid_tool_arguments"}
+        LOGGER.info("[REPORT] episode=%s op=retrieve status=%s",
+                    f"E{episode_id}" if episode_id is not None else "none", result["status"])
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
     def _execute_workspace_acquisition(
         self, call: CognitionToolCall, *, episode_id: int | None = None,
@@ -5538,6 +5723,61 @@ class RobotApplication:
         )
         return CognitionToolResult(json.dumps({
             "status": "applied", "destination": destination,
+        }, sort_keys=True))
+
+    async def _execute_deliver_report(
+        self, call: CognitionToolCall,
+        available: tuple[CognitionToolDefinition, ...],
+        authorized: Sequence[OperatorDeliveryDestination],
+        references: dict[str, RetainedReportSnapshot], source: str, *,
+        episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        """Deliver the exact body held by an episode-local retained-report reference."""
+        try:
+            if not any(item.name == call.name for item in available):
+                raise RuntimeError("tool is not available")
+            arguments = self._tool_arguments(call, {"report_ref", "destination"})
+            report_ref, destination = arguments["report_ref"], arguments["destination"]
+            if type(report_ref) is not str or type(destination) is not str:
+                raise ValueError("report_ref and destination must be strings")
+            snapshot = references.get(report_ref)
+            if snapshot is None:
+                raise ValueError("unknown report_ref")
+            projected = {item.name: item for item in authorized}
+            if destination not in projected:
+                raise ValueError("destination is not authorized for this operator stage")
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("operator delivery requires a running application")
+            route = self._operator_delivery_routes.resolve(destination)
+            if route is None:
+                raise RuntimeError("delivery destination is no longer available")
+            captured = projected[destination]
+            if (route.destination.channel != captured.channel or
+                    route.sink.channel != route.destination.channel):
+                raise RuntimeError("delivery destination is no longer compatible")
+            if snapshot.run_id is not None:
+                provenance = f"source: JOB{snapshot.job_id} / RUN{snapshot.run_id} result"
+            else:
+                provenance = (
+                    f"source: JOB{snapshot.job_id} workspace {snapshot.path}\n"
+                    f"content_version: {snapshot.content_version}"
+                )
+            message = f"Retained report\n{provenance}\n\n{snapshot.content}"
+            await route.sink.deliver(OperatorMessage(
+                message, source, operator_delivery(route.destination.channel)))
+        except Exception as error:
+            LOGGER.info("[INTERACTION] episode=%s mode=delivery destination=%s source=%s "
+                        "report=true status=rejected",
+                        "none" if episode_id is None else f"E{episode_id}",
+                        locals().get("destination", "unknown"), source)
+            return self._rejected_tool(call.name, str(error))
+        LOGGER.info("[INTERACTION] episode=%s mode=delivery destination=%s source=%s "
+                    "report=true chars=%s status=applied",
+                    "none" if episode_id is None else f"E{episode_id}", destination,
+                    source, len(snapshot.content))
+        return CognitionToolResult(json.dumps({
+            "status": "applied", "destination": destination,
+            "report_ref": report_ref,
         }, sort_keys=True))
 
     async def _execute_orient_body(

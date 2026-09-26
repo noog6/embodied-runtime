@@ -1,5 +1,20 @@
 # OpenAI text cognition setup
 
+## Retained report tools
+
+Explicit operator cognition may receive the read-only `retrieve_report` tool when
+Jobs persistence is available. Its schema accepts `source_kind` (`job_run_result` or
+`workspace_artifact`), an exact `selector`, and a nullable logical Workspace
+`path` (`null` for JobRun results). A successful bounded retrieval exposes exact content and metadata plus an
+opaque, request-local `report_ref`; this historical authored material is not fresh
+runtime evidence.
+
+When a runtime-authorized destination exists, operator cognition also receives
+`deliver_report`, whose only arguments are `report_ref` and the destination enum.
+The report body is deliberately absent from the effect schema: cognition cannot
+reconstruct, transform, or substitute it. These tools are not projected into
+autonomous attention, bounded Job work, continuation, or outcome cognition.
+
 OpenAI Responses support is optional; the ordinary runtime needs neither the
 SDK nor an API key. Install the project with only this optional integration:
 

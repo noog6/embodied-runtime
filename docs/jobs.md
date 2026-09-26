@@ -1,5 +1,21 @@
 # Jobs
 
+## Retained report retrieval and delivery
+
+Storage, retrieval, and delivery are separate runtime operations. A JobRun's
+`result_report` is an immutable occurrence work product; a Job Workspace artifact is
+mutable, durable working material. In explicit operator dialogue, `retrieve_report`
+can resolve an exact `RUN<n>`, the latest completed `JOB<n>`, or an exact
+case-sensitive Job name using the same fail-closed rules as `inspect_job_result`.
+Only the resolved run is considered: a missing report does not cause a backward
+search. Retrieval returns an episode-local reference to an exact snapshot and does
+not turn historical authored claims into authoritative current evidence.
+
+P1 does not project report retrieval or delivery into Job execution, scheduling,
+continuations, outcome cognition, or autonomous attention. Automatic completion
+routing remains deferred; `address_operator` remains the concise autonomous
+notification mechanism.
+
 Jobs are durable runtime infrastructure. Phase 3 lets an operator explicitly
 coordinate one occurrence through the runtime's existing Task lifecycle and
 request one bounded work episode. It does not loop, schedule, route, or retry
