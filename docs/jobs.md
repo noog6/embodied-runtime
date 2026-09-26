@@ -243,7 +243,7 @@ an explicit `job work` can grant a fresh burst. An automatic provider failure
 also moves to `awaiting_operator` and is not automatically retried. Terminal
 Job operations clear the record.
 
-Continuation is session-local, volatile, heartbeat-driven, bounded,
+Continuation is session-local, volatile, bounded,
 operator-fair, and non-recovering. The heartbeat neither scans durable running
 rows nor discovers or starts enabled Jobs. Restart does not resume work, and
 there are no execution claims, multi-runtime adoption, or persistent
@@ -264,20 +264,26 @@ receives the latest valid semantic continuity summary.
 `wait_for_event` fully yields until a supported semantic runtime event occurs.
 The initial catalog contains only `presence_changed`, mapped by the harness to
 `PresenceChanged`; model output cannot name Python classes or provide predicates.
-The event must arrive after the exact wait is armed. It makes one later episode
-eligible but does not run cognition in the event handler, claim attention, or
-consume budget. The projected `present` boolean is a bounded runtime-authored
-fact; it establishes reported presence only, not a person's identity, object
-visibility, safety, or unrelated mutable conditions. Fresh acquisition remains
-necessary for facts outside that payload.
+The event must arrive after the exact wait is armed. A matching event satisfies
+the current wake and immediately offers continuation through the same ordinary
+gate used by the heartbeat. That gate still decides whether work starts based on
+the exact occurrence binding, lifecycle, Task state, authority and budget,
+operator priority, attention, and active-work ownership. Event satisfaction
+does not itself run cognition or consume budget. The periodic heartbeat remains
+the fallback for reconciliation and retry after temporary contention. The
+projected `present` boolean is a bounded runtime-authored fact; it establishes
+reported presence only, not a person's identity, object visibility, safety, or
+unrelated mutable conditions. Fresh acquisition remains necessary for facts
+outside that payload.
 
 Event satisfaction remains sticky through pause, operator fairness, and busy
 attention, and matching events coalesce rather than queue. Acceptance through
 the ordinary continuation gate consumes the one wake context even if the
 provider then fails. If that episode selects `wait_for_event` again, a new later
-event is required. Explicit `job work` may instead supersede either a satisfied
-or unsatisfied event wait; it receives semantic continuity but no invented wake
-event.
+event is required. Events arriving while a bounded Job-work episode is active
+are ignored rather than queued for a future wait. Explicit `job work` may
+instead supersede either a satisfied or unsatisfied event wait; it receives
+semantic continuity but no invented wake event.
 
 Readiness is volatile, belongs to one exact JobRun/Task binding, and is removed
 on terminal state, shutdown, or restart. A daily schedule starts a new
