@@ -193,7 +193,7 @@ Provider state and response IDs never cross a temporal wait. An acquisition-info
 request and the optional distinct effect continuation are independent calls with
 different policy gates.
 
-## Job Workspace read acquisitions
+## Job Workspace operator tools
 
 Explicit operator dialogue receives `workspace_list` and `workspace_read` when
 both the durable Job catalog and Workspace store are available. They use the
@@ -207,3 +207,22 @@ Workspace metadata is a current runtime storage observation. Artifact content
 is authored non-authoritative working material, distinct from BRD state,
 durable JobRun results, and persistent memory. A Job Workspace can exist without
 any active or completed JobRun.
+
+Explicit operator dialogue also receives `workspace_write(job, path, mode,
+content)` when both stores are available. All four non-null arguments are
+required; mode is exactly `create`, `replace`, or `append`, and content has an
+8,000-character cognition ceiling beneath the storage byte and quota limits.
+It shares the exact Job resolver used by reads.
+
+This effect is absent from acquisitions, diagnostics, initiative effects,
+autonomous continuation, scheduled cognition, and bounded Job work. It may be
+used only when the current operator request explicitly requests or clearly
+authorizes the durable write, never for proactive note-taking. One write ends
+the finite operator episode, even when it follows one or two acquisitions.
+
+Only `status=applied`, `published=true`, and `durability_confirmed=true` justify
+an unqualified success acknowledgement. Rejection or unavailability does not.
+An indeterminate published result means publication may have happened but
+durability was not confirmed; cognition must claim neither durable success nor
+definite failure. Workspace prose remains non-authoritative, and writing it is
+not persistent-memory admission or a JobRun-result mutation.

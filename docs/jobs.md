@@ -102,8 +102,13 @@ and `workspace_read` share the ordinary two-acquisition operator budget and are
 not projected into autonomous or bounded Job work. Runtime-observed file
 metadata is authoritative for the retrieved storage snapshot; artifact prose is
 authored non-authoritative working material, not a JobRun result, persistent
-memory, progress evidence, or fresh current-world evidence. No model-facing
-Workspace writes exist in this phase. See [Job Workspaces](job-workspaces.md).
+memory, progress evidence, or fresh current-world evidence. The separate
+`workspace_write(job, path, mode, content)` operator effect permits one
+explicitly authorized bounded create, replace, or append per dialogue episode.
+It is not projected into autonomous initiative, continuation, or Job work and
+does not create a run or alter Tasks, progress, persistent memory, or immutable
+JobRun results. There is no model-facing delete/move or `expected_version` in
+this phase. See [Job Workspaces](job-workspaces.md).
 
 ## Runtime coordination through Task
 
