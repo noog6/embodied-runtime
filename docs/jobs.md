@@ -412,8 +412,9 @@ invent semantic completion: a durable running occurrence remains running. On
 restart it remains visible through `job runs`, while `current_job_run` and
 `current_task` are empty. Automatic recovery is not implemented.
 
-The console inspection commands are `jobs`, `job show JOB<n>`, and `job runs
-JOB<n>`. Definition commands are `job add`, `job enable`, and `job disable`.
+The console inspection commands are `jobs`, `job show JOB<n>`, `job runs
+JOB<n>`, `job files JOB<n> [directory]`, and `job file JOB<n> <logical-path>
+[offset_chars]`. Definition commands are `job add`, `job enable`, and `job disable`.
 Runtime coordination commands are `job start`, asynchronous `job work`, `job
 current`, `job complete`, `job fail`, and `job stop`.
 
@@ -421,3 +422,7 @@ It does not mark the durable run failed; the occurrence remains `running`, with
 the same restart semantics. Cron, new-Job scheduling, Job-owned resources,
 unbounded retries, body/runtime registries, target matching, distributed
 coordination, claims, and restart recovery remain future work.
+
+Each durable Job also owns one durable contained text Workspace shared across
+its occurrences. It remains separate from immutable JobRun result reports and
+from all volatile coordination state. See [Job Workspaces](job-workspaces.md).

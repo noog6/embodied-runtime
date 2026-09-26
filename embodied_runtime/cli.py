@@ -36,7 +36,9 @@ from embodied_runtime.run_history import (
 )
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.memory import SQLiteMemoryStore
-from embodied_runtime.jobs import SQLiteJobStore
+from embodied_runtime.jobs import (
+    FilesystemJobWorkspaceStore, SQLiteJobStore, workspace_root_for_database,
+)
 from embodied_runtime.interaction import (
     ConsoleOperatorMessageChannel, InteractionChannel,
     OperatorDeliveryDestination, OperatorDeliveryRoute,
@@ -323,6 +325,13 @@ def build_job_store(args: argparse.Namespace) -> SQLiteJobStore | None:
     return SQLiteJobStore(args.jobs_database_path)
 
 
+def build_job_workspace_store(args: argparse.Namespace) -> FilesystemJobWorkspaceStore | None:
+    """Construct the Job-owned Workspace from the configured Jobs database."""
+    if not args.jobs_enabled:
+        return None
+    return FilesystemJobWorkspaceStore(workspace_root_for_database(args.jobs_database_path))
+
+
 def build_platform_monitor_policy(
     args: argparse.Namespace,
 ) -> PlatformMonitorPolicy | None:
@@ -464,6 +473,14 @@ async def _run_application(
     ),)) if message_channel is not None else OperatorDeliveryRouteCatalog()
     persistent_memory = build_persistent_memory_store(args)
     jobs = build_job_store(args)
+    try:
+        job_workspaces = build_job_workspace_store(args)
+    except BaseException:
+        if jobs is not None:
+            jobs.close()
+        if persistent_memory is not None:
+            persistent_memory.close()
+        raise
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
                                               initiative_enabled=args.initiative,
@@ -500,6 +517,7 @@ async def _run_application(
         timezone_name=args.timezone,
         persistent_memory_store=persistent_memory,
         job_store=jobs,
+        job_workspace_store=job_workspaces,
         run_history_evidence=history_evidence,
         observability=observability,
     )
