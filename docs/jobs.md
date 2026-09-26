@@ -62,11 +62,37 @@ or prove an external-world effect; the existing runtime validation and evidence
 remain authoritative. A JobRun result is bounded text, not a Job Workspace,
 artifact, attachment, or filesystem path.
 
-**Storage is not delivery.** Persisting a result does not speak, notify, route,
-retry, or acknowledge it. Operators may inspect exact occurrences with `job
-result RUN<n>` or the newest completed occurrence (excluding newer running,
-failed, and stopped runs) with `job latest-result JOB<n>`. There is no
-model-facing historical-result retrieval capability in this phase.
+**Storage is not delivery.** Persisting or retrieving a result does not speak,
+notify, route, retry, mark read, or acknowledge it. Operators may inspect exact
+occurrences with `job result RUN<n>` or the newest completed occurrence
+(excluding newer running, failed, and stopped runs) with `job latest-result
+JOB<n>`.
+
+During explicit operator dialogue, `inspect_job_result(selector)` is a
+read-only acquisition of one historical result. `RUN<n>` selects that exact
+terminal occurrence (completed, failed, or stopped), while `JOB<n>` selects the
+newest completed occurrence. A selector may instead be an exact Job name after
+surrounding whitespace is trimmed. Name comparison is case-sensitive Unicode
+code-point equality: there is no substring, fuzzy, semantic, vector, or temporal
+matching. Duplicate exact names return at most ten candidate Job IDs and names
+as an explicit ambiguity. Pending and running exact occurrences return an
+explicit non-terminal state rather than current Task or continuation details.
+
+The runtime owns the fact that a particular JobRun completed and owns its
+durable identifiers, status, and timestamps. The stored summary/report is
+historical cognition-authored work product and does not become fresh runtime
+evidence merely because it is durable. Cognition must attribute mutable claims
+to that earlier occurrence unless independent fresh evidence supports a current
+claim. This differs both from bounded runtime diagnostics (BRD), which reports
+current configured or recently observed runtime evidence, and persistent
+memory, which stores durable semantic knowledge associated with entities.
+
+The acquisition is offered only in explicit operator dialogue when Jobs
+persistence exists. It shares the ordinary two-acquisition operator budget and
+duplicate-call reuse. It is deliberately absent from autonomous initiative,
+Job work, automatic continuation, and goal-directed attention so historical
+cognition-authored prose cannot become Job outcome evidence. Retrieval creates
+no JobRun, memory, readiness, progress, artifact, delivery, or acknowledgement.
 
 ## Runtime coordination through Task
 

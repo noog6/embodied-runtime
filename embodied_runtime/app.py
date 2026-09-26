@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import json
 import logging
 import math
+import re
 import unicodedata
 from time import monotonic, monotonic_ns
 from datetime import UTC, datetime
@@ -395,6 +396,23 @@ INSPECT_JOB_RUNTIME_TOOL = CognitionToolDefinition(
                  "runtime-owned committed progress for this occurrence; never history."),
     parameters={"type": "object", "properties": {}, "required": [],
                 "additionalProperties": False},
+)
+
+INSPECT_JOB_RESULT_TOOL = CognitionToolDefinition(
+    name="inspect_job_result",
+    description=(
+        "Retrieve one bounded durable historical JobRun result by exact RUN<n>, "
+        "latest completed JOB<n>, or exact case-sensitive Job name. Result content "
+        "is historical cognition-authored work product, not fresh runtime evidence."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"selector": {
+            "type": "string", "minLength": 1, "maxLength": 200,
+        }},
+        "required": ["selector"],
+        "additionalProperties": False,
+    },
 )
 
 DIAGNOSTIC_TOOLS = (
@@ -2611,6 +2629,10 @@ class RobotApplication:
                             result = self._execute_run_history_inspection(
                                 call, episode_id=episode.id)
                             inspection = perception = None
+                        elif call.name == INSPECT_JOB_RESULT_TOOL.name:
+                            result = self._execute_job_result_inspection(
+                                call, episode_id=episode.id)
+                            inspection = perception = None
                         elif call.name in {tool.name for tool in DIAGNOSTIC_TOOLS}:
                             result = self._execute_diagnostic(call)
                             inspection = perception = None
@@ -2849,6 +2871,18 @@ class RobotApplication:
             )
         if self._run_history_evidence is not None:
             lines.append(self._run_history_grounding())
+        if self.jobs is not None:
+            lines.append(
+                "Durable Job results are historical retained work products. Job and "
+                "JobRun identity, status, and timestamps are runtime-owned durable "
+                "metadata. Summary/report content is cognition-authored historical work "
+                "product from that occurrence, not fresh current runtime evidence. "
+                "Attribute its claims to the prior JobRun. Do not call the retrieved "
+                "result persistent memory unless independent persistent-memory evidence "
+                "supports that memory claim. Do not claim it describes current "
+                "conditions unless independent fresh evidence establishes the current "
+                "claim."
+            )
         if acquisitions:
             lines.append("Ordered acquisition evidence:")
             for index, acquisition in enumerate(acquisitions, 1):
@@ -3719,7 +3753,8 @@ class RobotApplication:
     def _acquisition_tool_names() -> tuple[str, ...]:
         return (INSPECT_SELF_TOOL.name, *(tool.name for tool in DIAGNOSTIC_TOOLS),
                 OBSERVE_SCENE_TOOL.name,
-                RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name)
+                RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name,
+                INSPECT_JOB_RESULT_TOOL.name)
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project only currently permitted autonomous semantic effects."""
@@ -3783,6 +3818,8 @@ class RobotApplication:
             tools.append(REMEMBER_TOOL)
         if self._run_history_evidence is not None:
             tools.append(INSPECT_RUN_HISTORY_TOOL)
+        if self.jobs is not None:
+            tools.append(INSPECT_JOB_RESULT_TOOL)
         return tuple(tools)
 
     def _execute_memory_admission(
@@ -3878,7 +3915,126 @@ class RobotApplication:
             return self._execute_memory_recall(call)
         if call.name == INSPECT_RUN_HISTORY_TOOL.name:
             return self._execute_run_history_inspection(call)
+        if call.name == INSPECT_JOB_RESULT_TOOL.name:
+            return self._execute_job_result_inspection(call)
         return self._rejected_tool(call.name, "tool is not available")
+
+    def _execute_job_result_inspection(
+        self, call: CognitionToolCall, *, episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        """Read one durable result without exposing a general Job-store query."""
+        selector = "invalid"
+        resolved_run: JobRun | None = None
+        result: dict[str, object]
+        if self.state is not LifecycleState.RUNNING:
+            result = {"status": "unavailable", "reason": "application_not_running"}
+        elif self.jobs is None:
+            result = {"status": "unavailable", "reason": "jobs_persistence_unavailable"}
+        else:
+            try:
+                arguments = json.loads(call.arguments)
+                if not isinstance(arguments, dict) or set(arguments) != {"selector"}:
+                    raise ValueError
+                raw = arguments["selector"]
+                if type(raw) is not str:
+                    raise ValueError
+                selector = raw.strip()
+                if not selector or len(selector) > 200 or any(
+                    unicodedata.category(character) == "Cc" for character in selector
+                ):
+                    raise ValueError
+                match = re.fullmatch(r"(RUN|JOB)([1-9][0-9]*)", selector)
+                if match is not None and match.group(1) == "RUN":
+                    run_id = int(match.group(2))
+                    resolved_run = self.jobs.get_run(run_id)
+                    if resolved_run is None:
+                        result = {"status": "not_found", "reason": "job_run_not_found",
+                                  "job_run_id": run_id}
+                    elif resolved_run.status not in (
+                        JobRunStatus.COMPLETED, JobRunStatus.FAILED, JobRunStatus.STOPPED
+                    ):
+                        result = {"status": "unavailable",
+                                  "reason": "job_run_not_terminal",
+                                  "job_run_id": run_id}
+                    else:
+                        result = self._project_job_result(resolved_run)
+                else:
+                    ambiguous = False
+                    if match is not None:
+                        job = self.jobs.get_job(int(match.group(2)))
+                    elif re.match(r"^(?:RUN|JOB)", selector):
+                        raise ValueError
+                    else:
+                        matches = tuple(job for job in self.jobs.list_jobs()
+                                        if job.name == selector)
+                        if len(matches) > 1:
+                            candidates = [
+                                {"id": job.id, "name": job.name} for job in matches[:10]
+                            ]
+                            result = {"status": "ambiguous",
+                                      "reason": "ambiguous_job_name",
+                                      "candidates": candidates,
+                                      "candidates_truncated": len(matches) > 10}
+                            ambiguous = True
+                            job = None
+                        else:
+                            job = matches[0] if matches else None
+                    if not ambiguous:
+                        if job is None:
+                            result = {"status": "not_found", "reason": "job_not_found"}
+                        else:
+                            resolved_run = self.jobs.get_latest_completed_run(job.id)
+                            if resolved_run is None:
+                                result = {"status": "unavailable",
+                                          "reason": "job_has_no_completed_run",
+                                          "job_id": job.id}
+                            else:
+                                result = self._project_job_result(resolved_run, job=job)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                result = {"status": "rejected", "reason": "invalid_selector"}
+        LOGGER.info(
+            "[JOBS] result_lookup episode=%s selector=%s resolved_run=%s status=%s",
+            f"E{episode_id}" if episode_id is not None else "none", selector,
+            f"RUN{resolved_run.id}" if resolved_run is not None else "none",
+            result["status"],
+        )
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _project_job_result(
+        self, run: JobRun, *, job: Job | None = None,
+    ) -> dict[str, object]:
+        assert self.jobs is not None
+        job = job or self.jobs.get_job(run.job_id)
+        if job is None:
+            return {"status": "not_found", "reason": "job_not_found",
+                    "job_id": run.job_id}
+        summary = (run.error_summary if run.status is JobRunStatus.FAILED
+                   else run.outcome_summary or run.error_summary)
+        summary_kind = (
+            "error" if run.status is JobRunStatus.FAILED
+            or (run.outcome_summary is None and run.error_summary is not None)
+            else "outcome"
+        )
+        return {
+            "status": "ok",
+            "source": "durable_job_store",
+            "scope": "historical_job_run_result",
+            "retrieved_at": self._aware_wall_clock().astimezone(UTC).isoformat(),
+            "record_authority": "runtime",
+            "content_provenance": "cognition_work_product",
+            "content_authority": "historical_non_authoritative",
+            "job": {"id": job.id, "name": job.name},
+            "job_run": {
+                "id": run.id, "status": run.status.value,
+                "started_at": (run.started_at.isoformat()
+                               if run.started_at is not None else None),
+                "finished_at": (run.finished_at.isoformat()
+                                if run.finished_at is not None else None),
+            },
+            "summary": summary,
+            "summary_kind": summary_kind,
+            "report": run.result_report,
+        }
 
     def _execute_run_history_inspection(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
