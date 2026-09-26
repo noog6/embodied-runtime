@@ -117,17 +117,22 @@ class JobRunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     STOPPED = "stopped"
+    INTERRUPTED = "interrupted"
 
 
 TERMINAL_RUN_STATUSES = frozenset((
     JobRunStatus.COMPLETED, JobRunStatus.FAILED, JobRunStatus.STOPPED,
+    JobRunStatus.INTERRUPTED,
 ))
 RUN_TRANSITIONS = {
-    JobRunStatus.PENDING: frozenset((JobRunStatus.RUNNING, JobRunStatus.STOPPED)),
+    JobRunStatus.PENDING: frozenset((
+        JobRunStatus.RUNNING, JobRunStatus.STOPPED, JobRunStatus.INTERRUPTED,
+    )),
     JobRunStatus.RUNNING: TERMINAL_RUN_STATUSES,
     JobRunStatus.COMPLETED: frozenset(),
     JobRunStatus.FAILED: frozenset(),
     JobRunStatus.STOPPED: frozenset(),
+    JobRunStatus.INTERRUPTED: frozenset(),
 }
 
 

@@ -226,7 +226,7 @@ class ScheduledJobActivationTests(unittest.IsolatedAsyncioTestCase):
                          "2026-09-21")
         await app.stop()
 
-    async def test_shutdown_detaches_running_scheduled_work_and_restart_does_not_adopt(self):
+    async def test_shutdown_interrupts_scheduled_work_without_same_day_retry(self):
         job = self.store.create_job("Blocking")
         self.store.set_schedule(job.id, "01:00", "America/Toronto")
         self.clock.value = datetime.fromisoformat("2026-09-21T03:00:00-04:00")
@@ -238,7 +238,7 @@ class ScheduledJobActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(app.scheduled_job_controller.running)
         self.assertIsNone(app.current_job_run)
         reopened = SQLiteJobStore(self.path)
-        self.assertIs(reopened.list_runs(job.id)[0].status, JobRunStatus.RUNNING)
+        self.assertIs(reopened.list_runs(job.id)[0].status, JobRunStatus.INTERRUPTED)
         app = self.app(JobBackend("completed"), store=reopened)
         await app.start()
         self.assertIsNone(app.current_job_run)

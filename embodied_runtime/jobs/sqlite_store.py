@@ -10,7 +10,12 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+_JOB_RUNS_SCHEMA = """CREATE TABLE job_runs (
+       id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+       status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','stopped','interrupted')),
+       created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+       outcome_summary TEXT, error_summary TEXT, result_report TEXT)"""
 _SCHEMA = (
     """CREATE TABLE jobs (
        id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
@@ -19,11 +24,7 @@ _SCHEMA = (
        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
        CHECK((target_kind IS NULL AND target_identifier IS NULL) OR
              (target_kind IS NOT NULL AND target_identifier IS NOT NULL)))""",
-    """CREATE TABLE job_runs (
-       id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
-       status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','stopped')),
-       created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
-       outcome_summary TEXT, error_summary TEXT, result_report TEXT)""",
+    _JOB_RUNS_SCHEMA,
     "CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)",
     """CREATE TABLE job_schedules (
        job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
@@ -53,13 +54,26 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
-        if version in (1, 2):
+        if version in (1, 2, 3):
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 if version == 1:
                     self._connection.execute(_SCHEMA[-1])
-                self._connection.execute("ALTER TABLE job_runs ADD COLUMN result_report TEXT")
-                self._connection.execute("PRAGMA user_version = 3")
+                if version in (1, 2):
+                    self._connection.execute("ALTER TABLE job_runs ADD COLUMN result_report TEXT")
+                self._connection.execute("ALTER TABLE job_runs RENAME TO job_runs_v3")
+                self._connection.execute(_JOB_RUNS_SCHEMA)
+                self._connection.execute(
+                    """INSERT INTO job_runs
+                       (id,job_id,status,created_at,started_at,finished_at,
+                        outcome_summary,error_summary,result_report)
+                       SELECT id,job_id,status,created_at,started_at,finished_at,
+                              outcome_summary,error_summary,result_report
+                       FROM job_runs_v3"""
+                )
+                self._connection.execute("DROP TABLE job_runs_v3")
+                self._connection.execute("CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)")
+                self._connection.execute("PRAGMA user_version = 4")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -238,6 +252,40 @@ class SQLiteJobStore:
                ORDER BY id DESC LIMIT 1""", (job_id,)
         ).fetchone()
         return _run(row) if row is not None else None
+
+    def interrupt_nonterminal_runs(self) -> tuple[JobRun, ...]:
+        """Atomically terminalize occurrences abandoned by an earlier process."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._connection.execute(
+                """SELECT * FROM job_runs WHERE status IN ('pending','running')
+                   ORDER BY id"""
+            ).fetchall()
+            if not rows:
+                self._connection.commit()
+                return ()
+            now = self._now()
+            formatted = _format(now)
+            cursor = self._connection.execute(
+                """UPDATE job_runs SET status='interrupted', finished_at=?
+                   WHERE status IN ('pending','running')""",
+                (formatted,),
+            )
+            if cursor.rowcount != len(rows):
+                raise InvalidJobRunTransitionError("job runs changed concurrently")
+            interrupted = tuple(
+                JobRun(
+                    row["id"], row["job_id"], JobRunStatus.INTERRUPTED,
+                    _parse(row["created_at"]), _parse(row["started_at"]), now,
+                    row["outcome_summary"], row["error_summary"], row["result_report"],
+                )
+                for row in rows
+            )
+            self._connection.commit()
+            return interrupted
+        except BaseException:
+            self._connection.rollback()
+            raise
 
     def transition_run(self, run_id: int, status: JobRunStatus, *,
                        outcome_summary: str | None = None,

@@ -218,7 +218,7 @@ class JobCoordinationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.current_job_run)
         await app.stop()
 
-    async def test_shutdown_detaches_without_terminalizing_and_restart_does_not_recover(self):
+    async def test_shutdown_interrupts_without_recovering(self):
         job = self.store.create_job("Work", target=JobTarget("body", "sprayer"))
         app = self.make_app(self.store)
         await app.start()
@@ -229,13 +229,82 @@ class JobCoordinationTests(unittest.IsolatedAsyncioTestCase):
 
         reopened = SQLiteJobStore(self.path)
         persisted = reopened.get_run(binding.run.id)
-        self.assertIs(persisted.status, JobRunStatus.RUNNING)
+        self.assertIs(persisted.status, JobRunStatus.INTERRUPTED)
+        self.assertIsNotNone(persisted.finished_at)
+        self.assertIsNone(persisted.result_report)
         self.assertEqual(reopened.get_job(job.id).target, JobTarget("body", "sprayer"))
         restarted = self.make_app(reopened)
         await restarted.start()
         self.assertIsNone(restarted.current_task)
         self.assertIsNone(restarted.current_job_run)
         await restarted.stop()
+
+    async def test_startup_reconciles_orphans_once_without_volatile_bindings(self):
+        job = self.store.create_job("History")
+        completed = self.store.create_run(job.id)
+        self.store.transition_run(completed.id, JobRunStatus.RUNNING)
+        self.store.transition_run(completed.id, JobRunStatus.COMPLETED, result_report="ok")
+        running = self.store.create_run(job.id)
+        self.store.transition_run(running.id, JobRunStatus.RUNNING)
+        pending = self.store.create_run(job.id)
+        stopped = self.store.create_run(job.id)
+        self.store.transition_run(stopped.id, JobRunStatus.STOPPED)
+        app = self.make_app(self.store)
+        with self.assertLogs("embodied_runtime.app", level="INFO") as captured:
+            await app.start()
+        statuses = tuple(run.status for run in self.store.list_runs(job.id))
+        self.assertEqual(statuses, (
+            JobRunStatus.COMPLETED, JobRunStatus.INTERRUPTED,
+            JobRunStatus.INTERRUPTED, JobRunStatus.STOPPED,
+        ))
+        self.assertIsNone(app.current_job_run)
+        self.assertIsNone(app.current_task)
+        joined = "\n".join(captured.output)
+        self.assertIn(f"run=RUN{running.id} status=interrupted", joined)
+        self.assertIn("previous_status=running", joined)
+        self.assertIn(f"run=RUN{pending.id} status=interrupted", joined)
+        self.assertIn("previous_status=pending", joined)
+        first_finished = self.store.get_run(running.id).finished_at
+        await app.stop()
+        reopened = SQLiteJobStore(self.path)
+        restarted = self.make_app(reopened)
+        await restarted.start()
+        self.assertEqual(reopened.get_run(running.id).finished_at, first_finished)
+        await restarted.stop()
+
+    async def test_shutdown_does_not_overwrite_terminal_result_from_quiescence(self):
+        job = self.store.create_job("Race")
+        app = self.make_app(self.store)
+        await app.start()
+        binding = app.start_job_run(job.id)
+
+        async def finish_while_quiescing():
+            self.store.transition_run(
+                binding.run.id, JobRunStatus.COMPLETED,
+                outcome_summary="finished in time", result_report="legitimate result",
+            )
+
+        with patch.object(app, "_stop_job_work", side_effect=finish_while_quiescing):
+            await app.stop()
+        reopened = SQLiteJobStore(self.path)
+        try:
+            persisted = reopened.get_run(binding.run.id)
+            self.assertIs(persisted.status, JobRunStatus.COMPLETED)
+            self.assertEqual(persisted.result_report, "legitimate result")
+        finally:
+            reopened.close()
+
+    async def test_startup_reconciliation_failure_fails_closed(self):
+        class FailingReconciliationStore(RecordingStore):
+            def interrupt_nonterminal_runs(self):
+                raise RuntimeError("injected reconciliation failure")
+
+        app = self.make_app(FailingReconciliationStore(self.store))
+        with self.assertRaisesRegex(RuntimeError, "injected reconciliation failure"):
+            await app.start()
+        self.assertEqual(app.state.value, "stopped")
+        self.assertIsNone(app.current_job_run)
+        self.assertIsNone(app.current_task)
 
 
 if __name__ == "__main__":

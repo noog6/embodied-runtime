@@ -2353,6 +2353,23 @@ class RobotApplication:
         hardware_started = False
         camera_start_attempted = False
         try:
+            if self.jobs is not None:
+                interrupted = self.jobs.interrupt_nonterminal_runs()
+                for run in interrupted:
+                    previous_status = (
+                        JobRunStatus.RUNNING if run.started_at is not None
+                        else JobRunStatus.PENDING
+                    )
+                    LOGGER.info(
+                        "[JOBS] job=JOB%s run=RUN%s status=interrupted "
+                        "reason=startup_reconciliation previous_status=%s",
+                        run.job_id, run.id, previous_status.value,
+                    )
+                if interrupted:
+                    LOGGER.info(
+                        "[JOBS] reconciliation status=completed interrupted=%s",
+                        len(interrupted),
+                    )
             self.hardware.start()
             hardware_started = True
             self.refresh_power_state()
@@ -2499,6 +2516,28 @@ class RobotApplication:
             await self.temporal.stop()
         except BaseException as error:
             failure = error
+        if self._current_job_run is not None and self.jobs is not None:
+            current = self._current_job_run
+            try:
+                durable = self.jobs.get_run(current.run.id)
+                if durable is not None and durable.status in (
+                    JobRunStatus.PENDING, JobRunStatus.RUNNING,
+                ):
+                    durable = self.jobs.transition_run(
+                        durable.id, JobRunStatus.INTERRUPTED
+                    )
+                    LOGGER.info(
+                        "[JOBS] job=JOB%s run=RUN%s status=interrupted "
+                        "reason=runtime_shutdown",
+                        current.job.id, durable.id,
+                    )
+            except BaseException as error:
+                LOGGER.exception(
+                    "[JOBS] job=JOB%s run=RUN%s interruption=failed "
+                    "reason=runtime_shutdown",
+                    current.job.id, current.run.id,
+                )
+                failure = failure or error
         binding = self._current_task_binding
         if binding is not None:
             # Session shutdown drops coordination only; the running or paused Task

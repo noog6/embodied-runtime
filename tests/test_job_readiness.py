@@ -361,7 +361,9 @@ class JobReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(fresh.current_job_run)
         self.assertIsNone(fresh.current_task)
         self.assertIsNone(fresh.job_continuation)
-        self.assertIs(reopened.list_runs(job_id)[0].status, JobRunStatus.RUNNING)
+        self.assertIs(
+            reopened.list_runs(job_id)[0].status, JobRunStatus.INTERRUPTED
+        )
         await fresh.stop()
 
     async def test_scheduled_after_delay_uses_ordinary_continuation_path(self):
