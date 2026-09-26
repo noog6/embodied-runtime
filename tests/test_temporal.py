@@ -157,6 +157,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
                 initiative_enabled=enabled, initiative_messages_enabled=sink is not None,
                 initiative_continuation_enabled=continuation,
                 initiative_goal_closure_enabled=closure,
+                diagnostics_enabled=True,
             ), events=events, platform_provider=Platform(), cognition_backend=backend,
             operator_message_sink=sink, temporal_sleep=self.timer.sleep,
             monotonic_clock=lambda: self.timer.now,

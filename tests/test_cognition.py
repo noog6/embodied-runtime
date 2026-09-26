@@ -145,7 +145,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         return RobotApplication(
             RobotProfile("test", "Test Robot", "A test robot."),
             hardware or VirtualHardwareBackend(),
-            ApplicationOptions(startup_prompt=prompt),
+            ApplicationOptions(startup_prompt=prompt, diagnostics_enabled=True),
             events=events,
             platform_provider=platform or StaticPlatform(),
             body_backend=body,
