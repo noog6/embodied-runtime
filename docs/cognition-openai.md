@@ -192,3 +192,18 @@ See the [current bounded episode grammar](architecture.md#current-bounded-autono
 Provider state and response IDs never cross a temporal wait. An acquisition-informed
 request and the optional distinct effect continuation are independent calls with
 different policy gates.
+
+## Job Workspace read acquisitions
+
+Explicit operator dialogue receives `workspace_list` and `workspace_read` when
+both the durable Job catalog and Workspace store are available. They use the
+ordinary two-acquisition episode budget, duplicate reuse, and existing
+post-acquisition choreography. They are intentionally omitted from autonomous
+initiative, automatic continuation, and bounded Job work because authored
+Workspace prose is not authoritative outcome evidence. The tools expose bounded
+logical paths only, never physical filesystem paths or writes.
+
+Workspace metadata is a current runtime storage observation. Artifact content
+is authored non-authoritative working material, distinct from BRD state,
+durable JobRun results, and persistent memory. A Job Workspace can exist without
+any active or completed JobRun.

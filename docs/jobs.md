@@ -55,6 +55,7 @@ These concepts remain deliberately separate:
 | Job progress | Runtime-owned progress for the active occurrence |
 | Semantic continuity | Volatile, non-authoritative context between episodes |
 | JobRun result | Durable, bounded cognition work product after terminalization |
+| Job Workspace | Mutable durable working material owned by the Job across runs |
 
 A result may summarize or interpret evidence, but durability does not make the
 text runtime evidence. It cannot change JobRun or Task status, modify progress,
@@ -93,6 +94,16 @@ duplicate-call reuse. It is deliberately absent from autonomous initiative,
 Job work, automatic continuation, and goal-directed attention so historical
 cognition-authored prose cannot become Job outcome evidence. Retrieval creates
 no JobRun, memory, readiness, progress, artifact, delivery, or acknowledgement.
+
+Workspace inspection is a separate operator-only acquisition path. Exact
+`JOB<n>` or exact case-sensitive Job-name selectors resolve the Job itself, so a
+Workspace remains inspectable when the Job has never had a run. `workspace_list`
+and `workspace_read` share the ordinary two-acquisition operator budget and are
+not projected into autonomous or bounded Job work. Runtime-observed file
+metadata is authoritative for the retrieved storage snapshot; artifact prose is
+authored non-authoritative working material, not a JobRun result, persistent
+memory, progress evidence, or fresh current-world evidence. No model-facing
+Workspace writes exist in this phase. See [Job Workspaces](job-workspaces.md).
 
 ## Runtime coordination through Task
 
