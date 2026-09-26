@@ -48,12 +48,13 @@ from embodied_runtime.events import (
 )
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
-    MAX_OPERATOR_MESSAGE_CHARS, InteractionChannel, InteractionContext,
-    InteractionInitiator, InteractionMode, OperatorMessage,
+    MAX_OPERATOR_MESSAGE_CHARS, InteractionCadence, InteractionChannel,
+    InteractionContext, InteractionEnvironment, InteractionInitiator,
+    InteractionMode, OperatorMessage,
     OperatorDeliveryDestination, OperatorDeliveryRouteCatalog,
     OperatorMessageSink, VOICE_DIALOGUE, operator_delivery, render_dialogue_policy,
     render_notification_context, render_notification_policy,
-    resolve_notification_route,
+    render_interaction_environment, resolve_notification_route,
 )
 from embodied_runtime.jobs import (
     Job, JobContinuation, JobContinuationController, JobContinuationReadiness,
@@ -921,12 +922,16 @@ class RobotApplication:
         run_history_evidence: RunHistoryEvidenceReader | None = None,
         resource_arbiter: ResourceArbiter | None = None,
         observability: RunObservability | None = None,
+        interaction_environment: InteractionEnvironment = InteractionEnvironment.WORKSTATION,
     ) -> None:
         self.profile = profile
         self.observability = observability or RunObservability()
         if cognition_backend is not None and hasattr(cognition_backend, "observability"):
             cognition_backend.observability = self.observability
         self.hardware = hardware
+        if not isinstance(interaction_environment, InteractionEnvironment):
+            raise TypeError("interaction_environment must be an InteractionEnvironment")
+        self._interaction_environment = interaction_environment
         self._timezone_name = timezone_name
         self._timezone = ZoneInfo(timezone_name)
         self._wall_clock = wall_clock
@@ -1059,6 +1064,11 @@ class RobotApplication:
     @property
     def timezone_name(self) -> str:
         return self._timezone_name
+
+    @property
+    def interaction_environment(self) -> InteractionEnvironment:
+        """Return the application-lifetime, runtime-owned interaction posture."""
+        return self._interaction_environment
 
     @property
     def active_goal(self) -> ActiveGoal | None:
@@ -2408,6 +2418,10 @@ class RobotApplication:
             self.profile.identifier,
             self.hardware.identifier,
         )
+        LOGGER.info(
+            "[INTERACTION] environment=%s status=ready",
+            self.interaction_environment.value,
+        )
         platform_state = self.refresh_platform_state()
         self._platform_monitor.establish_baseline(platform_state)
         LOGGER.info(
@@ -2788,12 +2802,12 @@ class RobotApplication:
             raise RuntimeError("No cognition backend is configured")
         if not message or not message.strip():
             raise ValueError("Cognition message must be non-empty")
+        if interaction is not None and interaction.initiator != InteractionInitiator.OPERATOR:
+            raise ValueError("bounded operator cognition requires initiator=operator")
+        if interaction is not None and interaction.cadence != InteractionCadence.BOUNDED_TURN:
+            raise ValueError("bounded operator cognition requires cadence=bounded_turn")
         if interaction is not None and not (
-            interaction.channel in (
-                InteractionChannel.CONSOLE, InteractionChannel.VOICE
-            )
-            and interaction.mode == InteractionMode.DIALOGUE
-            and interaction.initiator == InteractionInitiator.OPERATOR
+            interaction.mode == InteractionMode.DIALOGUE
             and interaction.response_expected is True
         ):
             raise ValueError(
@@ -3105,6 +3119,7 @@ class RobotApplication:
             ),
         ]
         if interaction is not None:
+            lines.append(render_interaction_environment(self.interaction_environment))
             lines.append(interaction.render())
             lines.append(render_dialogue_policy(interaction))
         if delivery_destinations:
@@ -5375,6 +5390,7 @@ class RobotApplication:
                         "hardware_backend": self.hardware.identifier,
                         "timezone": self.timezone_name,
                         "mode": self.options.runtime_mode},
+            "interaction": {"environment": self.interaction_environment.value},
             "initiative": {
                 "enabled": self.options.initiative_enabled,
                 "platform_attention_enabled": self.options.initiative_platform_attention_enabled,

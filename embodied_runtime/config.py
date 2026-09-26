@@ -65,12 +65,18 @@ class JobsFileConfig:
 
 
 @dataclass(frozen=True)
+class InteractionFileConfig:
+    environment: str | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeFileConfiguration:
     runtime: RuntimeFileConfig = RuntimeFileConfig()
     initiative: InitiativeFileConfig = InitiativeFileConfig()
     voice: VoiceFileConfig = VoiceFileConfig()
     memory: MemoryFileConfig = MemoryFileConfig()
     jobs: JobsFileConfig = JobsFileConfig()
+    interaction: InteractionFileConfig = InteractionFileConfig()
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,7 @@ class LaunchConfiguration:
     vision: str
     mode: str
     timezone: str
+    interaction_environment: str
     initiative: bool
     initiative_platform_attention: bool
     initiative_actions: bool
@@ -114,7 +121,7 @@ class LaunchConfiguration:
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
     profile="mira", hardware="virtual", camera="none", cognition="none", vision="none", mode="run",
-    timezone="UTC",
+    timezone="UTC", interaction_environment="workstation",
     initiative=False, initiative_platform_attention=False,
     initiative_actions=False, initiative_messages=False,
     initiative_continuation=False, initiative_goal_closure=False,
@@ -151,12 +158,14 @@ _JOBS_KEYS = {
     "max_auto_steps",
     "scheduler_poll_seconds",
 }
+_INTERACTION_KEYS = {"environment"}
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
     "runtime.camera": {"none", "picamera2"},
     "runtime.cognition": {"none", "openai-responses"},
     "runtime.vision": {"none", "openai-responses"},
     "runtime.mode": {"run", "console", "diagnostics"},
+    "interaction.environment": {"workstation", "companion", "unattended", "remote"},
 }
 
 
@@ -174,17 +183,30 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "initiative", "voice", "memory", "jobs"})
+    _reject_unknown(data, {"runtime", "initiative", "voice", "memory", "jobs", "interaction"})
     runtime = _table(data, "runtime")
     initiative = _table(data, "initiative")
     voice = _table(data, "voice")
     memory = _table(data, "memory")
     jobs = _table(data, "jobs")
+    interaction = _table(data, "interaction")
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
     _reject_unknown(memory, _MEMORY_KEYS, "memory")
     _reject_unknown(jobs, _JOBS_KEYS, "jobs")
+    _reject_unknown(interaction, _INTERACTION_KEYS, "interaction")
+
+    if "environment" in interaction:
+        value = interaction["environment"]
+        if not isinstance(value, str):
+            raise ConfigurationError("interaction.environment must be a string")
+        choices = _ENUMS["interaction.environment"]
+        if value not in choices:
+            raise ConfigurationError(
+                f"unsupported value for interaction.environment: {value!r} "
+                f"(choose from {', '.join(sorted(choices))})"
+            )
 
     if "enabled" in memory and not isinstance(memory["enabled"], bool):
         raise ConfigurationError("memory.enabled must be boolean")
@@ -311,6 +333,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
             float(heartbeat_seconds), max_auto_steps,
             float(scheduler_poll_seconds),
         ),
+        InteractionFileConfig(**interaction),
     )
 
 
@@ -324,6 +347,7 @@ def resolve_launch_configuration(
     voice = file_config.voice
     memory = file_config.memory
     jobs = file_config.jobs
+    interaction = file_config.interaction
 
     def scalar(name: str, configured: object, historical: object) -> object:
         explicit = getattr(cli_values, name, None)
@@ -350,6 +374,8 @@ def resolve_launch_configuration(
         vision=scalar("vision", runtime.vision, HISTORICAL_DEFAULTS.vision),
         mode=mode,
         timezone=runtime.timezone or HISTORICAL_DEFAULTS.timezone,
+        interaction_environment=(interaction.environment
+                                 or HISTORICAL_DEFAULTS.interaction_environment),
         initiative=opt_in("initiative", initiative.enabled, False),
         initiative_platform_attention=opt_in(
             "initiative_platform_attention", initiative.platform_attention, False

@@ -16,11 +16,12 @@ from embodied_runtime.interaction import (
     VOICE_DIALOGUE, MAX_OPERATOR_DELIVERY_DESTINATION_DESCRIPTION_CHARS,
     MAX_OPERATOR_DELIVERY_DESTINATION_NAME_CHARS, MAX_OPERATOR_MESSAGE_CHARS,
     ConsoleOperatorMessageChannel,
-    InteractionChannel, InteractionContext, InteractionInitiator,
-    InteractionMode, OperatorDeliveryDestination, OperatorDeliveryRoute,
+    InteractionCadence, InteractionChannel, InteractionContext,
+    InteractionEnvironment, InteractionInitiator, InteractionMode,
+    OperatorDeliveryDestination, OperatorDeliveryRoute,
     OperatorDeliveryRouteCatalog, OperatorMessage, OperatorMessageSink,
     operator_delivery, runtime_notification,
-    render_dialogue_policy, render_notification_context,
+    render_dialogue_policy, render_interaction_environment, render_notification_context,
     render_notification_policy, resolve_notification_route,
 )
 from embodied_runtime.profile import RobotProfile
@@ -34,6 +35,47 @@ class Platform:
 
 
 class InteractionIdentityTests(unittest.TestCase):
+    def test_foundation_enums_are_provider_neutral(self):
+        self.assertEqual([item.value for item in InteractionEnvironment],
+                         ["workstation", "companion", "unattended", "remote"])
+        self.assertEqual([item.value for item in InteractionCadence],
+                         ["bounded_turn", "realtime_session"])
+        self.assertEqual(InteractionChannel.REMOTE_TEXT.value, "remote_text")
+        self.assertEqual(InteractionInitiator.EXTERNAL_PARTICIPANT.value,
+                         "external_participant")
+
+    def test_cadence_validation(self):
+        with self.assertRaisesRegex(ValueError, "requires cadence"):
+            InteractionContext(InteractionChannel.CONSOLE, InteractionMode.DIALOGUE,
+                               InteractionInitiator.OPERATOR, True)
+        for cadence in InteractionCadence:
+            with self.assertRaisesRegex(ValueError, "must not specify cadence"):
+                InteractionContext(InteractionChannel.CONSOLE,
+                                   InteractionMode.NOTIFICATION,
+                                   InteractionInitiator.RUNTIME, False, cadence)
+        self.assertIsNone(CONSOLE_NOTIFICATION.cadence)
+        self.assertIsNone(CONSOLE_DELIVERY.cadence)
+        self.assertIsNone(CONSOLE_ADMINISTRATIVE.cadence)
+
+    def test_environment_grounding_is_deterministic_and_not_authority(self):
+        for environment in InteractionEnvironment:
+            rendered = render_interaction_environment(environment)
+            self.assertEqual(rendered, render_interaction_environment(environment))
+            self.assertIn(f"environment: {environment.value}", rendered)
+            self.assertIn("does not prove a person's physical presence", rendered)
+            self.assertIn("grant capabilities", rendered)
+
+    def test_remote_text_dialogue_policy_is_text_native_not_local(self):
+        interaction = InteractionContext(
+            InteractionChannel.REMOTE_TEXT, InteractionMode.DIALOGUE,
+            InteractionInitiator.OPERATOR, True, InteractionCadence.BOUNDED_TURN,
+        )
+        policy = render_dialogue_policy(interaction)
+        self.assertIn("medium: remote text", policy)
+        self.assertIn("remote conversation channel", policy)
+        self.assertNotIn("local plain terminal", policy)
+        self.assertNotIn("Discord", policy)
+
     def test_context_is_immutable(self):
         with self.assertRaises(FrozenInstanceError):
             CONSOLE_DIALOGUE.response_expected = False
@@ -41,11 +83,11 @@ class InteractionIdentityTests(unittest.TestCase):
     def test_canonical_contexts(self):
         self.assertEqual(CONSOLE_DIALOGUE, InteractionContext(
             InteractionChannel.CONSOLE, InteractionMode.DIALOGUE,
-            InteractionInitiator.OPERATOR, True,
+            InteractionInitiator.OPERATOR, True, InteractionCadence.BOUNDED_TURN,
         ))
         self.assertEqual(VOICE_DIALOGUE, InteractionContext(
             InteractionChannel.VOICE, InteractionMode.DIALOGUE,
-            InteractionInitiator.OPERATOR, True,
+            InteractionInitiator.OPERATOR, True, InteractionCadence.BOUNDED_TURN,
         ))
         self.assertEqual(CONSOLE_NOTIFICATION, InteractionContext(
             InteractionChannel.CONSOLE, InteractionMode.NOTIFICATION,
@@ -107,11 +149,13 @@ class InteractionIdentityTests(unittest.TestCase):
         self.assertEqual(CONSOLE_DIALOGUE.render(), """Interaction context
   channel: console
   mode: dialogue
+  cadence: bounded_turn
   initiator: operator
   response_expected: true""")
         self.assertEqual(VOICE_DIALOGUE.render(), """Interaction context
   channel: voice
   mode: dialogue
+  cadence: bounded_turn
   initiator: operator
   response_expected: true""")
 
@@ -537,7 +581,8 @@ class RouteReplacementBackend(TextCognitionBackend):
 
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, backend=None, sink=None, *, actions=False, messages=True,
-                 body=None):
+                 body=None, interaction_environment=InteractionEnvironment.WORKSTATION,
+                 delivery_routes=None):
         return RobotApplication(
             RobotProfile("test", "Test Robot"), VirtualHardwareBackend(),
             ApplicationOptions(
@@ -546,6 +591,76 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                 diagnostics_enabled=True,
             ), platform_provider=Platform(), body_backend=body or VirtualBodyBackend(),
             cognition_backend=backend, operator_message_sink=sink,
+            operator_delivery_routes=delivery_routes,
+            interaction_environment=interaction_environment,
+        )
+
+    async def operator_projection(self, interaction, *, environment):
+        """Capture the real initial bounded-operator projection for comparison."""
+        backend = ScriptedBackend()
+        sink = RecordingSink()
+        routes = OperatorDeliveryRouteCatalog((OperatorDeliveryRoute(
+            OperatorDeliveryDestination(
+                "console", InteractionChannel.CONSOLE, "local plain-text console"
+            ), sink,
+        ),))
+        app = self.make_app(
+            backend, sink, interaction_environment=environment,
+            delivery_routes=routes,
+        )
+        await app.start()
+        try:
+            await app.request_cognition("compare authority", interaction=interaction)
+            tools = backend.requests[0][2]
+            return tuple(
+                (tool.name, tool.description, tool.parameters) for tool in tools
+            )
+        finally:
+            await app.stop()
+
+    async def test_environment_does_not_change_operator_tool_authority(self):
+        projections = {
+            environment: await self.operator_projection(
+                CONSOLE_DIALOGUE, environment=environment
+            )
+            for environment in InteractionEnvironment
+        }
+        baseline = projections[InteractionEnvironment.WORKSTATION]
+        for environment, projection in projections.items():
+            with self.subTest(environment=environment):
+                self.assertEqual(projection, baseline)
+        names = [name for name, _description, _parameters in baseline]
+        self.assertIn("inspect_self", names)
+        self.assertIn("inspect_effective_config", names)
+        self.assertIn("deliver_message", names)
+        self.assertIn("deliver_report", names)
+
+    async def test_channel_does_not_change_operator_tool_authority(self):
+        contexts = {
+            InteractionChannel.CONSOLE: CONSOLE_DIALOGUE,
+            InteractionChannel.VOICE: VOICE_DIALOGUE,
+            InteractionChannel.REMOTE_TEXT: InteractionContext(
+                InteractionChannel.REMOTE_TEXT, InteractionMode.DIALOGUE,
+                InteractionInitiator.OPERATOR, True,
+                InteractionCadence.BOUNDED_TURN,
+            ),
+        }
+        projections = {
+            channel: await self.operator_projection(
+                interaction, environment=InteractionEnvironment.WORKSTATION
+            )
+            for channel, interaction in contexts.items()
+        }
+        baseline = projections[InteractionChannel.CONSOLE]
+        for channel, projection in projections.items():
+            with self.subTest(channel=channel):
+                self.assertEqual(projection, baseline)
+        self.assertIsNone(resolve_notification_route(InteractionChannel.REMOTE_TEXT))
+        self.assertEqual(
+            [parameters["properties"]["destination"]["enum"]
+             for name, _description, parameters in baseline
+             if name in {"deliver_message", "deliver_report"}],
+            [["console"], ["console"]],
         )
 
     async def test_projection_schema_and_physical_independence(self):
@@ -652,11 +767,11 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             CONSOLE_ADMINISTRATIVE,
             InteractionContext(
                 InteractionChannel.VOICE, InteractionMode.DIALOGUE,
-                InteractionInitiator.RUNTIME, True,
+                InteractionInitiator.RUNTIME, True, InteractionCadence.BOUNDED_TURN,
             ),
             InteractionContext(
                 InteractionChannel.VOICE, InteractionMode.DIALOGUE,
-                InteractionInitiator.OPERATOR, False,
+                InteractionInitiator.OPERATOR, False, InteractionCadence.BOUNDED_TURN,
             ),
         )
         for interaction in invalid:
@@ -666,6 +781,51 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.episode_coordinator.current)
         self.assertIsNone(app.episode_coordinator.last)
         self.assertEqual(app.working_memory.snapshot(), before)
+        await app.stop()
+
+    async def test_remote_operator_is_accepted_but_external_and_realtime_fail_closed(self):
+        backend = ScriptedBackend()
+        app = self.make_app(backend)
+        await app.start()
+        remote_operator = InteractionContext(
+            InteractionChannel.REMOTE_TEXT, InteractionMode.DIALOGUE,
+            InteractionInitiator.OPERATOR, True, InteractionCadence.BOUNDED_TURN,
+        )
+        self.assertEqual(await app.request_cognition("hello", interaction=remote_operator),
+                         "done")
+        instructions = backend.requests[0][1]
+        self.assertIn("Interaction environment\n  environment: workstation", instructions)
+        self.assertIn("channel: remote_text", instructions)
+        self.assertIn("medium: remote text", instructions)
+        calls_before = len(backend.requests)
+        memory_before = app.working_memory.snapshot()
+        results_before = tuple(backend.results)
+        current_before = app.episode_coordinator.current
+        last_before = app.episode_coordinator.last
+        completed_before = app.episode_coordinator.last_completed_monotonic
+        for interaction, message in (
+            (InteractionContext(
+                InteractionChannel.REMOTE_TEXT, InteractionMode.DIALOGUE,
+                InteractionInitiator.EXTERNAL_PARTICIPANT, True,
+                InteractionCadence.BOUNDED_TURN,
+            ), "initiator=operator"),
+            (InteractionContext(
+                InteractionChannel.VOICE, InteractionMode.DIALOGUE,
+                InteractionInitiator.OPERATOR, True,
+                InteractionCadence.REALTIME_SESSION,
+            ), "cadence=bounded_turn"),
+        ):
+            with self.assertRaisesRegex(ValueError, message):
+                await app.request_cognition("blocked", interaction=interaction)
+            self.assertEqual(len(backend.requests), calls_before)
+            self.assertEqual(app.working_memory.snapshot(), memory_before)
+            self.assertEqual(tuple(backend.results), results_before)
+            self.assertIs(app.episode_coordinator.current, current_before)
+            self.assertIs(app.episode_coordinator.last, last_before)
+            self.assertEqual(
+                app.episode_coordinator.last_completed_monotonic,
+                completed_before,
+            )
         await app.stop()
 
     async def test_delivery_normalizes_and_does_not_mutate_state_or_memory(self):

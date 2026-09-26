@@ -11,7 +11,7 @@ from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.interaction import (
     CONSOLE_DIALOGUE, VOICE_DIALOGUE, InteractionChannel, InteractionContext,
-    InteractionInitiator, InteractionMode, render_dialogue_policy,
+    InteractionCadence, InteractionInitiator, InteractionMode, render_dialogue_policy,
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.observations import SemanticObservation
@@ -429,7 +429,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         interaction = InteractionContext(
             InteractionChannel.CONSOLE, InteractionMode.DIALOGUE,
-            InteractionInitiator.OPERATOR, True,
+            InteractionInitiator.OPERATOR, True, InteractionCadence.BOUNDED_TURN,
         )
         self.assertIsNot(interaction, CONSOLE_DIALOGUE)
         await app.request_cognition(

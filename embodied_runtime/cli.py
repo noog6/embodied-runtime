@@ -41,7 +41,7 @@ from embodied_runtime.jobs import (
     FilesystemJobWorkspaceStore, SQLiteJobStore, workspace_root_for_database,
 )
 from embodied_runtime.interaction import (
-    ConsoleOperatorMessageChannel, InteractionChannel,
+    ConsoleOperatorMessageChannel, InteractionChannel, InteractionEnvironment,
     OperatorDeliveryDestination, OperatorDeliveryRoute,
     OperatorDeliveryRouteCatalog,
 )
@@ -230,6 +230,7 @@ def parse_launch_arguments(
     args.cognition = effective.cognition
     args.vision = effective.vision
     args.timezone = effective.timezone
+    args.interaction_environment = effective.interaction_environment
     args.console = effective.mode == "console"
     args.diagnostics = effective.mode == "diagnostics"
     args.initiative = effective.initiative
@@ -521,6 +522,7 @@ async def _run_application(
         job_workspace_store=job_workspaces,
         run_history_evidence=history_evidence,
         observability=observability,
+        interaction_environment=InteractionEnvironment(args.interaction_environment),
     )
     if args.diagnostics:
         try:

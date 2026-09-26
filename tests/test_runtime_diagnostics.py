@@ -180,10 +180,11 @@ class RuntimeDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["voice"]["wake_words"], ["robot"])
         self.assertEqual(result["runtime"]["timezone"], "UTC")
         self.assertEqual(result["runtime"]["mode"], "run")
+        self.assertEqual(result["interaction"]["environment"], "workstation")
         self.assertEqual(result["backends"]["vision"], "none")
         self.assertEqual(result["unknowns"]["backends.cognition_model"], "unavailable")
         serialized = json.dumps(result).lower()
-        for prohibited in ("api_key", "password", "database_path", "environment"):
+        for prohibited in ("api_key", "password", "database_path"):
             self.assertNotIn(prohibited, serialized)
 
     def test_job_runtime_idle_is_successful(self):

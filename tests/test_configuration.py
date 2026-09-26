@@ -75,6 +75,17 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_no_arguments_preserves_historical_defaults(self):
         self.assertEqual(parse_launch_arguments([])[2], HISTORICAL_DEFAULTS)
+        self.assertEqual(HISTORICAL_DEFAULTS.interaction_environment, "workstation")
+
+    def test_interaction_environment_is_strict_and_resolved(self):
+        for environment in ("workstation", "companion", "unattended", "remote"):
+            self.assertEqual(
+                self.effective(f"[interaction]\nenvironment='{environment}'\n")
+                .interaction_environment,
+                environment,
+            )
+        with self.assertRaisesRegex(ConfigurationError, "unsupported value"):
+            load_runtime_config(self.write("[interaction]\nenvironment='nearby'\n"))
 
     def test_partial_config_uses_historical_defaults(self):
         effective = self.effective("[runtime]\ncamera = 'picamera2'\n")
