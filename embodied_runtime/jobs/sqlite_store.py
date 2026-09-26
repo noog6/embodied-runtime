@@ -131,6 +131,25 @@ class SQLiteJobStore:
             raise KeyError(f"unknown job: {job_id}")
         return self.get_job(job_id)  # type: ignore[return-value]
 
+    def set_job_description(self, job_id: int, description: str) -> Job:
+        """Replace only a Job's normalized description and modification time."""
+        _id(job_id, "job")
+        current = self.get_job(job_id)
+        if current is None:
+            raise KeyError(f"unknown job: {job_id}")
+        now = self._now()
+        replacement = Job(
+            current.id, current.name, description, current.enabled, current.target,
+            current.created_at, now,
+        )
+        cursor = self._connection.execute(
+            "UPDATE jobs SET description = ?, updated_at = ? WHERE id = ?",
+            (replacement.description, _format(replacement.updated_at), job_id),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(f"unknown job: {job_id}")
+        return replacement
+
     def create_run(self, job_id: int) -> JobRun:
         _id(job_id, "job")
         now = self._now()

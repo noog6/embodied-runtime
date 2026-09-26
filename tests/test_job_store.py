@@ -8,6 +8,7 @@ from embodied_runtime.jobs import (
     MAX_RUN_REPORT_CHARS, InvalidJobRunTransitionError, JobRunStatus, JobTarget,
     SQLiteJobStore,
 )
+from embodied_runtime.jobs.model import MAX_JOB_DESCRIPTION_CHARS
 
 
 class Clock:
@@ -55,6 +56,37 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.assertEqual(reopened.get_latest_completed_run(job.id), completed)
         reopened.close()
         self.store = SQLiteJobStore(self.path)
+
+    def test_description_update_persists_across_restart_and_preserves_metadata(self):
+        original = self.store.create_job(
+            "Review logs", "Old instructions", enabled=False,
+            target=JobTarget("agent", "mira"),
+        )
+        updated = self.store.set_job_description(original.id, "  New instructions.  ")
+        self.assertEqual(updated.description, "New instructions.")
+        self.assertEqual(updated.id, original.id)
+        self.assertEqual(updated.name, original.name)
+        self.assertEqual(updated.enabled, original.enabled)
+        self.assertEqual(updated.target, original.target)
+        self.assertEqual(updated.created_at, original.created_at)
+        self.assertGreater(updated.updated_at, original.updated_at)
+
+        self.store.close()
+        reopened = SQLiteJobStore(self.path)
+        self.assertEqual(reopened.get_job(original.id), updated)
+        reopened.close()
+        self.store = SQLiteJobStore(self.path)
+
+    def test_description_update_rejects_invalid_or_unknown_without_mutation(self):
+        original = self.store.create_job("Review logs", "Keep this")
+        with self.assertRaisesRegex(ValueError, "at most 2000"):
+            self.store.set_job_description(
+                original.id, "x" * (MAX_JOB_DESCRIPTION_CHARS + 1)
+            )
+        self.assertEqual(self.store.get_job(original.id), original)
+        with self.assertRaises(KeyError):
+            self.store.set_job_description(999, "Nothing")
+        self.assertEqual(self.store.get_job(original.id), original)
 
     def test_catalog_is_global_and_filter_is_explicit(self):
         targets = [JobTarget("body", name) for name in ("camera", "arms", "sprayer")]

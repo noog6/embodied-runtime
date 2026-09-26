@@ -268,6 +268,7 @@ class RuntimeConsole:
                 "  job result RUN<n>              Show one durable JobRun result",
                 "  job latest-result JOB<n>       Show latest completed JobRun result",
                 "  job add <name> [options]       Add an enabled Job definition",
+                "  job update JOB<n> --description <text>",
                 "  job enable|disable JOB<n>      Change Job definition state",
                 "  job start JOB<n>               Start a JobRun and bounded Task",
                 "  job schedule JOB<n> [daily HH:MM [--timezone ZONE]]",
@@ -451,6 +452,8 @@ class RuntimeConsole:
         action = words[1].lower() if len(words) > 1 else ""
         if action == "add":
             return self._job_add(words)
+        if action == "update":
+            return self._job_update(words)
         if action in ("enable", "disable"):
             return self._job_enable(words, action == "enable")
         if action == "schedule":
@@ -493,7 +496,7 @@ class RuntimeConsole:
                 return f"Unable to {action} Job: persistence operation failed."
             return f"Job RUN{binding.run.id} {binding.run.status.value}."
         return (
-            "Usage: job add|enable|disable|start|schedule|unschedule|work|current|complete|fail|stop."
+            "Usage: job add|update|enable|disable|start|schedule|unschedule|work|current|complete|fail|stop."
         )
 
     def _job_schedule(self, words: list[str]) -> str:
@@ -588,6 +591,28 @@ class RuntimeConsole:
         except Exception:
             return f"Unable to {action} JOB{job_id}: persistence operation failed."
         return f"JOB{job.id} {'enabled' if enabled else 'disabled'}."
+
+    def _job_update(self, words: list[str]) -> str:
+        usage = "Usage: job update JOB<n> --description <text>."
+        if (len(words) != 5 or
+                (job_id := _catalog_id(words[2], "JOB")) is None or
+                words[3] != "--description"):
+            return usage
+        store = self._application.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        current = self._application.current_job_run
+        if current is not None and current.job.id == job_id:
+            return f"Unable to update JOB{job_id}: its current JobRun is still active."
+        try:
+            job = store.set_job_description(job_id, words[4])
+        except KeyError:
+            return f"Job not found: JOB{job_id}."
+        except (RuntimeError, TypeError, ValueError) as error:
+            return f"Unable to update JOB{job_id}: {error}."
+        except Exception:
+            return f"Unable to update JOB{job_id}: persistence operation failed."
+        return f"Updated JOB{job.id} description."
 
     def _job_current(self) -> str:
         binding = self._application.current_job_run

@@ -70,6 +70,10 @@ The supported commands are exactly:
 - `ask <message>` for one independent text cognition request;
 - `voice` to start one bounded voice session;
 - `memory` for working-memory count/capacity metadata (not retained text);
+- `job update JOB<n> --description <text>` to change only a durable Job's
+  responsibility description for future occurrences; it preserves the Job's
+  identity, history, schedule, and Workspace, and is rejected while that same
+  Job is currently executing;
 - `memory clear` to synchronously forget all retained session turns without
   changing runtime state or configured backends;
 - `memory persistent`, `memory entity add`, `memory entity find`, `memory alias
