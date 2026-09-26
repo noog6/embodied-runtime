@@ -273,9 +273,9 @@ bounded episode. This projection comes directly from the volatile
 the exact Job ID, JobRun ID, and Task UUID. It exists only to preserve immediate
 progress context. It is not authoritative evidence about the current world or
 runtime state and cannot independently establish a mutable condition or a
-terminal Job outcome; fresh acquisitions and current effect results remain the
-authoritative evidence. Prior progress may still guide what should be inspected
-next.
+terminal Job outcome. It is distinct from runtime-owned `JobProgress`, which
+may establish already-earned bounded progress in this occurrence. Current
+acquisitions and effects remain authoritative for their current-episode facts.
 
 Only the latest episode summary is retained, rather than a transcript or
 cumulative history. Manual work and heartbeat work use the same projection;
@@ -324,6 +324,21 @@ and are not general world-state assertions. This makes progress stronger than
 semantic continuity without turning it into global factual memory. A current
 wake remains separate evidence: committed progress can establish one earlier
 step while the one-shot wake establishes the current step.
+
+A later episode may rely on committed exact-occurrence `JobProgress` when
+deciding whether the TaskGoal is already satisfied; it need not repeat the
+original side effect merely to recreate current-episode evidence. The model
+must interpret a counter's name and value against the Job assignment, TaskGoal,
+and other current evidence: the runtime does not equate arbitrary nonzero or
+unrelated counters with completion. A rejected later attempt does not erase
+earlier committed progress, nor does that rejection become success evidence.
+
+Committed progress is cross-episode occurrence evidence, not a new update
+basis. Only accepted evidence in the current episode can earn another
+increment. Progress does not recreate its original evidence payload, establish
+unrelated current-world facts, become persistent memory, or survive restart.
+Exact Job ID, JobRun ID, and Task UUID binding remains fail-closed, and terminal
+state clears the snapshot.
 
 An accepted proposal is staged during the outcome tool callback. It commits
 only after the provider response finishes successfully and the exact

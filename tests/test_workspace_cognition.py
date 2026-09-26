@@ -21,8 +21,10 @@ from embodied_runtime.jobs import (
     FilesystemJobWorkspaceStore, SQLiteJobStore, WorkspaceBackendError,
     WorkspaceConflictError, WorkspaceDurabilityError, WorkspaceNotFoundError,
     WorkspaceQuotaError, WorkspaceUnsafeError, WorkspaceValidationError,
+    JobProgressCounter, JobRunStatus,
 )
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.tasks import TaskStatus
 from tests.test_platform import snapshot
 
 
@@ -83,6 +85,51 @@ class AutomaticWorkspaceBackend(TextCognitionBackend):
                     "content": "automatic artifact",
                 })))).output)
         return "work"
+
+
+class ScheduledProgressBackend(TextCognitionBackend):
+    """Script the live two-episode report case, optionally retrying the create."""
+
+    identifier = "scheduled-progress-test"
+
+    def __init__(self, *, duplicate=False):
+        self.duplicate = duplicate
+        self.work_requests = 0
+        self.outcomes = 0
+        self.requests = []
+        self.write_results = []
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((message, instructions, tuple(tool.name for tool in tools)))
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            self.outcomes += 1
+            terminal = self.outcomes == 2
+            progress = None if terminal else {
+                "counter": "report_artifact_written", "basis": "effect_1",
+            }
+            await tool_executor(CognitionToolCall(
+                REPORT_JOB_OUTCOME_TOOL.name, json.dumps({
+                    "disposition": "completed" if terminal else "continue",
+                    "summary": "scheduled report completed" if terminal else "report written",
+                    "report": "durable scheduled result" if terminal else None,
+                    "readiness": None if terminal else "ready",
+                    "delay_seconds": None,
+                    "event_type": None,
+                    "progress_update": progress,
+                }),
+            ))
+            return "outcome"
+        self.work_requests += 1
+        if self.work_requests == 1 or self.duplicate:
+            result = await tool_executor(CognitionToolCall(
+                "workspace_write", json.dumps({
+                    "path": "reports/scheduled-test.md", "mode": "create",
+                    "content": "scheduled seed",
+                }),
+            ))
+            self.write_results.append(json.loads(result.output))
+        return "bounded work"
 
 
 class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
@@ -278,6 +325,69 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
         self.workspaces.write(job.id, "reports/automatic.md", "replace", "revised")
         self.assertEqual(self.jobs.get_run(binding.run.id).result_report,
                          "immutable run report")
+
+    async def test_prior_progress_completes_scheduled_report_without_redundant_write(self):
+        backend = ScheduledProgressBackend()
+        app = self.app(backend, initiative=True)
+        job = self.jobs.create_job(
+            "Scheduled Workspace Test",
+            description="Create one report artifact from the seed.",
+        )
+        await app.start(); binding = app.start_job_run(job.id)
+        with patch.object(self.workspaces, "write",
+                          wraps=self.workspaces.write) as write_mock, \
+                patch.object(app, "finish_task", wraps=app.finish_task) as finish_mock:
+            first = await app.work_current_job_once()
+            self.assertEqual(
+                app.job_progress.counters,
+                (JobProgressCounter("report_artifact_written", 1),),
+            )
+            second = await app.work_current_job_once()
+
+        second_initial = next(
+            instructions for message, instructions, _tools in backend.requests[2:]
+            if message != JOB_OUTCOME_EVALUATION_REQUEST
+        )
+        second_outcome = [instructions for message, instructions, _tools
+                          in backend.requests
+                          if message == JOB_OUTCOME_EVALUATION_REQUEST][1]
+        self.assertIn("Current Job progress", second_initial)
+        self.assertIn("report_artifact_written: 1", second_initial)
+        self.assertIn("report_artifact_written: 1", second_outcome)
+        self.assertIn("already-earned bounded step", JOB_OUTCOME_EVALUATION_REQUEST)
+        self.assertEqual(write_mock.call_count, 1)
+        self.assertEqual(backend.write_results[0]["status"], "applied")
+        self.assertEqual(self.workspaces.read(
+            job.id, "reports/scheduled-test.md").content, "scheduled seed")
+        self.assertEqual(first.disposition.value, "continue")
+        self.assertEqual(second.disposition.value, "completed")
+        self.assertIsNone(app.current_job_run)
+        self.assertIsNone(app.job_progress)
+        self.assertIs(self.jobs.get_run(binding.run.id).status, JobRunStatus.COMPLETED)
+        self.assertEqual(self.jobs.get_run(binding.run.id).result_report,
+                         "durable scheduled result")
+        finish_mock.assert_called_once_with(TaskStatus.COMPLETED)
+        self.assertIsNone(app.current_task)
+        await app.stop()
+
+    async def test_rejected_duplicate_create_does_not_erase_prior_progress(self):
+        backend = ScheduledProgressBackend(duplicate=True)
+        app = self.app(backend, initiative=True)
+        job = self.jobs.create_job("Scheduled Workspace Test")
+        await app.start(); binding = app.start_job_run(job.id)
+        await app.work_current_job_once()
+        self.assertEqual(app.job_progress.counters,
+                         (JobProgressCounter("report_artifact_written", 1),))
+
+        outcome = await app.work_current_job_once()
+
+        self.assertEqual([result["status"] for result in backend.write_results],
+                         ["applied", "rejected"])
+        self.assertEqual(backend.write_results[1]["reason"], "artifact_exists")
+        self.assertEqual(outcome.disposition.value, "completed")
+        self.assertIs(self.jobs.get_run(binding.run.id).status, JobRunStatus.COMPLETED)
+        self.assertIsNone(app.job_progress)
+        await app.stop()
 
     async def test_write_schema_is_strict(self):
         schema = WORKSPACE_WRITE_TOOL.parameters

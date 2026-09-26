@@ -62,8 +62,13 @@ class JobProgress:
             "Current Job progress",
             "These counters are volatile runtime-owned progress for this exact JobRun "
             "and Task. Each increment was committed from an accepted current-episode "
-            "runtime evidence basis. They may support reasoning within this occurrence; "
-            "they are not global memory or general claims about the outside world.",
+            "runtime evidence basis. In later episodes of this occurrence, they are "
+            "authoritative evidence that the named bounded progress was already earned; "
+            "consider them before repeating a bounded action. Interpret each counter "
+            "against the Job assignment, TaskGoal, value, and other current evidence: "
+            "the existence of arbitrary or unrelated progress does not establish the "
+            "TaskGoal. These counters do not recreate the original evidence payload, "
+            "and are not persistent memory or general claims about the outside world.",
         ]
         lines.extend(
             (f"  {counter.name}: {counter.value}" for counter in self.counters)

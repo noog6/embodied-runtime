@@ -98,6 +98,20 @@ class JobProgressModelTests(unittest.TestCase):
             maximum.increment(JobProgressUpdate("checks", "effect_1"))
         self.assertEqual(maximum.counters[0].value, MAX_JOB_PROGRESS_COUNTER_VALUE)
 
+    def test_render_distinguishes_occurrence_authority_from_unrelated_facts(self):
+        rendered = JobProgress(
+            1, 2, uuid4(), (JobProgressCounter("report_artifact_written", 1),),
+        ).render()
+        self.assertIn("already earned", rendered)
+        self.assertIn("consider them before repeating a bounded action", rendered)
+        self.assertIn("arbitrary or unrelated progress does not establish", rendered)
+        self.assertIn("do not recreate the original evidence payload", rendered)
+        self.assertIn("report_artifact_written: 1", rendered)
+        self.assertIn("committed exact-occurrence JobProgress",
+                      JOB_OUTCOME_EVALUATION_REQUEST)
+        self.assertIn("committed JobProgress is not a basis for a new update",
+                      JOB_OUTCOME_EVALUATION_REQUEST)
+
 
 class JobProgressRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -423,11 +437,19 @@ class JobProgressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         app._job_progress = progress.increment(JobProgressUpdate("a_step", "wake_event"))
         output = console.execute("job current")[0]
         self.assertIn("progress:      a_step=1, z_step=2", output)
-        app._job_progress = JobProgress(
-            binding.job.id, binding.run.id + 1, binding.task.id,
-            (JobProgressCounter("hidden", 1),),
+        stale_bindings = (
+            (binding.job.id + 1, binding.run.id, binding.task.id),
+            (binding.job.id, binding.run.id + 1, binding.task.id),
+            (binding.job.id, binding.run.id, uuid4()),
         )
-        self.assertIn("progress:      none", console.execute("job current")[0])
+        for stale_job_id, stale_run_id, stale_task_id in stale_bindings:
+            with self.subTest(binding=(stale_job_id, stale_run_id, stale_task_id)):
+                app._job_progress = JobProgress(
+                    stale_job_id, stale_run_id, stale_task_id,
+                    (JobProgressCounter("hidden", 1),),
+                )
+                self.assertIsNone(app.job_progress)
+                self.assertIn("progress:      none", console.execute("job current")[0])
         await app.stop()
 
     def test_deterministic_acquisition_and_effect_basis_validation(self):
