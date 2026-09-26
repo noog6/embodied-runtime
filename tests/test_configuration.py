@@ -76,6 +76,29 @@ class ConfigurationTests(unittest.TestCase):
     def test_no_arguments_preserves_historical_defaults(self):
         self.assertEqual(parse_launch_arguments([])[2], HISTORICAL_DEFAULTS)
         self.assertEqual(HISTORICAL_DEFAULTS.interaction_environment, "workstation")
+        self.assertFalse(HISTORICAL_DEFAULTS.sms_enabled)
+
+    def test_sms_configuration_is_strict_and_cli_can_opt_in(self):
+        effective = self.effective(
+            "[sms]\nenabled=false\nbackend='twilio'\nbind_host='0.0.0.0'\n"
+            "bind_port=8081\nwebhook_path='/incoming'\n",
+            ("--sms",),
+        )
+        self.assertTrue(effective.sms_enabled)
+        self.assertEqual(
+            (effective.sms_backend, effective.sms_bind_host,
+             effective.sms_bind_port, effective.sms_webhook_path),
+            ("twilio", "0.0.0.0", 8081, "/incoming"),
+        )
+        invalid = (
+            "[sms]\nbackend='other'\n",
+            "[sms]\nbind_port=0\n",
+            "[sms]\nwebhook_path='sms'\n",
+            "[sms]\nbind_host=''\n",
+        )
+        for contents in invalid:
+            with self.subTest(contents=contents), self.assertRaises(ConfigurationError):
+                load_runtime_config(self.write(contents))
 
     def test_interaction_environment_is_strict_and_resolved(self):
         for environment in ("workstation", "companion", "unattended", "remote"):

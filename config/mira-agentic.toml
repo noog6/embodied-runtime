@@ -41,3 +41,10 @@ database_path = "../data/jobs.sqlite3"
 auto_continue = true
 heartbeat_seconds = 30
 max_auto_steps = 3
+
+[sms]
+enabled = false
+backend = "twilio"
+bind_host = "127.0.0.1"
+bind_port = 8080
+webhook_path = "/sms"
