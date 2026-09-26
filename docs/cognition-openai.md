@@ -88,6 +88,15 @@ validates untrusted arguments and invokes
 `RobotApplication.set_body_orientation()`. The provider never receives a body
 backend or mutable state. Physical body actuation is deliberately unavailable.
 
+When Jobs persistence is configured, explicit operator dialogue also projects
+`inspect_job_result(selector)`. This read-only acquisition retrieves one exact
+terminal `RUN<n>`, the latest completed occurrence for `JOB<n>`, or a uniquely
+resolved exact case-sensitive Job name. Its Job/JobRun identity, status, and
+timestamps are runtime-owned durable metadata; its summary and report are
+historical cognition-authored work product, not fresh current evidence or
+persistent memory. The capability uses the ordinary two-acquisition operator
+budget and is never projected into autonomous attention or bounded Job work.
+
 After an applied or rejected request, the adapter sends the runtime-produced
 function output and refreshed authoritative grounding for one final text-only
 response. Its `previous_response_id` is local to that one ask; it is neither
