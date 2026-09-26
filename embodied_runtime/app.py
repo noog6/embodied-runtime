@@ -60,7 +60,7 @@ from embodied_runtime.jobs import (
     MAX_JOB_CONTINUATION_DELAY_SECONDS,
     MAX_RUN_REPORT_CHARS,
     MIN_JOB_CONTINUATION_DELAY_SECONDS,
-    JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
+    JobRun, JobRunStatus, JobStore, JobWorkspaceStore, JobWorkDisposition, JobWorkOutcome,
     JOB_PROGRESS_BASES, JobProgress, JobProgressUpdate, validate_counter_name,
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
 )
@@ -740,6 +740,7 @@ class RobotApplication:
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         persistent_memory_store: PersistentMemoryStore | None = None,
         job_store: JobStore | None = None,
+        job_workspace_store: JobWorkspaceStore | None = None,
         run_history_evidence: RunHistoryEvidenceReader | None = None,
         resource_arbiter: ResourceArbiter | None = None,
         observability: RunObservability | None = None,
@@ -779,6 +780,7 @@ class RobotApplication:
         )
         self.persistent_memory = persistent_memory_store
         self.jobs = job_store
+        self.job_workspaces = job_workspace_store
         self._run_history_evidence = run_history_evidence
         self._memory_recall = (
             MemoryRecallProjector(persistent_memory_store)
@@ -790,6 +792,7 @@ class RobotApplication:
         )
         self._persistent_memory_closed = False
         self._job_store_closed = False
+        self._job_workspace_store_closed = False
         authorized_voice_provider = (
             SpeakerAuthorizedVoiceProvider(voice_provider, self.resources)
             if voice_provider is not None else None
@@ -2270,6 +2273,10 @@ class RobotApplication:
             except BaseException:
                 LOGGER.exception("[MEMORY] cleanup_failed")
             try:
+                self._close_job_workspace_store()
+            except BaseException:
+                LOGGER.exception("[WORKSPACE] cleanup_failed")
+            try:
                 self._close_job_store()
             except BaseException:
                 LOGGER.exception("[JOBS] cleanup_failed")
@@ -2396,6 +2403,10 @@ class RobotApplication:
         except BaseException as error:
             failure = failure or error
         try:
+            self._close_job_workspace_store()
+        except BaseException as error:
+            failure = failure or error
+        try:
             self._close_job_store()
         except BaseException as error:
             failure = failure or error
@@ -2427,6 +2438,13 @@ class RobotApplication:
             return
         self._job_store_closed = True
         self.jobs.close()
+
+    def _close_job_workspace_store(self) -> None:
+        """Release Workspace descriptors without changing durable content."""
+        if self.job_workspaces is None or self._job_workspace_store_closed:
+            return
+        self._job_workspace_store_closed = True
+        self.job_workspaces.close()
 
     async def run(self) -> None:
         await self.start()

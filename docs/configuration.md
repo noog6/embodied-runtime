@@ -1,5 +1,11 @@
 # Runtime startup configuration
 
+When Jobs persistence is enabled, the runtime also constructs the Job Workspace
+store. Its root is not separately configurable: the sibling directory name is
+the Jobs database stem plus `-workspaces` (for example, `data/jobs.sqlite3`
+derives `data/jobs-workspaces/`). Workspace safety ceilings are fixed runtime
+limits rather than TOML settings. See [Job Workspaces](job-workspaces.md).
+
 Normal full-agentic operation uses one readable, startup-only TOML file:
 
 ```console

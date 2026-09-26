@@ -1,5 +1,12 @@
 # Local runtime console
 
+`job files JOB<n> [directory]` lists at most one bounded Workspace directory
+page without recursion. `job file JOB<n> <logical-path> [offset_chars]` reads at
+most 8,000 Unicode characters and reports its SHA-256 content version, byte
+size, returned range, and continuation offset. Both commands are read-only,
+require an existing Job, use logical paths rather than host paths, and never
+create a Workspace. The console has no Workspace write or delete command.
+
 `attention` reports whether initiative is enabled, its idle/in-flight/completed/
 failed state, latest trigger and source, latest action/status, and the latest
 bounded autonomous response when available. That response is volatile diagnostic state shown only

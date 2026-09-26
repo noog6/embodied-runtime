@@ -18,7 +18,9 @@ from embodied_runtime.interaction import (
     CONSOLE_ADMINISTRATIVE, CONSOLE_DIALOGUE, ConsoleOperatorMessageChannel,
     InteractionContext,
 )
-from embodied_runtime.jobs import JobRun, JobRunStatus, JobTarget
+from embodied_runtime.jobs import (
+    JobRun, JobRunStatus, JobTarget, WorkspaceError,
+)
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
 from embodied_runtime.run_history import (
@@ -106,6 +108,10 @@ class RuntimeConsole:
             return self._job_show(words), False
         if vocabulary[:2] == ["job", "runs"]:
             return self._job_runs(words), False
+        if vocabulary[:2] == ["job", "files"]:
+            return self._job_files(words), False
+        if vocabulary[:2] == ["job", "file"]:
+            return self._job_file(words), False
         if vocabulary[:2] == ["job", "result"]:
             return self._job_result(words), False
         if vocabulary[:2] == ["job", "latest-result"]:
@@ -257,6 +263,8 @@ class RuntimeConsole:
                 "  jobs                           List the entire durable Job catalog",
                 "  job show JOB<n>                Show one Job and its assignment",
                 "  job runs JOB<n>                List durable occurrences of one Job",
+                "  job files JOB<n> [directory]   List one Workspace directory level",
+                "  job file JOB<n> <path> [offset] Read bounded Workspace text",
                 "  job result RUN<n>              Show one durable JobRun result",
                 "  job latest-result JOB<n>       Show latest completed JobRun result",
                 "  job add <name> [options]       Add an enabled Job definition",
@@ -341,6 +349,64 @@ class RuntimeConsole:
         if not runs:
             lines.append("  none")
         return "\n".join(lines)
+
+    def _workspace_job(self, identity: str) -> tuple[int | None, str | None]:
+        job_id = _catalog_id(identity, "JOB")
+        if job_id is None:
+            return None, "invalid Job identity"
+        store = self._application.jobs
+        if store is None or self._application.job_workspaces is None:
+            return None, "Jobs persistence is disabled."
+        if store.get_job(job_id) is None:
+            return None, f"Job not found: JOB{job_id}."
+        return job_id, None
+
+    def _job_files(self, words: list[str]) -> str:
+        if len(words) not in (3, 4):
+            return "Usage: job files JOB<n> [directory]."
+        job_id, error = self._workspace_job(words[2])
+        if error is not None:
+            return error if job_id is None and error.endswith(".") else "Usage: job files JOB<n> [directory]."
+        assert job_id is not None and self._application.job_workspaces is not None
+        directory = words[3] if len(words) == 4 else ""
+        try:
+            listing = self._application.job_workspaces.list_entries(job_id, directory)
+        except WorkspaceError as workspace_error:
+            return f"Unable to list JOB{job_id} Workspace: {workspace_error}."
+        lines = [f"Job Workspace files for JOB{job_id}", f"  directory:     {directory or '/'}"]
+        for entry in listing.entries:
+            size = "-" if entry.size_bytes is None else str(entry.size_bytes)
+            version = "-" if entry.content_version is None else entry.content_version
+            lines.append(f"  {entry.kind:<9} {size:>7}  {entry.path}  {version}")
+        if not listing.entries:
+            lines.append("  empty")
+        lines.append(f"  more:          {str(listing.next_cursor is not None).lower()}")
+        return "\n".join(lines)
+
+    def _job_file(self, words: list[str]) -> str:
+        if len(words) not in (4, 5):
+            return "Usage: job file JOB<n> <logical-path> [offset_chars]."
+        job_id, error = self._workspace_job(words[2])
+        if error is not None:
+            return error if error.endswith(".") else "Usage: job file JOB<n> <logical-path> [offset_chars]."
+        try:
+            offset = int(words[4]) if len(words) == 5 else 0
+        except ValueError:
+            return "Usage: job file JOB<n> <logical-path> [offset_chars]."
+        assert job_id is not None and self._application.job_workspaces is not None
+        try:
+            result = self._application.job_workspaces.read(job_id, words[3], offset)
+        except WorkspaceError as workspace_error:
+            return f"Unable to read JOB{job_id} Workspace artifact: {workspace_error}."
+        returned_end = result.next_offset_chars
+        return "\n".join((
+            "Job Workspace file", f"  job:           JOB{job_id}",
+            f"  path:          {result.path}", f"  content_version: {result.content_version}",
+            f"  bytes:         {result.size_bytes}",
+            f"  range:         {result.offset_chars}:{returned_end} of {result.total_chars}",
+            f"  truncated:     {str(result.truncated).lower()}",
+            f"  next_offset:   {result.next_offset_chars}", "  content:", result.content,
+        ))
 
     def _render_job_result(self, run: JobRun) -> str:
         store = self._application.jobs

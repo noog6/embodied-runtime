@@ -15,7 +15,7 @@ from embodied_runtime.cli import build_parser, build_platform_monitor_policy
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
-from embodied_runtime.jobs import SQLiteJobStore
+from embodied_runtime.jobs import FilesystemJobWorkspaceStore, SQLiteJobStore
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
@@ -114,9 +114,11 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
     async def test_job_definition_and_manual_lifecycle_commands(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3")
+            workspaces = FilesystemJobWorkspaceStore(Path(temporary) / "jobs-workspaces")
             app = RobotApplication(
                 RobotProfile("jobs", "Jobs Robot"), VirtualHardwareBackend(),
                 platform_provider=CountingProvider([self.first]), job_store=store,
+                job_workspace_store=workspaces,
             )
             await app.start()
             console = RuntimeConsole(app)
@@ -156,6 +158,14 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(console.execute("job current")[0], "Current Job\n  none")
             self.assertIn("invalid name, description, or target",
                           console.execute('job add Bad --target malformed')[0])
+            workspaces.write(1, "artifacts/report.md", "create", "hello 😀")
+            files = console.execute("job files JOB1 artifacts")[0]
+            self.assertIn("artifacts/report.md", files)
+            self.assertNotIn(str(Path(temporary)), files)
+            artifact = console.execute("job file JOB1 artifacts/report.md 1")[0]
+            self.assertIn("job:           JOB1", artifact)
+            self.assertIn("content_version:", artifact)
+            self.assertTrue(artifact.endswith("ello 😀"))
             await app.stop()
 
     def test_help_is_exact_and_alias_matches(self):
@@ -176,6 +186,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  jobs                           List the entire durable Job catalog\n"
             "  job show JOB<n>                Show one Job and its assignment\n"
             "  job runs JOB<n>                List durable occurrences of one Job\n"
+            "  job files JOB<n> [directory]   List one Workspace directory level\n"
+            "  job file JOB<n> <path> [offset] Read bounded Workspace text\n"
             "  job result RUN<n>              Show one durable JobRun result\n"
             "  job latest-result JOB<n>       Show latest completed JobRun result\n"
             "  job add <name> [options]       Add an enabled Job definition\n"

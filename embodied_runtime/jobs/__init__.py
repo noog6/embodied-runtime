@@ -20,6 +20,13 @@ from .continuation import (
 from .sqlite_store import SQLiteJobStore
 from .scheduling import ScheduledJobController
 from .store import JobStore
+from .workspace import (
+    FilesystemJobWorkspaceStore, JobWorkspaceStore, WorkspaceBackendError,
+    WorkspaceConflictError, WorkspaceDurabilityError, WorkspaceError,
+    WorkspaceNotFoundError, WorkspaceQuotaError, WorkspaceUnsafeError,
+    WorkspaceValidationError,
+    workspace_root_for_database,
+)
 
 __all__ = ["InvalidJobRunTransitionError", "Job", "JobRun", "JobRunStatus", "JobSchedule",
            "JobStore", "JobTarget", "JobWorkDisposition", "JobWorkOutcome",
@@ -35,3 +42,10 @@ __all__ = ["InvalidJobRunTransitionError", "Job", "JobRun", "JobRunStatus", "Job
            "project_job_continuity_summary", "render_job_continuity",
            "ScheduledJobController"]
 __all__.append("MAX_RUN_REPORT_CHARS")
+__all__ += [
+    "FilesystemJobWorkspaceStore", "JobWorkspaceStore", "WorkspaceError",
+    "WorkspaceBackendError", "WorkspaceConflictError", "WorkspaceDurabilityError",
+    "WorkspaceNotFoundError", "WorkspaceQuotaError", "WorkspaceUnsafeError",
+    "WorkspaceValidationError",
+    "workspace_root_for_database",
+]
