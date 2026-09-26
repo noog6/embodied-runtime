@@ -243,7 +243,7 @@ class JobContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(backend.requests), calls)
         await app.stop()
 
-    async def test_shutdown_cancels_automatic_work_and_leaves_run_running(self):
+    async def test_shutdown_cancels_automatic_work_and_interrupts_run(self):
         backend = BlockAutomaticBackend()
         app = self.app(backend)
         await app.start()
@@ -255,9 +255,9 @@ class JobContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.current_job_run)
         reopened = SQLiteJobStore(Path(self.temp.name) / "jobs.sqlite3")
         self.addCleanup(reopened.close)
-        self.assertIs(reopened.get_run(binding.run.id).status, JobRunStatus.RUNNING)
+        self.assertIs(reopened.get_run(binding.run.id).status, JobRunStatus.INTERRUPTED)
 
-    async def test_restart_does_not_adopt_durable_running_run(self):
+    async def test_restart_does_not_adopt_interrupted_run(self):
         timer, backend = FakeTimer(), JobBackend()
         app = self.app(backend, timer=timer)
         await app.start()
@@ -268,7 +268,7 @@ class JobContinuationTests(unittest.IsolatedAsyncioTestCase):
         fresh_timer, fresh_backend = FakeTimer(), JobBackend()
         fresh = self.app(fresh_backend, timer=fresh_timer)
         await fresh.start()
-        self.assertIs(reopened.get_run(binding.run.id).status, JobRunStatus.RUNNING)
+        self.assertIs(reopened.get_run(binding.run.id).status, JobRunStatus.INTERRUPTED)
         self.assertIsNone(fresh.current_job_run)
         self.assertIsNone(fresh.current_task)
         self.assertIsNone(fresh.job_continuation)

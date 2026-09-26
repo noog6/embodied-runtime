@@ -29,12 +29,16 @@ foreign key, status, timestamps, and optional bounded outcome/error summaries:
 pending -> running -> completed
                    -> failed
                    -> stopped
+                   -> interrupted
 pending ----------------> stopped
+        ----------------> interrupted
 ```
 
-Completed, failed, and stopped runs are terminal. Transitions are atomic and
-fail closed. Closing a store or application does not rewrite pending or running
-runs.
+Completed, failed, stopped, and interrupted runs are terminal. `interrupted`
+means execution continuity was lost because the owning runtime ended; it is not
+successful completion, a semantic failure outcome, or a resumable checkpoint.
+Both pending and running runs may transition to interrupted, and no transition
+is allowed out of interrupted. Transitions are atomic and fail closed.
 
 ## Durable Job results
 
@@ -430,7 +434,7 @@ claim or lease with a runtime identity. There is still no `claimed_by` column.
 
 ## Persistence, shutdown, and restart
 
-Jobs use their own `SQLiteJobStore`, schema version 1, normally in
+Jobs use their own `SQLiteJobStore`, schema version 4, normally in
 `data/jobs.sqlite3`. They are independent of persistent memory and Tasks. Jobs
 and memory can each be enabled or disabled independently.
 
@@ -443,13 +447,34 @@ heartbeat_seconds = 30
 max_auto_steps = 3
 ```
 
+`interrupted` is a terminal JobRun state distinct from `completed`, `failed`,
+and the policy-driven `stopped` state. It records loss of execution continuity;
+it is neither successful work nor a promise that work can be resumed. An
+interrupted occurrence has `finished_at`, needs no result report, remains
+visible in JobRun history, and is excluded from latest-completed-result lookup.
+
 Shutdown first stops the continuation heartbeat, cancels and joins in-flight
-Job work, and clears continuation. It then releases the current Task's volatile
-ActiveGoal and resources, and
-clears both Task and JobRun bindings before closing the store. It does not
-invent semantic completion: a durable running occurrence remains running. On
-restart it remains visible through `job runs`, while `current_job_run` and
-`current_task` are empty. Automatic recovery is not implemented.
+Job work, and clears continuation. If the current durable occurrence is still
+`pending` or `running` after that quiescence, shutdown marks it `interrupted`
+without cognition, a result report, or a model-authored summary. It then
+releases the current Task's volatile ActiveGoal and resources and clears both
+Task and JobRun bindings before closing the store. A legitimate terminal result
+persisted while work was quiescing is not overwritten.
+
+At startup, before scheduled activation, continuation processing,
+`ApplicationStarted`, or normal execution, the store atomically changes every
+stale durable `pending` or `running` occurrence to `interrupted`. This creates no
+Task, ActiveGoal, continuation, or automatic work and does not resume or retry
+the old occurrence. For this crash-reconciliation case, `finished_at` is the
+time the new process detected and durably reconciled the orphan, not an inferred
+crash time. Startup fails closed if the transaction cannot complete.
+
+The reconciliation preserves Job definitions, schedules, and
+`last_started_local_date`. Consequently, an interrupted scheduled occurrence is
+not recreated on the same local date; the next eligible date can start normally.
+Durable Workspace artifacts published before interruption survive independently,
+but their existence does not turn the interrupted JobRun into completed work.
+Automatic JobRun recovery is not implemented.
 
 The console inspection commands are `jobs`, `job show JOB<n>`, `job runs
 JOB<n>`, `job files JOB<n> [directory]`, and `job file JOB<n> <logical-path>
@@ -461,10 +486,11 @@ cannot be updated until its occurrence is terminal.
 Runtime coordination commands are `job start`, asynchronous `job work`, `job
 current`, `job complete`, `job fail`, and `job stop`.
 
-It does not mark the durable run failed; the occurrence remains `running`, with
-the same restart semantics. Cron, new-Job scheduling, Job-owned resources,
-unbounded retries, body/runtime registries, target matching, distributed
-coordination, claims, and restart recovery remain future work.
+It does not mark the durable run failed; process shutdown or later startup
+reconciliation marks an unfinished occurrence `interrupted`. Cron, new-Job
+scheduling, Job-owned resources, unbounded retries, body/runtime registries,
+target matching, distributed coordination, claims, and restart recovery remain
+future work.
 
 Each durable Job also owns one durable contained text Workspace shared across
 its occurrences. It remains separate from immutable JobRun result reports and

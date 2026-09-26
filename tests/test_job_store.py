@@ -115,7 +115,9 @@ class SQLiteJobStoreTests(unittest.TestCase):
         for first, second in ((JobRunStatus.PENDING, JobRunStatus.STOPPED),
                               (JobRunStatus.RUNNING, JobRunStatus.COMPLETED),
                               (JobRunStatus.RUNNING, JobRunStatus.FAILED),
-                              (JobRunStatus.RUNNING, JobRunStatus.STOPPED)):
+                              (JobRunStatus.RUNNING, JobRunStatus.STOPPED),
+                              (JobRunStatus.RUNNING, JobRunStatus.INTERRUPTED),
+                              (JobRunStatus.PENDING, JobRunStatus.INTERRUPTED)):
             run = self.store.create_run(job.id)
             if first is JobRunStatus.RUNNING:
                 run = self.store.transition_run(run.id, first)
@@ -126,15 +128,57 @@ class SQLiteJobStoreTests(unittest.TestCase):
     def test_terminal_and_double_terminal_transitions_fail_closed(self):
         job = self.store.create_job("Duty")
         for terminal in (JobRunStatus.COMPLETED, JobRunStatus.FAILED,
-                         JobRunStatus.STOPPED):
+                         JobRunStatus.STOPPED, JobRunStatus.INTERRUPTED):
             run = self.store.create_run(job.id)
-            if terminal is not JobRunStatus.STOPPED:
+            if terminal not in (JobRunStatus.STOPPED, JobRunStatus.INTERRUPTED):
                 self.store.transition_run(run.id, JobRunStatus.RUNNING)
             self.store.transition_run(run.id, terminal)
             for attempted in (JobRunStatus.RUNNING, terminal):
                 with self.subTest(terminal=terminal, attempted=attempted), \
                      self.assertRaises(InvalidJobRunTransitionError):
                     self.store.transition_run(run.id, attempted)
+
+    def test_interrupt_nonterminal_runs_is_atomic_ordered_and_preserves_history(self):
+        first_job = self.store.create_job("First")
+        second_job = self.store.create_job("Second")
+        completed = self.store.create_run(first_job.id)
+        self.store.transition_run(completed.id, JobRunStatus.RUNNING)
+        completed = self.store.transition_run(
+            completed.id, JobRunStatus.COMPLETED, outcome_summary="kept",
+            result_report="durable report",
+        )
+        pending = self.store.create_run(second_job.id)
+        running = self.store.create_run(first_job.id)
+        running = self.store.transition_run(running.id, JobRunStatus.RUNNING)
+        stopped = self.store.create_run(second_job.id)
+        stopped = self.store.transition_run(stopped.id, JobRunStatus.STOPPED)
+
+        before = self.clock.value
+        reconciled = self.store.interrupt_nonterminal_runs()
+
+        self.assertEqual(tuple(run.id for run in reconciled), (pending.id, running.id))
+        self.assertTrue(all(run.status is JobRunStatus.INTERRUPTED for run in reconciled))
+        self.assertTrue(all(run.finished_at > before for run in reconciled))
+        self.assertEqual(reconciled[0].finished_at, reconciled[1].finished_at)
+        self.assertEqual(self.store.get_run(completed.id), completed)
+        self.assertEqual(self.store.get_run(stopped.id), stopped)
+        self.assertEqual(self.store.get_latest_completed_run(first_job.id), completed)
+        self.assertEqual(self.store.interrupt_nonterminal_runs(), ())
+
+    def test_interrupt_nonterminal_runs_rolls_back_as_one_transaction(self):
+        job = self.store.create_job("Rollback")
+        pending = self.store.create_run(job.id)
+        running = self.store.create_run(job.id)
+        self.store.transition_run(running.id, JobRunStatus.RUNNING)
+        self.store._connection.execute("""
+            CREATE TRIGGER reject_second_interrupt BEFORE UPDATE ON job_runs
+            WHEN OLD.id = 2 AND NEW.status = 'interrupted'
+            BEGIN SELECT RAISE(ABORT, 'injected failure'); END
+        """)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "injected failure"):
+            self.store.interrupt_nonterminal_runs()
+        self.assertIs(self.store.get_run(pending.id).status, JobRunStatus.PENDING)
+        self.assertIs(self.store.get_run(running.id).status, JobRunStatus.RUNNING)
 
     def test_latest_completed_ignores_newer_failed_stopped_and_running_runs(self):
         job = self.store.create_job("Review")
@@ -210,7 +254,51 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.assertEqual(run.outcome_summary, "old result")
         self.assertIsNone(run.result_report)
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+
+    def test_version_three_rebuild_preserves_ids_content_and_schedule(self):
+        job = self.store.create_job("Scheduled", "description")
+        self.store.set_schedule(job.id, "09:15", "UTC")
+        self.store.create_scheduled_run(job.id, "2026-09-20")
+        other = self.store.create_job("History")
+        completed = self.store.create_run(other.id)
+        self.store.transition_run(completed.id, JobRunStatus.RUNNING)
+        completed = self.store.transition_run(
+            completed.id, JobRunStatus.COMPLETED, outcome_summary="outcome",
+            result_report="report",
+        )
+        expected_jobs = self.store.list_jobs()
+        expected_schedule = self.store.get_schedule(job.id)
+        expected_runs = self.store.list_runs(job.id) + self.store.list_runs(other.id)
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            connection.executescript("""
+                DROP INDEX idx_job_runs_job;
+                ALTER TABLE job_runs RENAME TO job_runs_v4;
+                CREATE TABLE job_runs (
+                    id INTEGER PRIMARY KEY,
+                    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+                    status TEXT NOT NULL CHECK(status IN
+                        ('pending','running','completed','failed','stopped')),
+                    created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+                    outcome_summary TEXT, error_summary TEXT, result_report TEXT);
+                INSERT INTO job_runs SELECT * FROM job_runs_v4;
+                DROP TABLE job_runs_v4;
+                CREATE INDEX idx_job_runs_job ON job_runs(job_id, id);
+                PRAGMA user_version = 3;
+            """)
+
+        self.store = SQLiteJobStore(self.path, clock=self.clock)
+        self.assertEqual(self.store.list_jobs(), expected_jobs)
+        self.assertEqual(self.store.get_schedule(job.id), expected_schedule)
+        self.assertEqual(
+            self.store.list_runs(job.id) + self.store.list_runs(other.id), expected_runs
+        )
+        interrupted = self.store.interrupt_nonterminal_runs()
+        self.assertEqual(interrupted[0].id, expected_runs[0].id)
+        self.assertIs(interrupted[0].status, JobRunStatus.INTERRUPTED)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
 
     def test_unsupported_schema_fails_closed(self):
         self.store.close()

@@ -420,6 +420,7 @@ class JobProgressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app._job_progress)
         self.assertIsNone(app.current_job_run)
 
+        self.store = SQLiteJobStore(Path(self.temp.name) / "jobs.sqlite3")
         restarted = self.app(ProgressBackend(()))
         await restarted.start()
         self.assertIsNone(restarted.job_progress)

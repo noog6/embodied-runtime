@@ -158,6 +158,17 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             console.execute("job start JOB3")
             self.assertEqual(console.execute("job stop")[0], "Job RUN3 stopped.")
             self.assertEqual(console.execute("job current")[0], "Current Job\n  none")
+            interrupted = store.create_run(1)
+            store.transition_run(interrupted.id, JobRunStatus.INTERRUPTED)
+            runs = console.execute("job runs JOB1")[0]
+            self.assertIn(f"RUN{interrupted.id}", runs)
+            self.assertIn("interrupted", runs)
+            interrupted_result = console.execute(
+                f"job result RUN{interrupted.id}"
+            )[0]
+            self.assertIn("status:        interrupted", interrupted_result)
+            self.assertIn("report:        none", interrupted_result)
+            self.assertIn("RUN1", console.execute("job latest-result JOB1")[0])
             self.assertIn("invalid name, description, or target",
                           console.execute('job add Bad --target malformed')[0])
             workspaces.write(1, "artifacts/report.md", "create", "hello 😀")

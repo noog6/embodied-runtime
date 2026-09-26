@@ -70,7 +70,7 @@ class JobScheduleStoreTests(unittest.TestCase):
             self.assertEqual(store.get_run(1).status.value, "running")
             self.assertEqual(store.get_run(1).created_at, datetime(2026, 9, 20, tzinfo=UTC))
             self.assertEqual(store.set_schedule(1, "02:00", "America/Toronto").job_id, 1)
-            self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 4)
             store.close()
 
 

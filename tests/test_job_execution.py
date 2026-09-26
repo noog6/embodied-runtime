@@ -403,6 +403,8 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         app.attention.release_temporal_due.assert_not_awaited()
         reopened = SQLiteJobStore(self.path)
         try:
-            self.assertIs(reopened.get_run(binding.run.id).status, JobRunStatus.RUNNING)
+            self.assertIs(
+                reopened.get_run(binding.run.id).status, JobRunStatus.INTERRUPTED
+            )
         finally:
             reopened.close()
