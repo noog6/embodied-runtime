@@ -1120,7 +1120,7 @@ class RobotApplication:
         ))
 
     async def _on_job_presence_changed(self, event: PresenceChanged) -> None:
-        """Record a matching wake; cognition remains owned by the normal gate."""
+        """Record a matching wake and promptly offer it through the normal gate."""
         continuation = self._job_continuation
         current = self._current_job_run
         task_binding = self._current_task_binding
@@ -1131,6 +1131,7 @@ class RobotApplication:
                 or continuation.event_armed_after_ns is None
                 or event.timestamp_ns <= continuation.event_armed_after_ns
                 or continuation.event_satisfied
+                or self._active_job_work_task is not None
                 or current is None
                 or current.job.id != continuation.job_id
                 or current.run.id != continuation.run_id
@@ -1147,6 +1148,11 @@ class RobotApplication:
             "[JOBS] job=JOB%s run=RUN%s continuation=event_satisfied event=%s",
             continuation.job_id, continuation.run_id, continuation.event_type.value,
         )
+        LOGGER.info(
+            "[JOBS] continuation=offer trigger=event event_type=%s run=RUN%s",
+            continuation.event_type.value, continuation.run_id,
+        )
+        self._offer_job_continuation(trigger="event")
 
     @property
     def job_continuation_controller(self) -> JobContinuationController | None:
@@ -1616,7 +1622,7 @@ class RobotApplication:
             goal.id,
         )
 
-    def _offer_job_continuation(self) -> None:
+    def _offer_job_continuation(self, *, trigger: str = "heartbeat") -> None:
         """Validate and schedule at most one separately owned automatic episode."""
         continuation = self._job_continuation
         if continuation is None or continuation.state is not JobContinuationState.ARMED:
@@ -1697,8 +1703,8 @@ class RobotApplication:
         )
         self._active_job_work_task = task
         LOGGER.info(
-            "[JOBS] job=JOB%s run=RUN%s continuation=accepted remaining=%s source=heartbeat",
-            continuation.job_id, continuation.run_id, remaining,
+            "[JOBS] job=JOB%s run=RUN%s continuation=accepted remaining=%s source=%s",
+            continuation.job_id, continuation.run_id, remaining, trigger,
         )
 
     def _log_job_continuation_deferred(

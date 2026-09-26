@@ -59,7 +59,7 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         ))
         await self.drain()
 
-    async def test_wait_suppresses_heartbeat_and_matching_event_enables_one_episode(self):
+    async def test_matching_event_immediately_offers_one_episode(self):
         app, backend = await self.start_waiting((
             {"disposition": "continue", "summary": "A", "readiness": "wait_for_event",
              "delay_seconds": None, "event_type": "presence_changed"},
@@ -74,21 +74,10 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(continuation.automatic_steps_remaining, 3)
 
         await self.publish_presence(app)
-        self.assertTrue(app.job_continuation.event_satisfied)
-        first_wake = app.job_continuation.wake_event
-        first_marker = app.job_continuation.event_armed_after_ns
-        self.assertTrue(first_wake.present)
-        self.assertEqual(app.job_continuation.automatic_steps_remaining, 3)
-        # Further events coalesce while the wake is sticky.
-        await self.publish_presence(app, False)
-        await self.publish_presence(app, True)
-        self.assertIs(app.job_continuation.wake_event, first_wake)
-        app._offer_job_continuation()
-        await self.drain()
         self.assertEqual(app.job_continuation.automatic_steps_remaining, 2)
         self.assertFalse(app.job_continuation.event_satisfied)
         self.assertIsNone(app.job_continuation.wake_event)
-        self.assertGreater(app.job_continuation.event_armed_after_ns, first_marker)
+        self.assertEqual(len(backend.requests), 4)
         self.assertIn("Previous work summary", backend.requests[2][1])
         self.assertIn("continuation_wake_event: presence_changed", backend.requests[2][1])
         # The new wait installed by episode two needs a new event.
@@ -96,7 +85,69 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(len(backend.requests), 4)
         await self.publish_presence(app, False)
-        self.assertTrue(app.job_continuation.event_satisfied)
+        self.assertEqual(app.job_continuation.automatic_steps_remaining, 1)
+        await app.stop()
+
+    async def test_repeated_event_and_heartbeat_offers_are_single_flight(self):
+        app, backend = await self.start_waiting((
+            {"disposition": "continue", "summary": "A", "readiness": "wait_for_event",
+             "delay_seconds": None, "event_type": "presence_changed"},
+            {"disposition": "continue", "summary": "B", "readiness": "ready",
+             "delay_seconds": None, "event_type": None},
+        ))
+        busy = app.episode_coordinator.try_start("test", "test", "busy", None)
+        await self.publish_presence(app)
+        wake = app.job_continuation.wake_event
+        await self.publish_presence(app, False)
+        self.assertIs(app.job_continuation.wake_event, wake)
+        self.assertEqual(app.job_continuation.automatic_steps_remaining, 3)
+        app.episode_coordinator.close(busy, "handled")
+        app._offer_job_continuation()
+        app._offer_job_continuation()
+        self.assertEqual(app.job_continuation.automatic_steps_remaining, 2)
+        await self.drain()
+        self.assertEqual(len(backend.requests), 4)
+        await app.stop()
+
+    async def test_event_during_active_episode_does_not_cross_new_arm(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingBackend(ReadinessBackend):
+            async def respond(self, message, **kwargs):
+                if len(self.requests) == 2:
+                    started.set()
+                    await release.wait()
+                return await super().respond(message, **kwargs)
+
+        backend = BlockingBackend((
+            {"disposition": "continue", "summary": "A", "readiness": "wait_for_event",
+             "delay_seconds": None, "event_type": "presence_changed"},
+            {"disposition": "continue", "summary": "B", "readiness": "wait_for_event",
+             "delay_seconds": None, "event_type": "presence_changed"},
+            {"disposition": "continue", "summary": "C", "readiness": "ready",
+             "delay_seconds": None, "event_type": None},
+        ))
+        app = self.app(backend)
+        await app.start()
+        app.start_job_run(self.store.create_job("Boundary").id)
+        await app.work_current_job_once()
+        await self.publish_presence(app)
+        await started.wait()
+        active = app._active_job_work_task
+        await self.publish_presence(app, False)
+        self.assertIs(app._active_job_work_task, active)
+        release.set()
+        await active
+        self.assertFalse(app.job_continuation.event_satisfied)
+        self.assertIsNone(app.job_continuation.wake_event)
+        self.assertEqual(app.job_continuation.automatic_steps_remaining, 2)
+        app._offer_job_continuation()
+        await self.drain()
+        self.assertEqual(len(backend.requests), 4)
+        await self.publish_presence(app)
+        self.assertEqual(app.job_continuation.automatic_steps_remaining, 1)
+        self.assertEqual(len(backend.requests), 6)
         await app.stop()
 
     async def test_operator_waiter_cannot_consume_or_outrank_wake(self):
@@ -311,9 +362,11 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
                 job = self.store.create_job(f"Terminal {status.value}")
                 app.start_job_run(job.id)
                 await app.work_current_job_once()
+                app.pause_task()
                 await self.publish_presence(app)
                 self.assertIsNotNone(app.job_continuation.wake_event)
                 request_count = len(backend.requests)
+                app.resume_task()
                 app.finish_job_run(status, "terminal")
                 self.assertIsNone(app.job_continuation)
                 app._offer_job_continuation()
@@ -348,7 +401,8 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         await app._on_job_presence_changed(stale_event)
         self.assertFalse(app.job_continuation.event_satisfied)
         await self.publish_presence(app)
-        self.assertTrue(app.job_continuation.event_satisfied)
+        self.assertEqual(len(backend.requests), 6)
+        self.assertFalse(app.job_continuation.event_satisfied)
         await app.stop()
 
     async def test_scheduled_occurrence_waits_for_event_without_new_run(self):
@@ -378,7 +432,6 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(len(backend.requests), request_count)
         await self.publish_presence(app)
-        app._offer_job_continuation()
         await self.drain()
         self.assertEqual(app.current_job_run.run.id, run.run.id)
         self.assertEqual(len(self.store.list_runs(job.id)), 1)
@@ -389,20 +442,26 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         await app.stop()
 
     async def test_shutdown_clears_wait_and_listener_workers(self):
-        app, _ = await self.start_waiting((
+        app, backend = await self.start_waiting((
             {"disposition": "continue", "summary": "A", "readiness": "wait_for_event",
              "delay_seconds": None, "event_type": "presence_changed"},
         ))
         subscription = app._job_event_subscription
+        app.pause_task()
         await self.publish_presence(app)
         self.assertTrue(app.job_continuation.event_satisfied)
         self.assertIsNotNone(app.job_continuation.wake_event)
+        request_count = len(backend.requests)
         await app.stop()
         self.assertIsNone(app.job_continuation)
         self.assertIsNone(app.current_job_run)
         self.assertFalse(app.events.is_running)
         self.assertTrue(subscription._closed)
         self.assertIsNone(subscription._task)
+        await app._on_job_presence_changed(PresenceChanged(
+            source="test", previous_present=True, present=False,
+        ))
+        self.assertEqual(len(backend.requests), request_count)
 
 
 if __name__ == "__main__":
