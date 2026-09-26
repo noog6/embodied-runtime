@@ -1,5 +1,9 @@
 import asyncio
+import io
+import logging
+import sys
 import threading
+import types
 import unittest
 from unittest import mock
 
@@ -18,7 +22,7 @@ from embodied_runtime.interaction import (
 )
 from embodied_runtime.sms import (
     EMPTY_TWIML, MAX_SMS_BODY_CHARS, TOO_LONG_REPLY, SmsConfigurationError,
-    TwilioSmsService, TwilioSmsSettings,
+    TWILIO_HTTP_LOGGER, TwilioSmsGateway, TwilioSmsService, TwilioSmsSettings,
 )
 
 
@@ -93,6 +97,75 @@ class SmsSettingsTests(unittest.TestCase):
                 bind_host="x", bind_port=1, webhook_path="/sms",
                 environ={**environment, "TWILIO_WEBHOOK_URL": "http://example.invalid/sms"},
             )
+
+
+class TwilioLoggingTests(unittest.TestCase):
+    def test_gateway_suppresses_only_twilio_http_diagnostics(self):
+        twilio_package = types.ModuleType("twilio")
+        twilio_package.__path__ = []
+        validator_module = types.ModuleType("twilio.request_validator")
+        rest_module = types.ModuleType("twilio.rest")
+
+        class FakeValidator:
+            def __init__(self, token):
+                self.token = token
+
+        class FakeClient:
+            def __init__(self, account_sid, auth_token):
+                logging.getLogger(TWILIO_HTTP_LOGGER).info(
+                    "POST https://api.twilio.invalid/Accounts/%s token=%s",
+                    account_sid, auth_token,
+                )
+
+        validator_module.RequestValidator = FakeValidator
+        rest_module.Client = FakeClient
+        modules = {
+            "twilio": twilio_package,
+            "twilio.request_validator": validator_module,
+            "twilio.rest": rest_module,
+        }
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        root = logging.getLogger()
+        twilio_logger = logging.getLogger(TWILIO_HTTP_LOGGER)
+        sms_logger = logging.getLogger("embodied_runtime.sms")
+        unrelated_logger = logging.getLogger("embodied_runtime.test_unrelated")
+        original_root_level = root.level
+        original_twilio_level = twilio_logger.level
+        original_sms_level = sms_logger.level
+        original_unrelated_level = unrelated_logger.level
+        root.addHandler(handler)
+        root.setLevel(logging.INFO)
+        twilio_logger.setLevel(logging.NOTSET)
+        sms_logger.setLevel(logging.NOTSET)
+        unrelated_logger.setLevel(logging.NOTSET)
+        self.addCleanup(root.removeHandler, handler)
+        self.addCleanup(root.setLevel, original_root_level)
+        self.addCleanup(twilio_logger.setLevel, original_twilio_level)
+        self.addCleanup(sms_logger.setLevel, original_sms_level)
+        self.addCleanup(unrelated_logger.setLevel, original_unrelated_level)
+
+        with mock.patch.dict(sys.modules, modules):
+            TwilioSmsGateway(settings())
+
+        self.assertEqual(twilio_logger.level, logging.WARNING)
+        logging.getLogger(TWILIO_HTTP_LOGGER).info("Response Headers: private")
+        sms_logger.info("[SMS] reply message_sid=SM1 chars=7 status=sent")
+        sms_logger.error("[SMS] reply status=failed reason=provider_error")
+        unrelated_logger.info("unrelated application record")
+
+        output = stream.getvalue()
+        self.assertNotIn(settings().account_sid, output)
+        self.assertNotIn(settings().auth_token, output)
+        self.assertNotIn(settings().twilio_number, output)
+        self.assertNotIn(settings().operator_number, output)
+        self.assertNotIn(settings().webhook_url, output)
+        self.assertNotIn("POST https://api.twilio.invalid", output)
+        self.assertNotIn("Response Headers", output)
+        self.assertIn("[SMS] reply message_sid=SM1 chars=7 status=sent", output)
+        self.assertIn("[SMS] reply status=failed reason=provider_error", output)
+        self.assertIn("unrelated application record", output)
 
 
 class SmsStateMachineTests(unittest.IsolatedAsyncioTestCase):

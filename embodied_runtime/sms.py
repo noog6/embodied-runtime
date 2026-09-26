@@ -18,6 +18,7 @@ from embodied_runtime.interaction import (
 )
 
 LOGGER = logging.getLogger(__name__)
+TWILIO_HTTP_LOGGER = "twilio.http_client"
 SMS_INBOX_SIZE = 16
 SMS_DEDUPE_SIZE = 256
 MAX_SMS_BODY_CHARS = 1600
@@ -102,6 +103,11 @@ class TwilioSmsGateway:
     """Twilio SDK boundary for request validation and synchronous sending."""
 
     def __init__(self, settings: TwilioSmsSettings) -> None:
+        # twilio-python emits request URLs, headers, and response headers at
+        # INFO on this dedicated logger.  Keep that provider transport detail
+        # out of runtime logs without changing application or other HTTP logs.
+        twilio_http_logger = logging.getLogger(TWILIO_HTTP_LOGGER)
+        twilio_http_logger.setLevel(logging.WARNING)
         try:
             from twilio.request_validator import RequestValidator
             from twilio.rest import Client
@@ -111,6 +117,9 @@ class TwilioSmsGateway:
             ) from error
         self._validator = RequestValidator(settings.auth_token)
         self._client = Client(settings.account_sid, settings.auth_token)
+        # Preserve the boundary even if SDK client initialization adjusted its
+        # own logger level.
+        twilio_http_logger.setLevel(logging.WARNING)
 
     def validate(
         self, url: str, form: Any, signature: str,
