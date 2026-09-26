@@ -27,6 +27,17 @@ recorded as zero. Normal provider request log lines likewise include
 `cache_write_tokens=<n>` when that valid provider detail is present. Local speech
 activity is not assigned hosted cost.
 
+The versioned built-in catalog currently covers only OpenAI Responses cognition using
+the exact model key `gpt-5.6-luna`, at the standard pricing applicable to requests with
+at most 272,000 input tokens. A request above that boundary, or usage from any unknown
+provider or model, makes the run estimate unavailable rather than applying an unsafe
+fallback. Vision, image tokens, TTS, ElevenLabs, Realtime, Live, and other providers or
+models are not priced yet.
+
+This locally calculated value estimates only usage represented in priced provider
+accounting; it is not a billing authority or a complete robot operating cost. Built-in
+pricing is dated and versioned, performs no runtime network lookup, and may become stale.
+
 Summary persistence reports `written`, `failed`, or `not_requested` to the runtime. A
 failure is logged with its bounded exception class and never changes authoritative
 `run.json` status or blocks shutdown.

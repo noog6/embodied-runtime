@@ -5,6 +5,7 @@ import json
 from embodied_runtime.observability import (
     PricingCatalog, RunObservability, TokenPrice,
 )
+from embodied_runtime.pricing import BUILT_IN_PRICING
 
 
 class Clocks:
@@ -79,6 +80,67 @@ def test_cost_uses_mutually_exclusive_input_categories_and_rejects_bad_usage():
     unpriced_write.provider_completed("p", "m", "initial", input_tokens=5,
                                       cache_write_tokens=1)
     assert unpriced_write.snapshot()["cost"]["status"] == "unavailable"
+
+
+def test_built_in_pricing_has_only_the_supported_openai_responses_model():
+    assert BUILT_IN_PRICING.identity == "openai-public-built-in-pricing-2026-09-26"
+    assert tuple(BUILT_IN_PRICING.rates) == (("openai-responses", "gpt-5.6-luna"),)
+    rate = BUILT_IN_PRICING.rates[("openai-responses", "gpt-5.6-luna")]
+    assert rate.input_per_million == Decimal("0.20")
+    assert rate.cached_input_per_million == Decimal("0.02")
+    assert rate.cache_write_per_million == Decimal("0.25")
+    assert rate.output_per_million == Decimal("1.20")
+    assert rate.max_input_tokens == 272_000
+
+
+def test_built_in_pricing_calculates_real_provider_usage_without_double_counting():
+    observed, _ = make(pricing=BUILT_IN_PRICING)
+    # Four individually supported requests aggregate to the representative 1M input run.
+    for _ in range(4):
+        observed.provider_completed(
+            "openai-responses", "gpt-5.6-luna", "initial",
+            input_tokens=250_000, cached_input_tokens=50_000,
+            cache_write_tokens=25_000, output_tokens=125_000,
+        )
+    assert observed.snapshot()["cost"] == {
+        "status": "estimated", "estimated_usd": "0.769000",
+        "pricing_identity": BUILT_IN_PRICING.identity,
+    }
+
+
+def test_built_in_pricing_fails_closed_above_per_request_context_limit():
+    at_limit, _ = make(pricing=BUILT_IN_PRICING)
+    at_limit.provider_completed(
+        "openai-responses", "gpt-5.6-luna", "initial", input_tokens=272_000,
+    )
+    assert at_limit.snapshot()["cost"]["status"] == "estimated"
+
+    above_limit, _ = make(pricing=BUILT_IN_PRICING)
+    above_limit.provider_completed(
+        "openai-responses", "gpt-5.6-luna", "initial", input_tokens=272_001,
+    )
+    assert above_limit.snapshot()["cost"]["status"] == "unavailable"
+    assert above_limit.snapshot()["cost"]["estimated_usd"] is None
+
+    mixed, _ = make(pricing=BUILT_IN_PRICING)
+    mixed.provider_completed(
+        "openai-responses", "gpt-5.6-luna", "initial", input_tokens=1,
+    )
+    mixed.provider_completed(
+        "openai-responses", "gpt-5.6-luna", "continuation", input_tokens=272_001,
+    )
+    assert mixed.snapshot()["cost"]["status"] == "unavailable"
+
+
+def test_built_in_pricing_does_not_fall_back_for_model_override():
+    observed, _ = make(pricing=BUILT_IN_PRICING)
+    observed.provider_completed(
+        "openai-responses", "gpt-5.6-sol", "initial", input_tokens=1,
+    )
+    cost = observed.snapshot()["cost"]
+    assert cost["status"] == "unavailable"
+    assert cost["estimated_usd"] is None
+    assert cost["pricing_identity"] == BUILT_IN_PRICING.identity
 
 
 def test_snapshot_is_detached_and_local_activity_has_no_cost():

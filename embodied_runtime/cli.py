@@ -35,6 +35,7 @@ from embodied_runtime.run_history import (
     start_run,
 )
 from embodied_runtime.observability import RunObservability
+from embodied_runtime.pricing import BUILT_IN_PRICING
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.jobs import (
     FilesystemJobWorkspaceStore, SQLiteJobStore, workspace_root_for_database,
@@ -655,7 +656,10 @@ def main(
     if args.config is not None:
         LOGGER.info("[CONFIG] source=%s status=loaded", args.config)
 
-    observability = RunObservability(history.run_id if history is not None else None)
+    observability = RunObservability(
+        history.run_id if history is not None else None,
+        pricing=BUILT_IN_PRICING,
+    )
     LOGGER.info("[OBS] status=ready")
     try:
         result = _run_with_asyncio_cleanup(

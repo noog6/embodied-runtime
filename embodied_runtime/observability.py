@@ -31,6 +31,7 @@ class TokenPrice:
     cached_input_per_million: Decimal
     output_per_million: Decimal
     cache_write_per_million: Decimal | None = None
+    max_input_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,9 +165,12 @@ class RunObservability:
             self._dimensions["provider_models"]["/".join(key)] += 1
             self._dimensions["provider_stages"][self._short(stage)] += 1
             bucket = self._provider_usage.setdefault(key, Counter())
+            rate = self._pricing.rates.get(key) if self._pricing is not None else None
             if (not usage_available
                     or cached_input_tokens + cache_write_tokens > input_tokens
-                    or total != input_tokens + output_tokens):
+                    or total != input_tokens + output_tokens
+                    or (rate is not None and rate.max_input_tokens is not None
+                        and input_tokens > rate.max_input_tokens)):
                 self._unpriceable_usage.add(key)
             for field, value in (("requests", 1), ("input_tokens", input_tokens),
                                  ("cached_input_tokens", cached_input_tokens),
