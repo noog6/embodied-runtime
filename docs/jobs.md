@@ -453,7 +453,11 @@ restart it remains visible through `job runs`, while `current_job_run` and
 
 The console inspection commands are `jobs`, `job show JOB<n>`, `job runs
 JOB<n>`, `job files JOB<n> [directory]`, and `job file JOB<n> <logical-path>
-[offset_chars]`. Definition commands are `job add`, `job enable`, and `job disable`.
+[offset_chars]`. Definition commands are `job add`, `job update`, `job enable`,
+and `job disable`. `job update JOB<n> --description ...` changes the durable
+responsibility definition in place for future occurrences while preserving Job
+identity, history, schedule, and Workspace. The currently executing same Job
+cannot be updated until its occurrence is terminal.
 Runtime coordination commands are `job start`, asynchronous `job work`, `job
 current`, `job complete`, `job fail`, and `job stop`.
 

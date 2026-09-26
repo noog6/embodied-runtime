@@ -15,7 +15,9 @@ from embodied_runtime.cli import build_parser, build_platform_monitor_policy
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
-from embodied_runtime.jobs import FilesystemJobWorkspaceStore, SQLiteJobStore
+from embodied_runtime.jobs import (
+    FilesystemJobWorkspaceStore, JobRunStatus, SQLiteJobStore,
+)
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
@@ -168,6 +170,74 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(artifact.endswith("ello 😀"))
             await app.stop()
 
+    async def test_job_description_update_preserves_owned_state_and_guards_current_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3")
+            workspaces = FilesystemJobWorkspaceStore(Path(temporary) / "jobs-workspaces")
+            app = RobotApplication(
+                RobotProfile("jobs", "Jobs Robot"), VirtualHardwareBackend(),
+                platform_provider=CountingProvider([self.first]), job_store=store,
+                job_workspace_store=workspaces,
+            )
+            await app.start()
+            console = RuntimeConsole(app)
+            console.execute(
+                'job add "Nightly Self Log Reviewer" --description "Original" '
+                '--target agent:mira'
+            )
+            original = store.get_job(1)
+            store.set_schedule(1, "23:30", "UTC")
+            historical = store.create_scheduled_run(1, "2026-09-25")
+            historical = store.transition_run(historical.id, JobRunStatus.RUNNING)
+            historical = store.transition_run(
+                historical.id, JobRunStatus.COMPLETED, outcome_summary="Reviewed"
+            )
+            workspaces.write(1, "notes/review.md", "create", "preserved content")
+
+            self.assertIn("Started JOB1", console.execute("job start JOB1")[0])
+            rejected_at = store.get_job(1).updated_at
+            self.assertEqual(
+                console.execute('job update JOB1 --description "New instructions"')[0],
+                "Unable to update JOB1: its current JobRun is still active.",
+            )
+            self.assertEqual(store.get_job(1).description, "Original")
+            self.assertEqual(store.get_job(1).updated_at, rejected_at)
+            self.assertEqual(console.execute("job complete")[0], "Job RUN2 completed.")
+            self.assertEqual(
+                console.execute(
+                    'job update JOB1 --description "  Updated nightly review instructions.  "'
+                )[0],
+                "Updated JOB1 description.",
+            )
+
+            updated = store.get_job(1)
+            self.assertEqual(updated.description, "Updated nightly review instructions.")
+            self.assertEqual(updated.id, original.id)
+            self.assertEqual(updated.name, original.name)
+            self.assertEqual(updated.enabled, original.enabled)
+            self.assertEqual(updated.target, original.target)
+            self.assertEqual(updated.created_at, original.created_at)
+            self.assertGreater(updated.updated_at, original.updated_at)
+            self.assertEqual(store.get_schedule(1).last_started_local_date, "2026-09-25")
+            self.assertEqual(store.list_runs(1)[0], historical)
+            self.assertEqual(workspaces.read(1, "notes/review.md").content,
+                             "preserved content")
+
+            usage = "Usage: job update JOB<n> --description <text>."
+            for malformed in (
+                "job update", "job update JOB1", "job update JOB1 --description",
+                'job update JOB1 --name "x"',
+                'job update JOB1 --description "x" --target agent:mira',
+                'job update NOTAJOB --description "x"',
+            ):
+                with self.subTest(command=malformed):
+                    self.assertEqual(console.execute(malformed)[0], usage)
+            self.assertEqual(
+                console.execute('job update JOB99 --description "x"')[0],
+                "Job not found: JOB99.",
+            )
+            await app.stop()
+
     def test_help_is_exact_and_alias_matches(self):
         expected = (
             "Commands\n"
@@ -191,6 +261,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  job result RUN<n>              Show one durable JobRun result\n"
             "  job latest-result JOB<n>       Show latest completed JobRun result\n"
             "  job add <name> [options]       Add an enabled Job definition\n"
+            "  job update JOB<n> --description <text>\n"
             "  job enable|disable JOB<n>      Change Job definition state\n"
             "  job start JOB<n>               Start a JobRun and bounded Task\n"
             "  job schedule JOB<n> [daily HH:MM [--timezone ZONE]]\n"
