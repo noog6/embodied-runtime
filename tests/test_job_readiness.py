@@ -32,6 +32,7 @@ class ReadinessBackend(JobBackend):
         self.requests.append((message, instructions, tuple(tool.name for tool in tools)))
         if message == JOB_OUTCOME_EVALUATION_REQUEST:
             proposal = next(self.proposals)
+            proposal.setdefault("report", None)
             self.results.append(await tool_executor(CognitionToolCall(
                 REPORT_JOB_OUTCOME_TOOL.name, json.dumps(proposal),
             )))

@@ -36,6 +36,38 @@ Completed, failed, and stopped runs are terminal. Transitions are atomic and
 fail closed. Closing a store or application does not rewrite pending or running
 runs.
 
+## Durable Job results
+
+A terminal JobRun may retain an optional `result_report` of at most 8,000
+characters. The existing outcome or error summary remains the concise lifecycle
+description; the report is a richer bounded work product or set of findings for
+that one exact occurrence. Reports are written atomically with the accepted
+terminal transition and cannot be appended, replaced, or attached to a
+non-terminal run. Older runs naturally have no report.
+
+These concepts remain deliberately separate:
+
+| Concept | Role |
+| --- | --- |
+| Job | Durable responsibility |
+| JobRun | Durable occurrence and terminal result owner |
+| Task | Bounded execution authority |
+| Job progress | Runtime-owned progress for the active occurrence |
+| Semantic continuity | Volatile, non-authoritative context between episodes |
+| JobRun result | Durable, bounded cognition work product after terminalization |
+
+A result may summarize or interpret evidence, but durability does not make the
+text runtime evidence. It cannot change JobRun or Task status, modify progress,
+or prove an external-world effect; the existing runtime validation and evidence
+remain authoritative. A JobRun result is bounded text, not a Job Workspace,
+artifact, attachment, or filesystem path.
+
+**Storage is not delivery.** Persisting a result does not speak, notify, route,
+retry, or acknowledge it. Operators may inspect exact occurrences with `job
+result RUN<n>` or the newest completed occurrence (excluding newer running,
+failed, and stopped runs) with `job latest-result JOB<n>`. There is no
+model-facing historical-result retrieval capability in this phase.
+
 ## Runtime coordination through Task
 
 A **Task** remains the runtime-owned bounded unit of meaningful work. Manual

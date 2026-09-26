@@ -5,7 +5,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from embodied_runtime.jobs import (
-    InvalidJobRunTransitionError, JobRunStatus, JobTarget, SQLiteJobStore,
+    MAX_RUN_REPORT_CHARS, InvalidJobRunTransitionError, JobRunStatus, JobTarget,
+    SQLiteJobStore,
 )
 
 
@@ -36,7 +37,11 @@ class SQLiteJobStoreTests(unittest.TestCase):
         run = self.store.create_run(job.id)
         self.store.transition_run(run.id, JobRunStatus.RUNNING)
         completed = self.store.transition_run(
-            run.id, JobRunStatus.COMPLETED, outcome_summary="Reviewed"
+            run.id, JobRunStatus.COMPLETED, outcome_summary="Reviewed",
+            result_report=(
+                "No failed application entries were found. The previous run ended "
+                "with an operator interrupt and completed cleanup with no non-daemon threads."
+            ),
         )
         self.store.close()
         reopened = SQLiteJobStore(self.path)
@@ -47,6 +52,7 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.assertEqual(persisted.target, JobTarget("body", "camera"))
         self.assertFalse(persisted.enabled)
         self.assertEqual(reopened.get_run(run.id), completed)
+        self.assertEqual(reopened.get_latest_completed_run(job.id), completed)
         reopened.close()
         self.store = SQLiteJobStore(self.path)
 
@@ -97,6 +103,82 @@ class SQLiteJobStoreTests(unittest.TestCase):
                 with self.subTest(terminal=terminal, attempted=attempted), \
                      self.assertRaises(InvalidJobRunTransitionError):
                     self.store.transition_run(run.id, attempted)
+
+    def test_latest_completed_ignores_newer_failed_stopped_and_running_runs(self):
+        job = self.store.create_job("Review")
+        completed = self.store.create_run(job.id)
+        self.store.transition_run(completed.id, JobRunStatus.RUNNING)
+        completed = self.store.transition_run(
+            completed.id, JobRunStatus.COMPLETED, outcome_summary="done",
+            result_report="Detailed findings.",
+        )
+        for status in (JobRunStatus.FAILED, JobRunStatus.STOPPED):
+            run = self.store.create_run(job.id)
+            self.store.transition_run(run.id, JobRunStatus.RUNNING)
+            self.store.transition_run(run.id, status, result_report="other")
+        running = self.store.create_run(job.id)
+        self.store.transition_run(running.id, JobRunStatus.RUNNING)
+        self.assertEqual(self.store.get_latest_completed_run(job.id), completed)
+        self.assertIsNone(self.store.get_latest_completed_run(
+            self.store.create_job("Never completed").id
+        ))
+
+    def test_reports_are_terminal_bounded_and_immutable(self):
+        job = self.store.create_job("Duty")
+        run = self.store.create_run(job.id)
+        with self.assertRaisesRegex(ValueError, "non-terminal"):
+            self.store.transition_run(
+                run.id, JobRunStatus.RUNNING, result_report="too early"
+            )
+        self.store.transition_run(run.id, JobRunStatus.RUNNING)
+        failed = self.store.transition_run(
+            run.id, JobRunStatus.FAILED, error_summary="failed",
+            result_report="Useful failure analysis.",
+        )
+        self.assertEqual(failed.result_report, "Useful failure analysis.")
+        with self.assertRaises(InvalidJobRunTransitionError):
+            self.store.transition_run(
+                run.id, JobRunStatus.FAILED, result_report="replacement"
+            )
+        run = self.store.create_run(job.id)
+        self.store.transition_run(run.id, JobRunStatus.RUNNING)
+        with self.assertRaisesRegex(ValueError, "at most 8000"):
+            self.store.transition_run(
+                run.id, JobRunStatus.COMPLETED,
+                result_report="x" * (MAX_RUN_REPORT_CHARS + 1),
+            )
+
+    def test_version_two_migration_preserves_historical_run_with_null_report(self):
+        self.store.close()
+        self.path.unlink()
+        with sqlite3.connect(self.path) as connection:
+            connection.executescript("""
+                CREATE TABLE jobs (
+                    id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+                    enabled INTEGER NOT NULL, target_kind TEXT, target_identifier TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE job_runs (
+                    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id),
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT,
+                    finished_at TEXT, outcome_summary TEXT, error_summary TEXT);
+                CREATE INDEX idx_job_runs_job ON job_runs(job_id, id);
+                CREATE TABLE job_schedules (
+                    job_id INTEGER PRIMARY KEY REFERENCES jobs(id), enabled INTEGER NOT NULL,
+                    local_time TEXT NOT NULL, timezone TEXT NOT NULL,
+                    last_started_local_date TEXT);
+                INSERT INTO jobs VALUES(1,'Old job','',1,NULL,NULL,
+                    '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                INSERT INTO job_runs VALUES(1,1,'completed','2026-01-01T00:00:00Z',
+                    '2026-01-01T00:00:01Z','2026-01-01T00:00:02Z','old result',NULL);
+                PRAGMA user_version = 2;
+            """)
+        self.store = SQLiteJobStore(self.path)
+        run = self.store.get_run(1)
+        self.assertIs(run.status, JobRunStatus.COMPLETED)
+        self.assertEqual(run.outcome_summary, "old result")
+        self.assertIsNone(run.result_report)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_unsupported_schema_fails_closed(self):
         self.store.close()

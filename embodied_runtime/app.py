@@ -57,6 +57,7 @@ from embodied_runtime.jobs import (
     Job, JobContinuation, JobContinuationController, JobContinuationReadiness,
     JobContinuationState, JobReadinessEventType, JobWakeEvent,
     MAX_JOB_CONTINUATION_DELAY_SECONDS,
+    MAX_RUN_REPORT_CHARS,
     MIN_JOB_CONTINUATION_DELAY_SECONDS,
     JobRun, JobRunStatus, JobStore, JobWorkDisposition, JobWorkOutcome,
     JOB_PROGRESS_BASES, JobProgress, JobProgressUpdate, validate_counter_name,
@@ -310,6 +311,8 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
             },
             "summary": {"type": "string", "minLength": 1,
                         "maxLength": MAX_RUN_SUMMARY_CHARS},
+            "report": {"type": ["string", "null"], "minLength": 1,
+                       "maxLength": MAX_RUN_REPORT_CHARS},
             "readiness": {"type": ["string", "null"], "enum": [
                 "ready", "after_delay", "wait_for_operator", "wait_for_event", None,
             ]},
@@ -332,7 +335,7 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
                 ]
             },
         },
-        "required": ["disposition", "summary", "readiness", "delay_seconds",
+        "required": ["disposition", "summary", "report", "readiness", "delay_seconds",
                      "event_type", "progress_update"],
         "additionalProperties": False,
     },
@@ -615,8 +618,12 @@ JOB_OUTCOME_EVALUATION_REQUEST = (
     "excluded from this evidence bundle; neither can independently justify a terminal "
     "outcome. A continue outcome may propose at most one progress_update, naming a "
     "counter and one advertised current-episode evidence basis; the runtime alone "
-    "increments it by one. Terminal outcomes require null progress_update. Insufficient "
-    "information or one rejected optional capability "
+    "increments it by one. Terminal outcomes require null progress_update. "
+    "Use summary for the concise terminal description. For a terminal outcome, report "
+    "may contain optional bounded detailed findings or work product; use null when no "
+    "richer result is useful. Continue requires null report. A report records cognition's "
+    "work and is not runtime evidence or authority. Insufficient information or one "
+    "rejected optional capability "
     "normally means continue. Do not infer an outcome from prose and do not request work."
 )
 
@@ -1115,6 +1122,7 @@ class RobotApplication:
 
     def finish_job_run(
         self, status: JobRunStatus, summary: str | None = None,
+        *, result_report: str | None = None,
     ) -> CurrentJobRun:
         """Terminalize the bound Task, then persist the matching JobRun result."""
         if self.state is not LifecycleState.RUNNING:
@@ -1134,6 +1142,16 @@ class RobotApplication:
             if len(summary) > MAX_RUN_SUMMARY_CHARS:
                 raise ValueError(
                     f"summary must be at most {MAX_RUN_SUMMARY_CHARS} characters"
+                )
+        if result_report is not None:
+            if not isinstance(result_report, str):
+                raise TypeError("result_report must be a string or None")
+            result_report = result_report.strip()
+            if not result_report:
+                raise ValueError("result_report must not be empty")
+            if len(result_report) > MAX_RUN_REPORT_CHARS:
+                raise ValueError(
+                    f"result_report must be at most {MAX_RUN_REPORT_CHARS} characters"
                 )
         binding = self._current_job_run
         if binding is None:
@@ -1162,13 +1180,16 @@ class RobotApplication:
             if status is JobRunStatus.FAILED
             else {"outcome_summary": summary}
         )
-        run = self.jobs.transition_run(binding.run.id, status, **kwargs)
+        run = self.jobs.transition_run(
+            binding.run.id, status, result_report=result_report, **kwargs
+        )
         finished = CurrentJobRun(binding.job, run, task)
         self._current_job_run = None
         self._job_progress = None
         LOGGER.info(
-            "[JOBS] job=JOB%s run=RUN%s task=%s status=%s",
+            "[JOBS] job=JOB%s run=RUN%s task=%s status=%s result=persisted report_chars=%s",
             binding.job.id, run.id, task.id, status.value,
+            len(result_report) if result_report is not None else 0,
         )
         counter = {JobRunStatus.COMPLETED: "job_runs_completed",
                    JobRunStatus.FAILED: "job_runs_failed",
@@ -1272,7 +1293,7 @@ class RobotApplication:
                 stimulus, episode, evaluate_goal_outcome=False, job_work=True,
                 previous_work_summary=continuity,
             )
-            disposition, summary, readiness, delay_seconds, event_type, progress_update = await self._request_job_outcome(
+            disposition, summary, report, readiness, delay_seconds, event_type, progress_update = await self._request_job_outcome(
                 binding, task_binding, goal, episode, stimulus, initiative,
                 wake_event=wake_event,
             )
@@ -1304,7 +1325,7 @@ class RobotApplication:
                 binding.job.id, binding.run.id, binding.task.id, episode.id,
                 disposition, summary, initiative.response,
                 initiative.action, initiative.action_status, readiness, delay_seconds,
-                event_type, progress_update,
+                event_type, progress_update, report,
             )
         except asyncio.CancelledError:
             reason = "cancelled"
@@ -1628,12 +1649,13 @@ class RobotApplication:
         goal: ActiveGoal, episode: AttentionEpisode, stimulus: AttentionStimulus,
         initiative: InitiativeOutcome,
         *, wake_event: JobWakeEvent | None = None,
-    ) -> tuple[JobWorkDisposition, str | None, JobContinuationReadiness | None,
+    ) -> tuple[JobWorkDisposition, str | None, str | None, JobContinuationReadiness | None,
                int | None, JobReadinessEventType | None, JobProgressUpdate | None]:
         backend = self._cognition_backend
         assert backend is not None
         proposed_disposition: JobWorkDisposition | None = None
         proposed_summary: str | None = None
+        proposed_report: str | None = None
         proposed_readiness: JobContinuationReadiness | None = None
         proposed_delay_seconds: int | None = None
         proposed_event_type: JobReadinessEventType | None = None
@@ -1667,7 +1689,7 @@ class RobotApplication:
             return lines
 
         async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
-            nonlocal consumed, proposed_disposition, proposed_summary
+            nonlocal consumed, proposed_disposition, proposed_summary, proposed_report
             nonlocal proposed_readiness, proposed_delay_seconds
             nonlocal proposed_event_type
             nonlocal proposed_progress_update
@@ -1681,7 +1703,7 @@ class RobotApplication:
                 # event_type is schema-required. Accept its omission from older
                 # provider/test clients as the equivalent null for non-event modes.
                 arguments = json.loads(call.arguments)
-                required = {"disposition", "summary", "readiness", "delay_seconds"}
+                required = {"disposition", "summary", "report", "readiness", "delay_seconds"}
                 optional = {"event_type", "progress_update"}
                 if (not isinstance(arguments, dict)
                         or not required <= set(arguments)
@@ -1699,6 +1721,8 @@ class RobotApplication:
                     else JobContinuationReadiness(readiness_value)
                 )
                 if disposition is JobWorkDisposition.CONTINUE:
+                    if arguments["report"] is not None:
+                        raise ValueError("continue requires null report")
                     if readiness is None:
                         raise ValueError("continue requires readiness")
                     if readiness is JobContinuationReadiness.AFTER_DELAY:
@@ -1727,9 +1751,18 @@ class RobotApplication:
                 value = value.strip()
                 if len(value) > MAX_RUN_SUMMARY_CHARS:
                     raise ValueError(f"summary must be at most {MAX_RUN_SUMMARY_CHARS} characters")
+                report = arguments["report"]
+                if report is not None:
+                    if not isinstance(report, str) or not report.strip():
+                        raise ValueError("report must be a non-empty string or null")
+                    report = report.strip()
+                    if len(report) > MAX_RUN_REPORT_CHARS:
+                        raise ValueError(
+                            f"report must be at most {MAX_RUN_REPORT_CHARS} characters"
+                        )
                 if not self._job_work_binding_matches(binding, task_binding, goal):
                     raise RuntimeError("exact Job work binding is no longer current")
-                proposed_disposition, proposed_summary = disposition, value
+                proposed_disposition, proposed_summary, proposed_report = disposition, value, report
                 proposed_readiness, proposed_delay_seconds = readiness, delay_seconds
                 proposed_event_type = event_type
                 proposed_progress_update = progress_update
@@ -1755,26 +1788,28 @@ class RobotApplication:
             refreshed_instructions=lambda: instructions,
         )
         if proposed_disposition is None:
-            return JobWorkDisposition.CONTINUE, None, None, None, None, None
+            return JobWorkDisposition.CONTINUE, None, None, None, None, None, None
         assert proposed_summary is not None
         if proposed_disposition in (
             JobWorkDisposition.COMPLETED, JobWorkDisposition.FAILED,
         ):
             if not self._job_work_binding_matches(binding, task_binding, goal):
-                return JobWorkDisposition.CONTINUE, None, None, None, None, None
+                return JobWorkDisposition.CONTINUE, None, None, None, None, None, None
             terminal = (
                 JobRunStatus.COMPLETED
                 if proposed_disposition is JobWorkDisposition.COMPLETED
                 else JobRunStatus.FAILED
             )
-            self.finish_job_run(terminal, proposed_summary)
+            self.finish_job_run(
+                terminal, proposed_summary, result_report=proposed_report
+            )
         elif proposed_progress_update is not None:
             if not self._job_work_binding_matches(binding, task_binding, goal):
                 self._clear_stale_job_progress(binding)
-                return JobWorkDisposition.CONTINUE, None, None, None, None, None
+                return JobWorkDisposition.CONTINUE, None, None, None, None, None, None
             progress = self.job_progress
             if progress is None:
-                return JobWorkDisposition.CONTINUE, None, None, None, None, None
+                return JobWorkDisposition.CONTINUE, None, None, None, None, None, None
             updated = progress.increment(proposed_progress_update)
             self._job_progress = updated
             value = next(counter.value for counter in updated.counters
@@ -1784,7 +1819,7 @@ class RobotApplication:
                 binding.job.id, binding.run.id, proposed_progress_update.counter,
                 value, proposed_progress_update.basis,
             )
-        return (proposed_disposition, proposed_summary, proposed_readiness,
+        return (proposed_disposition, proposed_summary, proposed_report, proposed_readiness,
                 proposed_delay_seconds, proposed_event_type, proposed_progress_update)
 
     @staticmethod

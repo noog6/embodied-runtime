@@ -59,6 +59,7 @@ def proposal(*, progress=None, disposition="continue", readiness="wait_for_event
     return {
         "disposition": disposition,
         "summary": "bounded result",
+        "report": None,
         "readiness": readiness if disposition == "continue" else None,
         "delay_seconds": None,
         "event_type": (

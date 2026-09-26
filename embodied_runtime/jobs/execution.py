@@ -31,3 +31,4 @@ class JobWorkOutcome:
     delay_seconds: int | None = None
     event_type: JobReadinessEventType | None = None
     progress_update: JobProgressUpdate | None = None
+    report: str | None = None
