@@ -236,3 +236,16 @@ occurred: switching between console and voice neither clears nor forks history.
 Working-memory turns are not channel-tagged. A bounded voice-session boundary is
 therefore not a general conversation boundary. Persistent conversation identity,
 conversation IDs, and thread IDs remain deferred.
+
+## Remote SMS transport
+
+SMS is a provider transport mapped to `remote_text`; it is not a new cognition
+authority. The configured `InteractionEnvironment` remains independent of SMS
+availability, so `environment=workstation` with `channel=remote_text` is expected.
+A valid Twilio webhook signature authenticates the provider request, not the human
+sender. P1 maps exactly one configured number to operator authority and ignores
+all other senders before cognition.
+
+SMS dialogue replies directly answer the inbound interaction. SMS is not an
+autonomous notification, `address_operator`, `deliver_message`, or `deliver_report`
+route.

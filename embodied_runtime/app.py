@@ -923,6 +923,7 @@ class RobotApplication:
         resource_arbiter: ResourceArbiter | None = None,
         observability: RunObservability | None = None,
         interaction_environment: InteractionEnvironment = InteractionEnvironment.WORKSTATION,
+        sms_service: object | None = None,
     ) -> None:
         self.profile = profile
         self.observability = observability or RunObservability()
@@ -932,6 +933,7 @@ class RobotApplication:
         if not isinstance(interaction_environment, InteractionEnvironment):
             raise TypeError("interaction_environment must be an InteractionEnvironment")
         self._interaction_environment = interaction_environment
+        self._sms_service = sms_service
         self._timezone_name = timezone_name
         self._timezone = ZoneInfo(timezone_name)
         self._wall_clock = wall_clock
@@ -2538,6 +2540,8 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.RUNNING)
         try:
             await self.attention.start(self.events)
+            if self._sms_service is not None:
+                await self._sms_service.start()
         except BaseException:
             await self.stop()
             raise
@@ -2569,6 +2573,11 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.STOPPING)
         LOGGER.info("[APP] stopping")
         failure: BaseException | None = None
+        if self._sms_service is not None:
+            try:
+                await self._sms_service.stop()
+            except BaseException as error:
+                failure = error
         if self._scheduled_job_controller is not None:
             try:
                 await self._scheduled_job_controller.stop()
@@ -5391,6 +5400,8 @@ class RobotApplication:
                         "timezone": self.timezone_name,
                         "mode": self.options.runtime_mode},
             "interaction": {"environment": self.interaction_environment.value},
+            "sms": (self._sms_service.diagnostics if self._sms_service is not None
+                    else {"enabled": False}),
             "initiative": {
                 "enabled": self.options.initiative_enabled,
                 "platform_attention_enabled": self.options.initiative_platform_attention_enabled,

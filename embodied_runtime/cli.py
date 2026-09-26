@@ -34,6 +34,7 @@ from embodied_runtime.run_history import (
     DEFAULT_HISTORY_ROOT, RunHistory, RunHistoryEvidenceReader, RunHistorySetupError,
     start_run,
 )
+from embodied_runtime.sms import TwilioSmsService, TwilioSmsSettings
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.pricing import BUILT_IN_PRICING
 from embodied_runtime.memory import SQLiteMemoryStore
@@ -141,6 +142,10 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     parser.add_argument(
         "--voice", action="store_true", default=configurable_default(False),
         help="enable bounded Fusion HAT voice interaction",
+    )
+    parser.add_argument(
+        "--sms", action="store_true", default=configurable_default(False),
+        help="enable the configured inbound Twilio SMS transport",
     )
     parser.add_argument("--tts", choices=("espeak", "piper", "openai", "elevenlabs"),
                         default=configurable_default("espeak"))
@@ -259,6 +264,11 @@ def parse_launch_arguments(
     args.jobs_heartbeat_seconds = effective.jobs_heartbeat_seconds
     args.jobs_max_auto_steps = effective.jobs_max_auto_steps
     args.jobs_scheduler_poll_seconds = effective.jobs_scheduler_poll_seconds
+    args.sms_enabled = effective.sms_enabled
+    args.sms_backend = effective.sms_backend
+    args.sms_bind_host = effective.sms_bind_host
+    args.sms_bind_port = effective.sms_bind_port
+    args.sms_webhook_path = effective.sms_webhook_path
     return parser, args, effective
 
 
@@ -466,6 +476,19 @@ async def _run_application(
     camera = build_camera_backend(args)
     cognition = build_cognition_backend(args)
     vision = build_visual_perception_backend(args)
+    application: RobotApplication | None = None
+    sms_service = None
+    if args.sms_enabled:
+        settings = TwilioSmsSettings.from_environment(
+            bind_host=args.sms_bind_host, bind_port=args.sms_bind_port,
+            webhook_path=args.sms_webhook_path,
+        )
+
+        async def request_sms_cognition(message: str, **kwargs: object) -> str:
+            assert application is not None
+            return await application.request_cognition(message, **kwargs)
+
+        sms_service = TwilioSmsService(settings, request_sms_cognition)
     message_channel = ConsoleOperatorMessageChannel() if args.console else None
     delivery_routes = OperatorDeliveryRouteCatalog((OperatorDeliveryRoute(
         OperatorDeliveryDestination(
@@ -523,6 +546,7 @@ async def _run_application(
         run_history_evidence=history_evidence,
         observability=observability,
         interaction_environment=InteractionEnvironment(args.interaction_environment),
+        sms_service=sms_service,
     )
     if args.diagnostics:
         try:

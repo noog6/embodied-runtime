@@ -582,7 +582,7 @@ class RouteReplacementBackend(TextCognitionBackend):
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, backend=None, sink=None, *, actions=False, messages=True,
                  body=None, interaction_environment=InteractionEnvironment.WORKSTATION,
-                 delivery_routes=None):
+                 delivery_routes=None, sms_service=None):
         return RobotApplication(
             RobotProfile("test", "Test Robot"), VirtualHardwareBackend(),
             ApplicationOptions(
@@ -593,6 +593,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             cognition_backend=backend, operator_message_sink=sink,
             operator_delivery_routes=delivery_routes,
             interaction_environment=interaction_environment,
+            sms_service=sms_service,
         )
 
     async def operator_projection(self, interaction, *, environment):
@@ -662,6 +663,59 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
              if name in {"deliver_message", "deliver_report"}],
             [["console"], ["console"]],
         )
+
+    async def test_sms_transport_ownership_does_not_expand_operator_authority(self):
+        class OwnedSmsService:
+            diagnostics = {"enabled": True}
+
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+        routes = OperatorDeliveryRouteCatalog()
+        without_sms = self.make_app(ScriptedBackend(), delivery_routes=routes)
+        with_sms = self.make_app(
+            ScriptedBackend(), delivery_routes=routes, sms_service=OwnedSmsService()
+        )
+        self.assertEqual(with_sms.interaction_environment,
+                         InteractionEnvironment.WORKSTATION)
+        self.assertEqual(without_sms.interaction_environment,
+                         InteractionEnvironment.WORKSTATION)
+        for acquisitions_used in (0, 2):
+            baseline = without_sms._operator_episode_tools(acquisitions_used, ())
+            projected = with_sms._operator_episode_tools(acquisitions_used, ())
+            self.assertEqual(projected, baseline)
+            names = {tool.name for tool in projected}
+            self.assertNotIn("deliver_message", names)
+            self.assertNotIn("deliver_report", names)
+        self.assertIsNone(resolve_notification_route(InteractionChannel.REMOTE_TEXT))
+        self.assertEqual(with_sms._operator_delivery_routes.destinations, ())
+
+    async def test_application_owns_sms_lifecycle_inside_runtime_boundaries(self):
+        class RecordingSmsService:
+            diagnostics = {"enabled": True}
+
+            def __init__(self):
+                self.app = None
+                self.transitions = []
+
+            async def start(self):
+                self.transitions.append(("start", self.app.state))
+
+            async def stop(self):
+                self.transitions.append(("stop", self.app.state))
+
+        service = RecordingSmsService()
+        app = self.make_app(ScriptedBackend(), sms_service=service)
+        service.app = app
+        await app.start()
+        await app.stop()
+        self.assertEqual(service.transitions, [
+            ("start", LifecycleState.RUNNING),
+            ("stop", LifecycleState.STOPPING),
+        ])
 
     async def test_projection_schema_and_physical_independence(self):
         class PhysicalBody(VirtualBodyBackend):

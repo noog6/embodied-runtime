@@ -224,3 +224,12 @@ paths resolve from the TOML file's directory. The continuation settings only
 govern another bounded turn for an explicitly started current JobRun; they do
 not schedule or recover Jobs. Persistent memory need not be enabled. See
 [`jobs.md`](jobs.md) for catalog, assignment, and lifecycle semantics.
+
+## SMS transport
+
+The strict optional `[sms]` table accepts `enabled`, `backend` (`twilio` only),
+`bind_host`, `bind_port`, and an absolute `webhook_path`. Defaults are disabled,
+`127.0.0.1:8080`, and `/sms`. `--sms` explicitly opts in without changing the
+checked-in configuration. Provider identifiers, telephone numbers, credentials,
+and the public URL are environment settings, never TOML or CLI values. See
+[`sms.md`](sms.md).

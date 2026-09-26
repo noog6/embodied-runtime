@@ -180,3 +180,39 @@ continue treating `OPENAI_API_KEY` as its stable public configuration interface
 unless a concrete requirement later justifies an API-key-file interface. The
 storage and controlled delivery mechanism can improve independently of that
 application-facing interface.
+
+## Twilio SMS
+
+SMS uses the same operator-owned, sourced-file pattern; the runtime does not load
+`.env` files. Create `~/.config/embodied-runtime/twilio.env` containing placeholders
+replaced only on the target host:
+
+```sh
+export TWILIO_ACCOUNT_SID='AC...'
+export TWILIO_AUTH_TOKEN='...'
+export TWILIO_PHONE_NUMBER='+1...'
+export MIRA_SMS_OPERATOR_NUMBER='+1...'
+export TWILIO_WEBHOOK_URL='https://example.ngrok-free.app/sms'
+```
+
+```sh
+mkdir -p ~/.config/embodied-runtime
+chmod 700 ~/.config/embodied-runtime
+vi ~/.config/embodied-runtime/twilio.env
+chmod 600 ~/.config/embodied-runtime/twilio.env
+source ~/.config/embodied-runtime/twilio.env
+```
+
+Verify presence without printing values:
+
+```sh
+for name in TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_PHONE_NUMBER \
+    MIRA_SMS_OPERATOR_NUMBER TWILIO_WEBHOOK_URL
+do
+    if printenv "$name" >/dev/null; then
+        echo "$name is set"
+    else
+        echo "$name is not set"
+    fi
+done
+```

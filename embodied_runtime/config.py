@@ -70,6 +70,15 @@ class InteractionFileConfig:
 
 
 @dataclass(frozen=True)
+class SmsFileConfig:
+    enabled: bool = False
+    backend: str = "twilio"
+    bind_host: str = "127.0.0.1"
+    bind_port: int = 8080
+    webhook_path: str = "/sms"
+
+
+@dataclass(frozen=True)
 class RuntimeFileConfiguration:
     runtime: RuntimeFileConfig = RuntimeFileConfig()
     initiative: InitiativeFileConfig = InitiativeFileConfig()
@@ -77,6 +86,7 @@ class RuntimeFileConfiguration:
     memory: MemoryFileConfig = MemoryFileConfig()
     jobs: JobsFileConfig = JobsFileConfig()
     interaction: InteractionFileConfig = InteractionFileConfig()
+    sms: SmsFileConfig = SmsFileConfig()
 
 
 @dataclass(frozen=True)
@@ -117,6 +127,11 @@ class LaunchConfiguration:
     jobs_heartbeat_seconds: float
     jobs_max_auto_steps: int
     jobs_scheduler_poll_seconds: float
+    sms_enabled: bool
+    sms_backend: str
+    sms_bind_host: str
+    sms_bind_port: int
+    sms_webhook_path: str
 
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
@@ -137,6 +152,8 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     jobs_enabled=False, jobs_database_path=None, jobs_auto_continue=False,
     jobs_heartbeat_seconds=30.0, jobs_max_auto_steps=3,
     jobs_scheduler_poll_seconds=30.0,
+    sms_enabled=False, sms_backend="twilio", sms_bind_host="127.0.0.1",
+    sms_bind_port=8080, sms_webhook_path="/sms",
 )
 
 _RUNTIME_KEYS = {
@@ -159,6 +176,7 @@ _JOBS_KEYS = {
     "scheduler_poll_seconds",
 }
 _INTERACTION_KEYS = {"environment"}
+_SMS_KEYS = {"enabled", "backend", "bind_host", "bind_port", "webhook_path"}
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
     "runtime.camera": {"none", "picamera2"},
@@ -183,19 +201,36 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "initiative", "voice", "memory", "jobs", "interaction"})
+    _reject_unknown(data, {"runtime", "initiative", "voice", "memory", "jobs", "interaction", "sms"})
     runtime = _table(data, "runtime")
     initiative = _table(data, "initiative")
     voice = _table(data, "voice")
     memory = _table(data, "memory")
     jobs = _table(data, "jobs")
     interaction = _table(data, "interaction")
+    sms = _table(data, "sms")
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
     _reject_unknown(memory, _MEMORY_KEYS, "memory")
     _reject_unknown(jobs, _JOBS_KEYS, "jobs")
     _reject_unknown(interaction, _INTERACTION_KEYS, "interaction")
+    _reject_unknown(sms, _SMS_KEYS, "sms")
+
+    if "enabled" in sms and not isinstance(sms["enabled"], bool):
+        raise ConfigurationError("sms.enabled must be boolean")
+    backend = sms.get("backend", "twilio")
+    if backend != "twilio":
+        raise ConfigurationError("sms.backend must be 'twilio'")
+    bind_host = sms.get("bind_host", "127.0.0.1")
+    if not isinstance(bind_host, str) or not bind_host.strip():
+        raise ConfigurationError("sms.bind_host must be a non-empty string")
+    bind_port = sms.get("bind_port", 8080)
+    if isinstance(bind_port, bool) or not isinstance(bind_port, int) or not 1 <= bind_port <= 65535:
+        raise ConfigurationError("sms.bind_port must be an integer from 1 to 65535")
+    webhook_path = sms.get("webhook_path", "/sms")
+    if not isinstance(webhook_path, str) or not webhook_path.startswith("/"):
+        raise ConfigurationError("sms.webhook_path must begin with /")
 
     if "environment" in interaction:
         value = interaction["environment"]
@@ -334,6 +369,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
             float(scheduler_poll_seconds),
         ),
         InteractionFileConfig(**interaction),
+        SmsFileConfig(sms.get("enabled", False), backend, bind_host, bind_port, webhook_path),
     )
 
 
@@ -348,6 +384,7 @@ def resolve_launch_configuration(
     memory = file_config.memory
     jobs = file_config.jobs
     interaction = file_config.interaction
+    sms = file_config.sms
 
     def scalar(name: str, configured: object, historical: object) -> object:
         explicit = getattr(cli_values, name, None)
@@ -419,6 +456,11 @@ def resolve_launch_configuration(
         jobs_heartbeat_seconds=jobs.heartbeat_seconds,
         jobs_max_auto_steps=jobs.max_auto_steps,
         jobs_scheduler_poll_seconds=jobs.scheduler_poll_seconds,
+        sms_enabled=opt_in("sms", sms.enabled, False),
+        sms_backend=sms.backend,
+        sms_bind_host=sms.bind_host,
+        sms_bind_port=sms.bind_port,
+        sms_webhook_path=sms.webhook_path,
     )
 
 
