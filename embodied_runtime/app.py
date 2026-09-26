@@ -2690,6 +2690,7 @@ class RobotApplication:
                         if acquisition_key in acquisition_requests:
                             # Re-present already accumulated evidence without
                             # repeating I/O or consuming another acquisition.
+                            acquired = True
                             result = acquisition_requests[acquisition_key]
                             return result
                         elif call.name == INSPECT_SELF_TOOL.name:

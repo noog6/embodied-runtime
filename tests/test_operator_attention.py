@@ -646,7 +646,9 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.request_cognition("inspect once")
         self.assertNotIn("R37", backend.requests[0][1])
         self.assertEqual(history.calls, [("overview", "current", None)])
-        self.assertEqual(len(backend.requests), 2)
+        self.assertEqual(len(backend.requests), 3)
+        self.assertIn("acquisitions_used: 1", backend.requests[2][1])
+        self.assertIn("acquisitions_remaining: 1", backend.requests[2][1])
         await app.stop()
 
     async def test_equivalent_history_acquisition_is_cached_by_normalized_request(self):
@@ -659,7 +661,9 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         await app.request_cognition("inspect once")
         self.assertEqual(history.calls, [("overview", "R2", None)])
-        self.assertEqual(len(backend.requests), 2)
+        self.assertEqual(len(backend.requests), 3)
+        self.assertIn("acquisitions_used: 1", backend.requests[2][1])
+        self.assertIn("acquisitions_remaining: 1", backend.requests[2][1])
         await app.stop()
 
     def test_history_grounding_separates_record_evidence_from_memory(self):

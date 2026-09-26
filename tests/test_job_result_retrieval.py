@@ -191,8 +191,10 @@ class JobResultRetrievalTests(unittest.IsolatedAsyncioTestCase):
         app2 = self.app(repeated)
         await app2.start()
         await app2.request_cognition("Repeat it")
-        self.assertEqual(len(repeated.requests), 2)
+        self.assertEqual(len(repeated.requests), 3)
         self.assertEqual(repeated.results[0], repeated.results[1])
+        self.assertIn("acquisitions_used: 1", repeated.requests[2][0])
+        self.assertIn("acquisitions_remaining: 1", repeated.requests[2][0])
 
     async def test_restart_operator_episode_reads_reopened_durable_result(self):
         job = self.store.create_job("Nightly Self Log Reviewer")

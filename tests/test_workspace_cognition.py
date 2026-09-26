@@ -399,7 +399,83 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
         await app2.start()
         await app2.request_cognition("Read it twice")
         self.assertEqual(repeated.results[0], repeated.results[1])
-        self.assertEqual(len(repeated.requests), 2)
+        self.assertEqual(len(repeated.requests), 3)
+
+    async def test_duplicate_read_reuse_reaches_bounded_workspace_write(self):
+        job = self.jobs.create_job("Workspace Smoke Test")
+        path = "notes/mira-thoughts.md"
+        self.workspaces.write(job.id, path, "create", "Original thought.")
+        read = {"job": job.name, "path": path}
+        backend = ScriptedBackend([
+            ("workspace_read", read),
+            ("workspace_read", read),
+            ("workspace_write", {
+                "job": job.name,
+                "path": path,
+                "mode": "append",
+                "content": "\nRecovered after duplicate reuse.",
+            }),
+        ])
+        app = self.app(backend)
+        await app.start()
+
+        with patch.object(self.workspaces, "read", wraps=self.workspaces.read) as read_mock, \
+                patch.object(self.workspaces, "write",
+                             wraps=self.workspaces.write) as write_mock:
+            await app.request_cognition(
+                "Read notes/mira-thoughts.md in the Workspace Smoke Test job, "
+                "then append one sentence."
+            )
+
+        self.assertEqual(read_mock.call_count, 1)
+        self.assertEqual(write_mock.call_count, 1)
+        self.assertEqual(len(backend.requests), 3)
+        self.assertEqual(len(backend.results), 3)
+        self.assertEqual(backend.results[0], backend.results[1])
+        self.assertIn("acquisitions_used: 1", backend.requests[2][0])
+        self.assertIn("acquisitions_remaining: 1", backend.requests[2][0])
+        self.assertIn("workspace_read", backend.requests[2][1])
+        self.assertIn("workspace_write", backend.requests[2][1])
+        self.assertEqual(
+            [outcome.name for outcome in app.working_memory.snapshot()[0].tool_outcomes],
+            ["workspace_read", "workspace_write"],
+        )
+        self.assertEqual(
+            self.workspaces.read(job.id, path).content,
+            "Original thought.\nRecovered after duplicate reuse.",
+        )
+        self.assertEqual(app.episode_coordinator.last.completion_reason, "handled")
+
+    async def test_duplicate_reuse_cannot_extend_three_stage_grammar(self):
+        job = self.jobs.create_job("Workspace Smoke Test")
+        path = "notes/mira-thoughts.md"
+        self.workspaces.write(job.id, path, "create", "Original thought.")
+        read = {"job": job.name, "path": path}
+        backend = ScriptedBackend([
+            ("workspace_read", read),
+            ("workspace_read", read),
+            ("workspace_read", read),
+            ("workspace_write", {
+                "job": job.name, "path": path, "mode": "append",
+                "content": "must not be written",
+            }),
+        ])
+        app = self.app(backend)
+        await app.start()
+
+        with patch.object(self.workspaces, "read", wraps=self.workspaces.read) as read_mock, \
+                patch.object(self.workspaces, "write",
+                             wraps=self.workspaces.write) as write_mock:
+            await app.request_cognition("Keep reading, then write")
+
+        self.assertEqual(len(backend.requests), 3)
+        self.assertEqual(read_mock.call_count, 1)
+        self.assertEqual(write_mock.call_count, 0)
+        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(
+            [outcome.name for outcome in app.working_memory.snapshot()[0].tool_outcomes],
+            ["workspace_read"],
+        )
 
     async def test_restart_reads_reopened_workspace_without_a_run(self):
         job = self.jobs.create_job("Workspace Smoke Test")
