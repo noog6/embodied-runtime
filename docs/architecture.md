@@ -33,6 +33,22 @@ The runtime should keep these concerns distinct:
 - **Behaviour:** actions, coordination, and task-level control.
 - **Cognition:** decision-making, memory, and higher-level reasoning.
 
+### Job-owned Workspace authority
+
+Job Workspace access has two deliberately separate authority modes. Operator
+dialogue selects an exact Job and requires explicit authorization for mutation.
+Bounded Job work exposes contextual list/read/write schemas with no owner
+selector; the harness derives the owner from, and revalidates, the exact current
+Job/JobRun/Task/ActiveGoal binding before each operation. General autonomy gains
+no Workspace capability.
+
+Job Workspace reads are deliberately requested working context, not semantic
+continuity, persistent memory, runtime/sensor evidence, or Job progress
+evidence. Successful writes establish that an artifact mutation occurred, not
+that its authored claims are true. Workspace artifacts and immutable terminal
+JobRun results remain independently durable. Durability certifies neither truth
+nor freshness.
+
 ## Runtime sessions and tasks
 
 A runtime session is one invocation of `embodied-runtime`. Its application
