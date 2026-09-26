@@ -303,6 +303,23 @@ class CliTests(unittest.TestCase):
             "[PROCESS] asyncio_cleanup status=completed"
         ), rendered.index("[PROCESS] main status=returning exit_code=0"))
 
+    def test_normal_startup_observability_uses_built_in_pricing(self) -> None:
+        async def account_usage(*args: object) -> int:
+            observability = args[4]
+            observability.provider_completed(
+                "openai-responses", "gpt-5.6-luna", "initial",
+                input_tokens=1_000, output_tokens=1_000,
+            )
+            self.assertEqual(
+                observability.snapshot()["cost"]["estimated_usd"], "0.001400"
+            )
+            return 0
+
+        with patch(
+            "embodied_runtime.cli._run_application", side_effect=account_usage
+        ):
+            self.assertEqual(main(["--diagnostics"]), 0)
+
     def test_runner_cleanup_is_timed_and_invoked_once(self) -> None:
         events: list[str] = []
 
