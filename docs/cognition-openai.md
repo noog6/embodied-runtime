@@ -240,3 +240,18 @@ original acquisition ordinals from progress bases. An applied write consumes an
 ordinary semantic effect and can evidence that mutation, but never the truth of
 the authored claims. The same path serves manual, scheduled, and automatic
 continuation episodes without preloading Workspace content.
+
+Job-work action selection and outcome evaluation also receive only the current
+exact-bound `JobProgress` snapshot, not earlier raw tool results or a transcript.
+That runtime-owned snapshot may establish in a later episode that a named
+bounded step was already earned, so cognition need not repeat a non-idempotent
+effect solely to obtain fresh evidence. It remains distinct from model-authored
+semantic continuity and from current-world evidence. Counter meaning must still
+be evaluated against the Job and TaskGoal; arbitrary or unrelated progress is
+not completion authority. New progress increments continue to require an
+advertised, accepted current-episode wake, acquisition, or effect basis.
+
+`JobProgress` does not reproduce the original evidence payload, make Workspace
+prose authoritative, turn a rejected duplicate write into success, become
+persistent memory, or survive restart. Its exact Job/JobRun/Task binding is
+fail-closed and terminalization clears it.

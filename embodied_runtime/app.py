@@ -723,8 +723,16 @@ OUTCOME_EVALUATION_REQUEST = (
     "reinterpret, or cancel goals. Do not request another body action."
 )
 JOB_OUTCOME_EVALUATION_REQUEST = (
-    "Evaluate this exact Job occurrence once using only the authoritative Job, Task, "
-    "acquisition, and effect evidence in the instructions. Request report_job_outcome "
+    "Evaluate this exact Job occurrence once using the authoritative Job, Task and "
+    "TaskGoal, committed exact-occurrence JobProgress, current accepted acquisition "
+    "and effect evidence, and current wake evidence when supplied in the instructions. "
+    "Previously committed JobProgress belongs to this exact JobRun and Task and may "
+    "establish that a named, already-earned bounded step occurred in an earlier episode "
+    "of this occurrence. It is cross-episode occurrence progress, not current-episode "
+    "evidence. Evaluate each counter's meaning and value against the assignment, "
+    "TaskGoal, and other current evidence; arbitrary or unrelated progress is not "
+    "sufficient for completion. A rejected current effect does not erase committed "
+    "progress, but is not itself success evidence. Request report_job_outcome "
     "with completed only when the TaskGoal is established, failed only when current "
     "authoritative evidence establishes the occurrence cannot reasonably proceed, and "
     "continue otherwise. For continue, report readiness: ready when useful work can "
@@ -741,7 +749,8 @@ JOB_OUTCOME_EVALUATION_REQUEST = (
     "authoritative evidence, and any previous-work continuity context is deliberately "
     "excluded from this evidence bundle; neither can independently justify a terminal "
     "outcome. A continue outcome may propose at most one progress_update, naming a "
-    "counter and one advertised current-episode evidence basis; the runtime alone "
+    "counter and one advertised current-episode evidence basis; committed JobProgress "
+    "is not a basis for a new update, and the runtime alone "
     "increments it by one. Terminal outcomes require null progress_update. "
     "Use summary for the concise terminal description. For a terminal outcome, report "
     "may contain optional bounded detailed findings or work product; use null when no "
@@ -3409,14 +3418,20 @@ class RobotApplication:
         expected_goal: ActiveGoal, working_memory,
         tools: tuple[CognitionToolDefinition, ...] = (),
         notification_interaction: InteractionContext | None = None,
+        *, job_work: bool = False,
     ) -> str:
+        progress = self.job_progress
+        progress_section = (
+            (progress.render(),) if job_work and progress is not None else ()
+        )
         return "\n\n".join((
             compose_cognition_instructions(
                 self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt, working_memory,
                 expected_goal if self._active_goal is expected_goal else None,
             ), *self._notification_sections(tools, notification_interaction),
-            episode.render(), stimulus.render(actions_enabled=None), followup.render(),
+            episode.render(), stimulus.render(actions_enabled=None), *progress_section,
+            followup.render(),
         ))
 
     @staticmethod
@@ -3548,11 +3563,11 @@ class RobotApplication:
                 ACQUISITION_FOLLOWUP_REQUEST,
                 instructions=self._acquisition_followup_instructions(
                     followup, stimulus, episode, expected_goal, prior_memory,
-                    tools, notification_interaction,
+                    tools, notification_interaction, job_work=job_work,
                 ), tools=tools, tool_executor=execute_tool if tools else None,
                 refreshed_instructions=lambda: self._acquisition_followup_instructions(
                     followup, stimulus, episode, expected_goal, prior_memory,
-                    tools, notification_interaction,
+                    tools, notification_interaction, job_work=job_work,
                 ),
             )
         except asyncio.CancelledError:
@@ -3647,11 +3662,11 @@ class RobotApplication:
                 ACQUISITION_FOLLOWUP_REQUEST,
                 instructions=self._acquisition_followup_instructions(
                     followup, stimulus, episode, expected_goal, prior_memory,
-                    tools, notification_interaction,
+                    tools, notification_interaction, job_work=job_work,
                 ), tools=tools, tool_executor=execute_tool if tools else None,
                 refreshed_instructions=(lambda: self._acquisition_followup_instructions(
                     followup, stimulus, episode, expected_goal, prior_memory,
-                    tools, notification_interaction,
+                    tools, notification_interaction, job_work=job_work,
                 )) if tools else None,
             )
         except asyncio.CancelledError:
@@ -3682,7 +3697,12 @@ class RobotApplication:
         expected_goal: ActiveGoal, working_memory,
         tools: tuple[CognitionToolDefinition, ...] = (),
         notification_interaction: InteractionContext | None = None,
+        *, job_work: bool = False,
     ) -> str:
+        progress = self.job_progress
+        progress_section = (
+            (progress.render(),) if job_work and progress is not None else ()
+        )
         return "\n\n".join((
             compose_cognition_instructions(
                 self.cognition_context(), self.temporal_context(), self.temporal_situation(),
@@ -3691,7 +3711,7 @@ class RobotApplication:
             ),
             *self._notification_sections(tools, notification_interaction),
             episode.render(), stimulus.render(actions_enabled=None),
-            continuation.render(),
+            *progress_section, continuation.render(),
         ))
 
     async def _request_continuation(
@@ -3776,13 +3796,13 @@ class RobotApplication:
                 CONTINUATION_INITIATIVE_REQUEST,
                 instructions=self._continuation_instructions(
                     continuation, stimulus, episode, expected_goal, prior_memory,
-                    tools, notification_interaction,
+                    tools, notification_interaction, job_work=job_work,
                 ),
                 tools=tools,
                 tool_executor=execute_tool,
                 refreshed_instructions=lambda: self._continuation_instructions(
                     continuation, stimulus, episode, expected_goal, prior_memory,
-                    tools, notification_interaction,
+                    tools, notification_interaction, job_work=job_work,
                 ),
             )
         except asyncio.CancelledError:
