@@ -193,14 +193,13 @@ Provider state and response IDs never cross a temporal wait. An acquisition-info
 request and the optional distinct effect continuation are independent calls with
 different policy gates.
 
-## Job Workspace operator tools
+## Job Workspace tools
 
 Explicit operator dialogue receives `workspace_list` and `workspace_read` when
 both the durable Job catalog and Workspace store are available. They use the
 ordinary two-acquisition episode budget, duplicate reuse, and existing
-post-acquisition choreography. They are intentionally omitted from autonomous
-initiative, automatic continuation, and bounded Job work because authored
-Workspace prose is not authoritative outcome evidence. The tools expose bounded
+post-acquisition choreography. They are intentionally omitted from general
+autonomous initiative and non-Job continuation. The tools expose bounded
 logical paths only, never physical filesystem paths or writes.
 
 Workspace metadata is a current runtime storage observation. Artifact content
@@ -214,8 +213,8 @@ required; mode is exactly `create`, `replace`, or `append`, and content has an
 8,000-character cognition ceiling beneath the storage byte and quota limits.
 It shares the exact Job resolver used by reads.
 
-This effect is absent from acquisitions, diagnostics, initiative effects,
-autonomous continuation, scheduled cognition, and bounded Job work. It may be
+This operator effect is absent from acquisitions, diagnostics, and general
+autonomous initiative or continuation. It may be
 used only when the current operator request explicitly requests or clearly
 authorizes the durable write, never for proactive note-taking. One write ends
 the finite operator episode, even when it follows one or two acquisitions.
@@ -226,3 +225,18 @@ An indeterminate published result means publication may have happened but
 durability was not confirmed; cognition must claim neither durable success nor
 definite failure. Workspace prose remains non-authoritative, and writing it is
 not persistent-memory admission or a JobRun-result mutation.
+
+Bounded Job work reuses the provider-facing semantic names with distinct strict
+schemas: list takes only `directory` and `cursor`, read only `path` and
+`offset_chars`, and write only `path`, `mode`, and `content`. No request exposes
+`job`, `job_id`, name, run, or owner selection. The executable path revalidates
+the captured exact current Job/JobRun/Task/ActiveGoal binding and derives the
+owner from it before delegating to the same Workspace store.
+
+List/read calls consume the ordinary two Job-work acquisition attempts. Outcome
+grounding segregates their runtime-authoritative storage metadata and
+non-authoritative prose from ordinary acquisition evidence, and excludes their
+original acquisition ordinals from progress bases. An applied write consumes an
+ordinary semantic effect and can evidence that mutation, but never the truth of
+the authored claims. The same path serves manual, scheduled, and automatic
+continuation episodes without preloading Workspace content.

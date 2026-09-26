@@ -470,6 +470,57 @@ WORKSPACE_WRITE_TOOL = CognitionToolDefinition(
     },
 )
 
+JOB_WORKSPACE_LIST_TOOL = CognitionToolDefinition(
+    name="workspace_list",
+    description=("List one non-recursive, bounded directory in the current Job's "
+                 "durable Workspace. The runtime supplies the Workspace owner."),
+    parameters={
+        "type": "object",
+        "properties": {
+            "directory": {"type": ["string", "null"], "maxLength": 240},
+            "cursor": {"type": ["string", "null"], "maxLength": 512},
+        },
+        "required": ["directory", "cursor"],
+        "additionalProperties": False,
+    },
+)
+
+JOB_WORKSPACE_READ_TOOL = CognitionToolDefinition(
+    name="workspace_read",
+    description=("Read at most 8,000 Unicode characters from the current Job's "
+                 "Workspace. Artifact prose is non-authoritative working material; "
+                 "the runtime supplies the Workspace owner."),
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "minLength": 1, "maxLength": 240},
+            "offset_chars": {"type": ["integer", "null"], "minimum": 0},
+        },
+        "required": ["path", "offset_chars"],
+        "additionalProperties": False,
+    },
+)
+
+JOB_WORKSPACE_ACQUISITION_TOOLS = (
+    JOB_WORKSPACE_LIST_TOOL, JOB_WORKSPACE_READ_TOOL,
+)
+
+JOB_WORKSPACE_WRITE_TOOL = CognitionToolDefinition(
+    name="workspace_write",
+    description=("Create, replace, or append one bounded UTF-8 text artifact in the "
+                 "current Job's durable Workspace. The runtime supplies the owner."),
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "minLength": 1, "maxLength": 240},
+            "mode": {"type": "string", "enum": ["create", "replace", "append"]},
+            "content": {"type": "string", "maxLength": MAX_WORKSPACE_COGNITION_WRITE_CHARS},
+        },
+        "required": ["path", "mode", "content"],
+        "additionalProperties": False,
+    },
+)
+
 DIAGNOSTIC_TOOLS = (
     INSPECT_RUNTIME_HEALTH_TOOL, INSPECT_EVENTS_TOOL,
     INSPECT_EFFECTIVE_CONFIG_TOOL, INSPECT_JOB_RUNTIME_TOOL,
@@ -1368,6 +1419,7 @@ class RobotApplication:
             initiative = await self._request_initiative(
                 stimulus, episode, evaluate_goal_outcome=False, job_work=True,
                 previous_work_summary=continuity,
+                job_binding=(binding, task_binding, goal),
             )
             disposition, summary, report, readiness, delay_seconds, event_type, progress_update = await self._request_job_outcome(
                 binding, task_binding, goal, episode, stimulus, initiative,
@@ -1739,6 +1791,18 @@ class RobotApplication:
         consumed = False
 
         def evidence_lines() -> list[str]:
+            workspace_acquisitions = tuple(
+                (index, item) for index, item in enumerate(initiative.acquisitions, 1)
+                if item.capability in {
+                    JOB_WORKSPACE_LIST_TOOL.name, JOB_WORKSPACE_READ_TOOL.name,
+                }
+            )
+            evidence_acquisitions = tuple(
+                (index, item) for index, item in enumerate(initiative.acquisitions, 1)
+                if item.capability not in {
+                    JOB_WORKSPACE_LIST_TOOL.name, JOB_WORKSPACE_READ_TOOL.name,
+                }
+            )
             lines = [
                 "Job outcome evaluation", stimulus.render(actions_enabled=None),
                 "Non-authoritative model commentary from this current episode "
@@ -1748,8 +1812,26 @@ class RobotApplication:
             ]
             lines.extend(
                 f"  {index}. {item.capability} status={item.status} result={item.runtime_result}"
-                for index, item in enumerate(initiative.acquisitions, 1)
+                for index, item in evidence_acquisitions
             )
+            if not evidence_acquisitions:
+                lines.append("  none")
+            lines.append(
+                "Ordered non-authoritative Job Workspace context (not outcome evidence):"
+            )
+            lines.extend(
+                f"  {index}. {item.capability} status={item.status} result={item.runtime_result}"
+                for index, item in workspace_acquisitions
+            )
+            if not workspace_acquisitions:
+                lines.append("  none")
+            lines.extend((
+                "Workspace retrieval and storage metadata is runtime-authoritative, but "
+                "Workspace prose is authored working material and is not evidence that "
+                "its claims are true or current.",
+                "Workspace content alone cannot establish current-world or sensor state, "
+                "this run's success or failure, or evidence-backed Job progress.",
+            ))
             progress = self.job_progress
             lines.extend((progress.render() if progress is not None else
                           JobProgress(binding.job.id, binding.run.id,
@@ -1761,6 +1843,10 @@ class RobotApplication:
             lines.extend(
                 f"  {index}. {item.name} status={item.status} result={item.runtime_result}"
                 for index, item in enumerate(initiative.effects, 1)
+            )
+            lines.append(
+                "An applied workspace_write proves only that the artifact mutation "
+                "occurred; it does not prove that claims in the authored content are true."
             )
             return lines
 
@@ -1905,8 +1991,13 @@ class RobotApplication:
         bases: list[str] = []
         if wake_event is not None:
             bases.append("wake_event")
-        bases.extend(f"acquisition_{index}" for index, item in
-                     enumerate(initiative.acquisitions, 1) if item.status == "applied")
+        bases.extend(
+            f"acquisition_{index}" for index, item in enumerate(
+                initiative.acquisitions, 1
+            ) if item.status == "applied" and item.capability not in {
+                JOB_WORKSPACE_LIST_TOOL.name, JOB_WORKSPACE_READ_TOOL.name,
+            }
+        )
         bases.extend(f"effect_{index}" for index, item in
                      enumerate(initiative.effects, 1) if item.status == "applied")
         return tuple(bases)
@@ -3081,6 +3172,7 @@ class RobotApplication:
         self, stimulus: AttentionStimulus, episode: AttentionEpisode | None = None,
         *, evaluate_goal_outcome: bool = True, job_work: bool = False,
         previous_work_summary: str | None = None,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
     ) -> InitiativeOutcome:
         backend = self._cognition_backend
         if backend is None:
@@ -3168,6 +3260,11 @@ class RobotApplication:
                 result = self._execute_run_history_inspection(
                     call, expected_goal=expected_goal, autonomous=True,
                     episode_id=episode.id)
+            elif call.name in {tool.name for tool in JOB_WORKSPACE_ACQUISITION_TOOLS}:
+                result = self._execute_job_workspace_acquisition(
+                    call, job_binding=job_binding, expected_goal=expected_goal,
+                    episode_id=episode.id,
+                )
             elif call.name in {tool.name for tool in DIAGNOSTIC_TOOLS}:
                 result = self._execute_diagnostic(
                     call, expected_goal=expected_goal, autonomous=True
@@ -3183,7 +3280,9 @@ class RobotApplication:
                     result = await self._execute_initiative_tool(
                         call, available=self._initiative_tools_for_episode(
                             job_work=job_work
-                        ), notification_interaction=notification_interaction
+                        ), notification_interaction=notification_interaction,
+                        job_binding=job_binding, expected_goal=expected_goal,
+                        episode_id=episode.id,
                     )
             try:
                 result_status = json.loads(result.output).get("status", "rejected")
@@ -3256,6 +3355,7 @@ class RobotApplication:
             followup_completed, followup_effect = await self._request_acquisition_followup(
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
                 notification_interaction, job_work=job_work,
+                job_binding=job_binding,
             )
             continuation_completed = followup_completed
             if followup_effect is not None:
@@ -3277,6 +3377,7 @@ class RobotApplication:
                 stimulus, episode, expected_goal, prior_memory, effects[0],
                 tuple(acquisitions),
                 notification_interaction, job_work=job_work,
+                job_binding=job_binding,
             )
             if continuation_effect is not None:
                 effects.append(continuation_effect)
@@ -3334,13 +3435,14 @@ class RobotApplication:
         acquisitions: list[InitiativeAcquisitionOutcome],
         notification_interaction: InteractionContext | None = None,
         *, job_work: bool = False,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
         # This helper is deliberately finite: one decision after acquisition #1,
         # followed by exactly one effect-only decision if #2 was attempted.
         followup = AcquisitionFollowupStimulus(tuple(acquisitions))
-        tools = (*self.acquisition_tools(), *self._effect_tools_for_episode(
+        tools = (*self._acquisition_tools_for_episode(job_work=job_work), *self._effect_tools_for_episode(
             job_work=job_work
         ))
         log_prefix = "ACQUISITION"
@@ -3361,7 +3463,7 @@ class RobotApplication:
                     log_prefix=log_prefix,
                 )
             consumed = True
-            available = (*self.acquisition_tools(), *self._effect_tools_for_episode(
+            available = (*self._acquisition_tools_for_episode(job_work=job_work), *self._effect_tools_for_episode(
                 job_work=job_work
             ))
             inspection = perception = None
@@ -3395,6 +3497,11 @@ class RobotApplication:
                     result = self._execute_run_history_inspection(
                         call, expected_goal=expected_goal, autonomous=True,
                         episode_id=episode.id)
+                elif call.name in {tool.name for tool in JOB_WORKSPACE_ACQUISITION_TOOLS}:
+                    result = self._execute_job_workspace_acquisition(
+                        call, job_binding=job_binding, expected_goal=expected_goal,
+                        episode_id=episode.id,
+                    )
                 elif call.name in {tool.name for tool in DIAGNOSTIC_TOOLS}:
                     result = self._execute_diagnostic(
                         call, expected_goal=expected_goal, autonomous=True
@@ -3408,6 +3515,8 @@ class RobotApplication:
                 result = await self._execute_initiative_tool(
                     call, available=available, log_prefix=log_prefix,
                     notification_interaction=notification_interaction,
+                    job_binding=job_binding, expected_goal=expected_goal,
+                    episode_id=episode.id,
                 )
             result_text = result.output
             try:
@@ -3469,6 +3578,7 @@ class RobotApplication:
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
                 notification_interaction,
                 job_work=job_work,
+                job_binding=job_binding,
             )
             return final_completed, final_effect
         return True, (None if action is None else InitiativeEffectOutcome(
@@ -3481,6 +3591,7 @@ class RobotApplication:
         acquisitions: list[InitiativeAcquisitionOutcome],
         notification_interaction: InteractionContext | None = None,
         *, job_work: bool = False,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
@@ -3515,6 +3626,8 @@ class RobotApplication:
                 result = await self._execute_initiative_tool(
                     call, available=available, log_prefix="ACQUISITION",
                     notification_interaction=notification_interaction,
+                    job_binding=job_binding, expected_goal=expected_goal,
+                    episode_id=episode.id,
                 )
             result_text = result.output
             try:
@@ -3588,6 +3701,7 @@ class RobotApplication:
         acquisitions: tuple[InitiativeAcquisitionOutcome, ...] = (),
         notification_interaction: InteractionContext | None = None,
         *, job_work: bool = False,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
@@ -3637,6 +3751,8 @@ class RobotApplication:
                 result = await self._execute_initiative_tool(
                     call, available=available, log_prefix="CONTINUATION",
                     notification_interaction=notification_interaction,
+                    job_binding=job_binding, expected_goal=expected_goal,
+                    episode_id=episode.id,
                 )
             result_text = result.output
             try:
@@ -3823,9 +3939,26 @@ class RobotApplication:
     ) -> tuple[CognitionToolDefinition, ...]:
         if not job_work:
             return self.initiative_tools()
-        return (*self.acquisition_tools(), *self._effect_tools_for_episode(
+        return (*self._acquisition_tools_for_episode(job_work=True), *self._effect_tools_for_episode(
             job_work=True
         ))
+
+    def _acquisition_tools_for_episode(
+        self, *, job_work: bool
+    ) -> tuple[CognitionToolDefinition, ...]:
+        tools = self.acquisition_tools()
+        if job_work and self._job_workspace_tools_available():
+            return (*tools, *JOB_WORKSPACE_ACQUISITION_TOOLS)
+        return tools
+
+    def _job_workspace_tools_available(self) -> bool:
+        if self.job_workspaces is None:
+            return False
+        try:
+            self._validate_job_work_preconditions()
+        except RuntimeError:
+            return False
+        return True
 
     def _effect_tools_for_episode(
         self, *, job_work: bool
@@ -3833,7 +3966,12 @@ class RobotApplication:
         tools = self.effect_tools()
         if not job_work:
             return tools
-        return tuple(tool for tool in tools if tool.name != SCHEDULE_FOLLOWUP_TOOL.name)
+        projected = tuple(
+            tool for tool in tools if tool.name != SCHEDULE_FOLLOWUP_TOOL.name
+        )
+        if self._job_workspace_tools_available():
+            return (*projected, JOB_WORKSPACE_WRITE_TOOL)
+        return projected
 
     def _continuation_tools_for_episode(
         self, first_effect_name: str, *, job_work: bool
@@ -4353,6 +4491,237 @@ class RobotApplication:
             "status=%s bytes=%s published=%s durability_confirmed=%s",
             f"E{episode_id}" if episode_id is not None else "none",
             f"JOB{job.id}" if job is not None else "none", mode, path_chars,
+            result["status"], written_bytes,
+            str(result.get("published", False)).lower(),
+            str(result.get("durability_confirmed", False)).lower(),
+        )
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _current_job_workspace_authority(
+        self,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None,
+        expected_goal: ActiveGoal | None,
+    ) -> tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal]:
+        """Fail closed unless an exact captured Job-work binding remains current."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("application_not_running")
+        if self.jobs is None:
+            raise RuntimeError("jobs_persistence_unavailable")
+        if self.job_workspaces is None:
+            raise RuntimeError("workspace_persistence_unavailable")
+        if job_binding is None:
+            raise RuntimeError("stale_job_work_binding")
+        try:
+            current = self._validate_job_work_preconditions()
+        except RuntimeError as error:
+            raise RuntimeError("stale_job_work_binding") from error
+        binding, task_binding, goal = job_binding
+        if (current[0] is not binding or current[1] is not task_binding
+                or current[2] is not goal or expected_goal is not goal
+                or not self._job_work_binding_matches(binding, task_binding, goal)):
+            raise RuntimeError("stale_job_work_binding")
+        return job_binding
+
+    def _execute_job_workspace_acquisition(
+        self, call: CognitionToolCall, *,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None,
+        expected_goal: ActiveGoal | None, episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        """Read only the Workspace owned by an exact current Job-work binding."""
+        operation = "list" if call.name == JOB_WORKSPACE_LIST_TOOL.name else "read"
+        binding: CurrentJobRun | None = None
+        detail_chars = 0
+        try:
+            binding, _, _ = self._current_job_workspace_authority(
+                job_binding, expected_goal
+            )
+            arguments = json.loads(call.arguments)
+            required = ({"directory", "cursor"} if operation == "list"
+                        else {"path", "offset_chars"})
+            if not isinstance(arguments, dict) or set(arguments) != required:
+                raise ValueError("invalid arguments")
+            assert self.job_workspaces is not None
+            if operation == "list":
+                directory = arguments["directory"]
+                cursor = arguments["cursor"]
+                directory = "" if directory is None else directory
+                if type(directory) is not str or (cursor is not None and type(cursor) is not str):
+                    raise ValueError("invalid arguments")
+                detail_chars = len(directory)
+                listing = self.job_workspaces.list_entries(
+                    binding.job.id, directory, cursor
+                )
+                result: dict[str, object] = {
+                    "status": "ok", "source": "job_workspace",
+                    "scope": "current_stored_workspace_snapshot",
+                    "retrieved_at": self._aware_wall_clock().astimezone(UTC).isoformat(),
+                    "record_authority": "runtime",
+                    "content_authority": "authored_working_material_non_authoritative",
+                    "job": {"id": binding.job.id, "name": binding.job.name},
+                    "directory": listing.directory,
+                    "entries": [{
+                        "path": entry.path, "name": entry.name, "kind": entry.kind,
+                        "size_bytes": entry.size_bytes,
+                        "modified_at": entry.modified_at.isoformat(),
+                        "content_version": entry.content_version,
+                    } for entry in listing.entries],
+                    "next_cursor": listing.next_cursor,
+                }
+            else:
+                path, offset = arguments["path"], arguments["offset_chars"]
+                offset = 0 if offset is None else offset
+                if type(path) is not str or type(offset) is not int:
+                    raise ValueError("invalid arguments")
+                detail_chars = len(path)
+                artifact = self.job_workspaces.read(binding.job.id, path, offset)
+                result = {
+                    "status": "ok", "source": "job_workspace",
+                    "scope": "current_stored_workspace_artifact",
+                    "retrieved_at": self._aware_wall_clock().astimezone(UTC).isoformat(),
+                    "record_authority": "runtime",
+                    "content_provenance": "authored_working_material",
+                    "content_authority": "non_authoritative",
+                    "job": {"id": binding.job.id, "name": binding.job.name},
+                    "artifact": {
+                        "path": artifact.path, "size_bytes": artifact.size_bytes,
+                        "content_version": artifact.content_version,
+                        "offset_chars": artifact.offset_chars,
+                        "next_offset_chars": artifact.next_offset_chars,
+                        "total_chars": artifact.total_chars,
+                        "truncated": artifact.truncated, "content": artifact.content,
+                    },
+                }
+        except WorkspaceValidationError as error:
+            message = str(error)
+            reason = ("invalid_cursor" if "cursor" in message else
+                      "invalid_read_offset" if "offset" in message or "range" in message
+                      else "invalid_logical_path")
+            result = {"status": "rejected", "reason": reason}
+        except WorkspaceNotFoundError:
+            result = {"status": "not_found", "reason": (
+                "directory_not_found" if operation == "list" else "artifact_not_found")}
+        except WorkspaceUnsafeError:
+            result = {"status": "unsafe", "reason": "unsafe_workspace_entry"}
+        except WorkspaceBackendError:
+            result = {"status": "unavailable", "reason": "backend_unavailable"}
+        except RuntimeError as error:
+            reason = str(error)
+            result = {"status": "unavailable" if reason.endswith("unavailable")
+                      or reason == "application_not_running" else "rejected",
+                      "reason": reason}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            result = {"status": "rejected", "reason": "invalid_tool_arguments"}
+        LOGGER.info(
+            "[WORKSPACE] episode=%s scope=job_work job=%s run=%s op=%s "
+            "%s_chars=%s status=%s",
+            f"E{episode_id}" if episode_id is not None else "none",
+            f"JOB{binding.job.id}" if binding else "none",
+            f"RUN{binding.run.id}" if binding else "none", operation,
+            "directory" if operation == "list" else "path", detail_chars,
+            result["status"],
+        )
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _execute_job_workspace_write(
+        self, call: CognitionToolCall, *,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None,
+        expected_goal: ActiveGoal | None, episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        """Mutate only the Workspace owned by an exact current Job-work binding."""
+        binding: CurrentJobRun | None = None
+        mode = "invalid"
+        path = ""
+        path_chars = written_bytes = 0
+        try:
+            binding, _, _ = self._current_job_workspace_authority(
+                job_binding, expected_goal
+            )
+            arguments = json.loads(call.arguments)
+            if not isinstance(arguments, dict) or set(arguments) != {
+                "path", "mode", "content"
+            }:
+                raise ValueError("invalid arguments")
+            path, mode, content = (arguments["path"], arguments["mode"],
+                                   arguments["content"])
+            if any(type(value) is not str for value in (path, mode, content)):
+                raise ValueError("invalid arguments")
+            if mode not in ("create", "replace", "append"):
+                raise ValueError("invalid mode")
+            if len(content) > MAX_WORKSPACE_COGNITION_WRITE_CHARS:
+                raise ValueError("content too large")
+            try:
+                content.encode("utf-8", "strict")
+            except UnicodeError as error:
+                raise ValueError("invalid artifact text") from error
+            if "\0" in content:
+                raise ValueError("invalid artifact text")
+            path_chars = len(path)
+            assert self.job_workspaces is not None
+            artifact = self.job_workspaces.write(binding.job.id, path, mode, content)
+            written_bytes = artifact.size_bytes
+            result: dict[str, object] = {
+                "status": "applied", "source": "job_workspace",
+                "scope": "workspace_artifact_write", "record_authority": "runtime",
+                "content_authority": "authored_working_material_non_authoritative",
+                "job": {"id": binding.job.id, "name": binding.job.name},
+                "artifact": {
+                    "path": artifact.path, "mode": artifact.mode,
+                    "size_bytes": artifact.size_bytes,
+                    "content_version": artifact.content_version,
+                },
+                "published": artifact.published,
+                "durability_confirmed": artifact.durability_confirmed,
+            }
+        except WorkspaceDurabilityError:
+            result = {
+                "status": "indeterminate", "reason": "durability_unconfirmed",
+                "source": "job_workspace", "scope": "workspace_artifact_write",
+                "record_authority": "runtime",
+                "content_authority": "authored_working_material_non_authoritative",
+                "job": ({"id": binding.job.id, "name": binding.job.name}
+                        if binding else None),
+                "artifact": {"path": path, "mode": mode},
+                "published": True, "durability_confirmed": False,
+            }
+        except WorkspaceQuotaError:
+            result = {"status": "rejected", "reason": "workspace_quota_exceeded",
+                      "published": False, "durability_confirmed": False}
+        except WorkspaceConflictError:
+            result = {"status": "rejected", "reason": (
+                "artifact_exists" if mode == "create" else "artifact_conflict"),
+                "published": False, "durability_confirmed": False}
+        except WorkspaceNotFoundError:
+            result = {"status": "not_found", "reason": "artifact_not_found",
+                      "published": False, "durability_confirmed": False}
+        except WorkspaceValidationError:
+            result = {"status": "rejected", "reason": "invalid_logical_path",
+                      "published": False, "durability_confirmed": False}
+        except WorkspaceUnsafeError:
+            result = {"status": "unsafe", "reason": "unsafe_workspace_entry",
+                      "published": False, "durability_confirmed": False}
+        except WorkspaceBackendError:
+            result = {"status": "unavailable", "reason": "backend_unavailable",
+                      "published": False, "durability_confirmed": False}
+        except RuntimeError as error:
+            reason = str(error)
+            result = {"status": "unavailable" if reason.endswith("unavailable")
+                      or reason == "application_not_running" else "rejected",
+                      "reason": reason, "published": False,
+                      "durability_confirmed": False}
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            message = str(error)
+            reason = ("invalid_write_mode" if "mode" in message else
+                      "write_request_too_large" if "too large" in message else
+                      "invalid_artifact_text" if "artifact text" in message else
+                      "invalid_tool_arguments")
+            result = {"status": "rejected", "reason": reason,
+                      "published": False, "durability_confirmed": False}
+        LOGGER.info(
+            "[WORKSPACE] episode=%s scope=job_work job=%s run=%s op=write mode=%s "
+            "path_chars=%s status=%s bytes=%s published=%s durability_confirmed=%s",
+            f"E{episode_id}" if episode_id is not None else "none",
+            f"JOB{binding.job.id}" if binding else "none",
+            f"RUN{binding.run.id}" if binding else "none", mode, path_chars,
             result["status"], written_bytes,
             str(result.get("published", False)).lower(),
             str(result.get("durability_confirmed", False)).lower(),
@@ -4912,6 +5281,9 @@ class RobotApplication:
         available: tuple[CognitionToolDefinition, ...] | None = None,
         log_prefix: str = "INITIATIVE",
         notification_interaction: InteractionContext | None = None,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
+        expected_goal: ActiveGoal | None = None,
+        episode_id: int | None = None,
     ) -> CognitionToolResult:
         projected = self.initiative_tools() if available is None else available
         if call.name == ORIENT_BODY_TOOL.name:
@@ -4927,6 +5299,13 @@ class RobotApplication:
         if call.name == SCHEDULE_FOLLOWUP_TOOL.name:
             return self._execute_schedule_followup(
                 call, available=projected, log_prefix=log_prefix
+            )
+        if call.name == JOB_WORKSPACE_WRITE_TOOL.name and any(
+            tool is JOB_WORKSPACE_WRITE_TOOL for tool in projected
+        ):
+            return self._execute_job_workspace_write(
+                call, job_binding=job_binding, expected_goal=expected_goal,
+                episode_id=episode_id,
             )
         return self._rejected_tool(
             call.name, "tool is not available", log_prefix=log_prefix

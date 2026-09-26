@@ -89,19 +89,32 @@ case-sensitive Unicode code-point equality, never substring, fuzzy, semantic,
 vector, or temporal matching; duplicate exact names return bounded ambiguity.
 
 Both tools share the ordinary maximum of two operator acquisitions and existing
-identical-call reuse. They are acquisitions, never effects. They are
-available only when both Jobs and Workspace persistence exist and are absent
-from initiative, bounded Job work, automatic continuation, scheduled cognition,
-and all other autonomous projections.
+identical-call reuse. They are acquisitions, never effects. They are available
+only when both Jobs and Workspace persistence exist and are absent from general
+autonomous initiative, notification attention, and non-Job temporal follow-up.
 
 The same explicit operator-dialogue projection offers one effect,
 `workspace_write(job, path, mode, content)`, with strict `create`, `replace`, and
 `append` modes and an 8,000-character model-facing ceiling. It is available only
-when Jobs and Workspace persistence both exist, and is never an acquisition or
-autonomous/Job-work capability. The current request must explicitly request or
+when Jobs and Workspace persistence both exist and is never an acquisition. The
+current request must explicitly request or
 clearly authorize the durable write; cognition must not take notes proactively,
 invent a destination, or create a Job. The finite operator grammar permits one
 such effect per episode, including after ordinary acquisitions, with no edit loop.
+
+Bounded Job work has a separate authority path. Its provider-facing
+`workspace_list(directory, cursor)`, `workspace_read(path, offset_chars)`, and
+`workspace_write(path, mode, content)` schemas contain no Job selector. The
+harness derives the owner only from the exact current running
+Job/JobRun/Task/ActiveGoal binding and revalidates that binding before every
+operation. Extra owner arguments fail strict validation, so one Job-work episode
+cannot name another Job's Workspace.
+
+Job-work list/read calls consume the same two acquisition attempts as all other
+acquisitions. One `workspace_write` consumes an existing semantic-effect
+opportunity and participates in the existing continuation ceiling; it adds no
+edit loop or Workspace-specific budget. Manual, scheduled, and automatic
+continuation work all use this same bounded episode path and exact binding.
 
 Create rejects an existing artifact; replace and append report a missing
 artifact rather than creating one. Only an applied, published, durability-
@@ -111,7 +124,7 @@ the artifact may already have changed but durability was not confirmed, so it
 supports neither confirmed durable success nor confirmed failure.
 
 There is no model-facing delete, move, batch write, or `expected_version`, and no
-autonomous or bounded Job-work Workspace access. A Workspace write neither
+general autonomous Workspace access. A Workspace write neither
 admits persistent memory nor creates or modifies a JobRun, Task, progress, or
 immutable terminal result.
 
@@ -129,6 +142,13 @@ times, pagination/read offsets, and retrieval time are runtime-observed storage
 metadata. Artifact text is `authored_working_material` with
 `content_authority=non_authoritative`; cognition should attribute it as what the
 Workspace artifact says rather than as a fresh observation.
+
+During Job outcome evaluation, list/read results are rendered separately as
+non-authoritative Workspace context and their acquisition ordinals are excluded
+from committed Job-progress bases. Other authoritative acquisitions keep their
+original ordinals. An applied Workspace write remains effect evidence that the
+artifact mutation occurred, but not evidence that statements in it are true.
+Workspace material is never preloaded as semantic continuity.
 
 Workspace content survives JobRun terminal states, Job disable/enable,
 application shutdown, and application restart. Reopening it does not restore or

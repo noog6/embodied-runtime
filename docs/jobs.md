@@ -95,20 +95,28 @@ Job work, automatic continuation, and goal-directed attention so historical
 cognition-authored prose cannot become Job outcome evidence. Retrieval creates
 no JobRun, memory, readiness, progress, artifact, delivery, or acknowledgement.
 
-Workspace inspection is a separate operator-only acquisition path. Exact
+Workspace inspection has two separate authority paths. In operator dialogue, exact
 `JOB<n>` or exact case-sensitive Job-name selectors resolve the Job itself, so a
 Workspace remains inspectable when the Job has never had a run. `workspace_list`
 and `workspace_read` share the ordinary two-acquisition operator budget and are
-not projected into autonomous or bounded Job work. Runtime-observed file
+not projected into general autonomous work. Runtime-observed file
 metadata is authoritative for the retrieved storage snapshot; artifact prose is
 authored non-authoritative working material, not a JobRun result, persistent
 memory, progress evidence, or fresh current-world evidence. The separate
 `workspace_write(job, path, mode, content)` operator effect permits one
 explicitly authorized bounded create, replace, or append per dialogue episode.
-It is not projected into autonomous initiative, continuation, or Job work and
+It is not projected into general autonomous initiative or continuation and
 does not create a run or alter Tasks, progress, persistent memory, or immutable
 JobRun results. There is no model-facing delete/move or `expected_version` in
 this phase. See [Job Workspaces](job-workspaces.md).
+
+In bounded Job work, contextual list/read/write schemas omit the selector. The
+runtime supplies only the owner from the exact current Job/JobRun/Task/ActiveGoal
+binding. Reads use the existing two-acquisition budget and remain working
+context, never progress evidence; writes use an existing effect opportunity and
+prove only that a mutation occurred. JobRun results and Workspace artifacts can
+both be produced in one occurrence, persist independently, and are never copied
+or durably linked automatically.
 
 ## Runtime coordination through Task
 

@@ -6,10 +6,16 @@ import unittest
 from unittest.mock import patch
 
 from embodied_runtime.app import (
-    ApplicationOptions, DIAGNOSTIC_TOOLS, MAX_WORKSPACE_COGNITION_WRITE_CHARS,
+    ApplicationOptions, DIAGNOSTIC_TOOLS, JOB_OUTCOME_EVALUATION_REQUEST,
+    MAX_WORKSPACE_COGNITION_WRITE_CHARS, REPORT_JOB_OUTCOME_TOOL,
+    JOB_WORKSPACE_LIST_TOOL, JOB_WORKSPACE_READ_TOOL, JOB_WORKSPACE_WRITE_TOOL,
     RobotApplication, WORKSPACE_LIST_TOOL, WORKSPACE_READ_TOOL, WORKSPACE_WRITE_TOOL,
 )
-from embodied_runtime.cognition import CognitionToolCall, TextCognitionBackend
+from embodied_runtime.attention import InitiativeOutcome
+from embodied_runtime.cognition import (
+    CognitionToolCall, InitiativeAcquisitionOutcome, InitiativeEffectOutcome,
+    TextCognitionBackend,
+)
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.jobs import (
     FilesystemJobWorkspaceStore, SQLiteJobStore, WorkspaceBackendError,
@@ -43,6 +49,40 @@ class ScriptedBackend(TextCognitionBackend):
             self.results.append(json.loads(result.output))
             return "acquiring"
         return self.final
+
+
+class AutomaticWorkspaceBackend(TextCognitionBackend):
+    identifier = "automatic-workspace-test"
+
+    def __init__(self):
+        self.work_requests = 0
+        self.outcomes = 0
+        self.write_result = None
+        self.schemas = []
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.schemas.append(tuple(tools))
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            self.outcomes += 1
+            terminal = self.outcomes == 2
+            await tool_executor(CognitionToolCall(
+                REPORT_JOB_OUTCOME_TOOL.name, json.dumps({
+                    "disposition": "completed" if terminal else "continue",
+                    "summary": "automatic report written" if terminal else "continue",
+                    "report": "immutable run report" if terminal else None,
+                    "readiness": None if terminal else "ready",
+                    "delay_seconds": None,
+                })))
+            return "outcome"
+        self.work_requests += 1
+        if self.work_requests == 2:
+            self.write_result = json.loads((await tool_executor(CognitionToolCall(
+                "workspace_write", json.dumps({
+                    "path": "reports/automatic.md", "mode": "create",
+                    "content": "automatic artifact",
+                })))).output)
+        return "work"
 
 
 class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
@@ -84,7 +124,7 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
             WORKSPACE_WRITE_TOOL.name,
             json.dumps(arguments, ensure_ascii=False))).output)
 
-    async def test_projection_is_operator_only_and_never_an_effect(self):
+    async def test_projection_separates_operator_autonomy_and_job_work(self):
         app = self.app(initiative=True)
         await app.start()
         operator = {tool.name for tool in app.cognition_tools()}
@@ -95,17 +135,21 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
         app.set_goal("Check autonomous projection")
         self.assertTrue({"workspace_list", "workspace_read"}.isdisjoint(
             tool.name for tool in app.acquisition_tools()))
-        self.assertTrue({"workspace_list", "workspace_read"}.isdisjoint(
+        self.assertTrue({"workspace_list", "workspace_read", "workspace_write"}.isdisjoint(
             tool.name for tool in app._initiative_tools_for_episode(job_work=True)))
+        app.resolve_goal("completed")
+        job = self.jobs.create_job("Projection Job")
+        app.start_job_run(job.id)
+        job_tools = app._initiative_tools_for_episode(job_work=True)
+        self.assertTrue({"workspace_list", "workspace_read", "workspace_write"} <= {
+            tool.name for tool in job_tools})
+        self.assertEqual(len(job_tools), len({tool.name for tool in job_tools}))
         self.assertTrue({"workspace_list", "workspace_read"}.isdisjoint(
             tool.name for tool in app.effect_tools()))
         self.assertNotIn("workspace_write", {tool.name for tool in app.acquisition_tools()})
         self.assertNotIn("workspace_write", {tool.name for tool in app.effect_tools()})
-        self.assertNotIn("workspace_write", {
-            tool.name for tool in app._initiative_tools_for_episode(job_work=True)})
-        self.assertNotIn("workspace_write", {
-            tool.name for tool in app._continuation_tools_for_episode(
-                "schedule_followup", job_work=True)})
+        self.assertIn("workspace_write", {
+            tool.name for tool in app._effect_tools_for_episode(job_work=True)})
 
         for unavailable in (self.app(jobs=False), self.app(workspaces=False)):
             await unavailable.start()
@@ -113,6 +157,127 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
                 tool.name for tool in unavailable.cognition_tools()))
             self.assertNotIn("workspace_write", {
                 tool.name for tool in unavailable.cognition_tools()})
+            unavailable.set_goal("projection")
+            self.assertTrue({"workspace_list", "workspace_read", "workspace_write"}.isdisjoint(
+                tool.name for tool in unavailable._initiative_tools_for_episode(
+                    job_work=True)))
+
+    async def test_job_workspace_schemas_have_no_owner_selector(self):
+        for tool in (JOB_WORKSPACE_LIST_TOOL, JOB_WORKSPACE_READ_TOOL,
+                     JOB_WORKSPACE_WRITE_TOOL):
+            self.assertNotIn("job", tool.parameters["properties"])
+            self.assertNotIn("job_id", tool.parameters["properties"])
+            self.assertFalse(tool.parameters["additionalProperties"])
+        self.assertEqual(JOB_WORKSPACE_LIST_TOOL.parameters["required"],
+                         ["directory", "cursor"])
+        self.assertEqual(JOB_WORKSPACE_READ_TOOL.parameters["required"],
+                         ["path", "offset_chars"])
+        self.assertEqual(JOB_WORKSPACE_WRITE_TOOL.parameters["required"],
+                         ["path", "mode", "content"])
+
+    async def test_job_work_uses_own_workspace_and_two_acquisitions_then_write(self):
+        job_a = self.jobs.create_job("Nightly Self Log Reviewer")
+        job_b = self.jobs.create_job("Other Job")
+        self.workspaces.write(job_a.id, "notes/a.md", "create", "A context")
+        self.workspaces.write(job_b.id, "notes/b.md", "create", "B secret")
+        backend = ScriptedBackend([
+            ("workspace_list", {"directory": "", "cursor": None}),
+            ("workspace_read", {"path": "notes/a.md", "offset_chars": 0}),
+            ("workspace_write", {"path": "reports/current-review.md",
+                                 "mode": "create", "content": "review"}),
+        ])
+        app = self.app(backend, initiative=True)
+        await app.start()
+        binding = app.start_job_run(job_a.id)
+
+        await app.work_current_job_once()
+
+        self.assertEqual(len(backend.results), 3)
+        self.assertTrue(all(result["job"] == {"id": job_a.id, "name": job_a.name}
+                            for result in backend.results))
+        self.assertEqual(backend.results[-1]["status"], "applied")
+        self.assertTrue(backend.results[-1]["published"])
+        self.assertTrue(backend.results[-1]["durability_confirmed"])
+        self.assertEqual(self.workspaces.read(
+            job_a.id, "reports/current-review.md").content, "review")
+        with self.assertRaises(WorkspaceNotFoundError):
+            self.workspaces.read(job_b.id, "reports/current-review.md")
+        self.assertEqual(len(backend.requests), 4)  # initial, two bounded follow-ups, outcome
+        outcome_instructions = backend.requests[-1][0]
+        self.assertIn("non-authoritative Job Workspace context", outcome_instructions)
+        self.assertIn("not evidence that its claims are true or current", outcome_instructions)
+        self.assertIn("mutation occurred", outcome_instructions)
+        self.assertIs(app.current_job_run, binding)
+
+    async def test_job_workspace_rejects_cross_job_arguments_and_stale_binding(self):
+        job_a = self.jobs.create_job("A")
+        job_b = self.jobs.create_job("B")
+        self.workspaces.write(job_b.id, "notes/b.md", "create", "unchanged")
+        app = self.app(initiative=True); await app.start()
+        binding = app.start_job_run(job_a.id)
+        captured = (binding, app._current_task_binding, app.active_goal)
+        read = app._execute_job_workspace_acquisition(CognitionToolCall(
+            "workspace_read", json.dumps({"job": "B", "path": "notes/b.md",
+                                           "offset_chars": 0})),
+            job_binding=captured, expected_goal=app.active_goal)
+        write = app._execute_job_workspace_write(CognitionToolCall(
+            "workspace_write", json.dumps({"job_id": job_b.id, "path": "notes/b.md",
+                                            "mode": "replace", "content": "changed"})),
+            job_binding=captured, expected_goal=app.active_goal)
+        self.assertEqual(json.loads(read.output)["reason"], "invalid_tool_arguments")
+        self.assertEqual(json.loads(write.output)["reason"], "invalid_tool_arguments")
+        self.assertEqual(self.workspaces.read(job_b.id, "notes/b.md").content,
+                         "unchanged")
+        app.pause_task()
+        stale = app._execute_job_workspace_write(CognitionToolCall(
+            "workspace_write", json.dumps({"path": "x.md", "mode": "create",
+                                            "content": "x"})),
+            job_binding=captured, expected_goal=captured[2])
+        self.assertEqual(json.loads(stale.output)["reason"], "stale_job_work_binding")
+
+    def test_workspace_acquisitions_are_not_progress_bases_and_ordinals_stay_fixed(self):
+        initiative = InitiativeOutcome("done", acquisitions=(
+            InitiativeAcquisitionOutcome("workspace_read", "applied", "{}"),
+            InitiativeAcquisitionOutcome("inspect_run_history", "applied", "{}"),
+        ), effects=(InitiativeEffectOutcome("workspace_write", "applied", "{}"),))
+        self.assertEqual(RobotApplication._job_progress_bases(initiative, None),
+                         ("acquisition_2", "effect_1"))
+
+    async def test_automatic_job_work_writes_and_result_remains_independent_on_restart(self):
+        backend = AutomaticWorkspaceBackend()
+        app = RobotApplication(
+            RobotProfile("test", "Test"), VirtualHardwareBackend(),
+            ApplicationOptions(initiative_enabled=True, jobs_auto_continue=True,
+                               jobs_max_auto_steps=1),
+            platform_provider=Platform(), cognition_backend=backend,
+            job_store=self.jobs, job_workspace_store=self.workspaces,
+            wall_clock=lambda: datetime(2026, 9, 26, 12, tzinfo=UTC),
+        )
+        job = self.jobs.create_job("Automatic Reviewer")
+        await app.start(); binding = app.start_job_run(job.id)
+        await app.work_current_job_once()
+        app._offer_job_continuation()
+        task = app._active_job_work_task
+        self.assertIsNotNone(task)
+        await task
+        self.assertEqual(backend.write_result["status"], "applied")
+        write_schema = next(tool for tools in backend.schemas for tool in tools
+                            if tool.name == "workspace_write"
+                            and "job" not in tool.parameters["properties"])
+        self.assertEqual(set(write_schema.parameters["properties"]),
+                         {"path", "mode", "content"})
+        self.assertEqual(self.jobs.get_run(binding.run.id).result_report,
+                         "immutable run report")
+        await app.stop(); self.jobs.close(); self.workspaces.close()
+        self.jobs = SQLiteJobStore(self.database)
+        self.workspaces = FilesystemJobWorkspaceStore(self.root)
+        self.assertEqual(self.workspaces.read(
+            job.id, "reports/automatic.md").content, "automatic artifact")
+        self.assertEqual(self.jobs.get_run(binding.run.id).result_report,
+                         "immutable run report")
+        self.workspaces.write(job.id, "reports/automatic.md", "replace", "revised")
+        self.assertEqual(self.jobs.get_run(binding.run.id).result_report,
+                         "immutable run report")
 
     async def test_write_schema_is_strict(self):
         schema = WORKSPACE_WRITE_TOOL.parameters
