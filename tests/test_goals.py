@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 import json
 import unittest
 
-from embodied_runtime.app import RobotApplication
+from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import (
     ActiveGoal, CognitionError, CognitionToolCall, TextCognitionBackend,
@@ -65,6 +65,7 @@ class GoalApplicationTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, backend=None, *, body=None, memory=None, reflexes=()):
         return RobotApplication(
             RobotProfile("test", "Test"), VirtualHardwareBackend(),
+            ApplicationOptions(diagnostics_enabled=True),
             platform_provider=StaticPlatform(), body_backend=body,
             cognition_backend=backend, working_memory=memory, reflexes=reflexes,
         )

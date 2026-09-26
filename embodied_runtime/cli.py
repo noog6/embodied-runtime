@@ -480,7 +480,11 @@ async def _run_application(
                                               voice_wake_word_enabled=args.voice_wake_word_enabled,
                                               voice_tts_mode=args.tts,
                                               cognition_backend=args.cognition,
-                                              camera_backend=args.camera),
+                                              camera_backend=args.camera,
+                                              diagnostics_enabled=True,
+                                              runtime_mode=("diagnostics" if args.diagnostics
+                                                            else "console" if args.console
+                                                            else "run")),
         body_backend=VirtualBodyBackend(),
         reflexes=(PresenceCenteringReflex(),),
         camera_backend=camera,

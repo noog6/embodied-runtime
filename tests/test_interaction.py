@@ -543,6 +543,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             ApplicationOptions(
                 initiative_enabled=True, initiative_actions_enabled=actions,
                 initiative_messages_enabled=messages,
+                diagnostics_enabled=True,
             ), platform_provider=Platform(), body_backend=body or VirtualBodyBackend(),
             cognition_backend=backend, operator_message_sink=sink,
         )

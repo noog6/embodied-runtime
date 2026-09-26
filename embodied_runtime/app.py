@@ -117,6 +117,7 @@ SPEAKER_RESOURCE = ResourceKey("audio.speaker")
 VOICE_SPEAKER_OWNER = ResourceOwner("runtime", "voice")
 MAX_DIAGNOSTIC_EVENTS = 25
 MAX_DIAGNOSTIC_LOOKBACK_SECONDS = 3600
+MAX_DIAGNOSTIC_RESULT_CHARS = 24_000
 DIAGNOSTIC_SEVERITIES = ("debug", "info", "warning", "error", "critical")
 _SENSITIVE_EVENT_KEY_PARTS = (
     "prompt", "transcript", "response", "audio", "image", "credential",
@@ -387,7 +388,8 @@ INSPECT_EFFECTIVE_CONFIG_TOOL = CognitionToolDefinition(
 
 INSPECT_JOB_RUNTIME_TOOL = CognitionToolDefinition(
     name="inspect_job_runtime",
-    description="Read the current Job/Task/continuation/progress state; never history.",
+    description=("Read the current Job/Task/continuation state and authoritative "
+                 "runtime-owned committed progress for this occurrence; never history."),
     parameters={"type": "object", "properties": {}, "required": [],
                 "additionalProperties": False},
 )
@@ -637,6 +639,8 @@ class ApplicationOptions:
     voice_tts_mode: str = "none"
     cognition_backend: str = "none"
     camera_backend: str = "none"
+    diagnostics_enabled: bool = False
+    runtime_mode: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -3673,7 +3677,8 @@ class RobotApplication:
         recall = (RECALL_MEMORY_TOOL,) if self._memory_recall is not None else ()
         history = ((INSPECT_RUN_HISTORY_TOOL,)
                    if self._run_history_evidence is not None else ())
-        return (INSPECT_SELF_TOOL, *DIAGNOSTIC_TOOLS, *visual, *recall, *history)
+        diagnostics = DIAGNOSTIC_TOOLS if self.options.diagnostics_enabled else ()
+        return (INSPECT_SELF_TOOL, *diagnostics, *visual, *recall, *history)
 
     @staticmethod
     def _acquisition_tool_names() -> tuple[str, ...]:
@@ -3734,7 +3739,8 @@ class RobotApplication:
         ):
             tools.append(SCHEDULE_FOLLOWUP_TOOL)
         tools.append(INSPECT_SELF_TOOL)
-        tools.extend(DIAGNOSTIC_TOOLS)
+        if self.options.diagnostics_enabled:
+            tools.extend(DIAGNOSTIC_TOOLS)
         if self.visual_perception_available():
             tools.append(OBSERVE_SCENE_TOOL)
         if self._memory_recall is not None:
@@ -4047,6 +4053,8 @@ class RobotApplication:
         try:
             if self.state is not LifecycleState.RUNNING:
                 raise RuntimeError("diagnostics require a running application")
+            if not self.options.diagnostics_enabled:
+                raise RuntimeError("diagnostics are disabled")
             if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
                 raise RuntimeError("expected active goal is no longer current")
             if call.name == INSPECT_EVENTS_TOOL.name:
@@ -4074,7 +4082,9 @@ class RobotApplication:
         body = self.body_backend
         return {
             "status": "ok", "observed_at": self._aware_wall_clock().isoformat(),
-            "source": "current_runtime", "run_id": self.observability.run_id,
+            "source": "current_runtime", "scope": "current_runtime_snapshot",
+            "completeness": "complete_for_exposed_fields",
+            "run_id": self.observability.run_id,
             "runtime": {
                 "lifecycle_state": self.state.value,
                 "elapsed_seconds": metrics["run"]["elapsed_seconds"],
@@ -4111,6 +4121,8 @@ class RobotApplication:
                     "camera_failures", "vision_failures", "resource_failures",
                 )
             },
+            "unknowns": ({"platform": "unavailable"} if platform is None else
+                         {"platform.throttling": "not_reported"}),
         }
 
     def _diagnostic_events(self, call: CognitionToolCall) -> dict[str, object]:
@@ -4151,23 +4163,49 @@ class RobotApplication:
             "identifiers": safe_pairs(item.identifiers),
             "metadata": safe_pairs(item.metadata),
         } for item in selected]
-        return {
-            "status": "ok", "source": "current_run_event_ring",
+        result = {
+            "status": "ok", "observed_at": self._aware_wall_clock().isoformat(),
+            "source": "run_observability", "scope": "current_run_event_ring",
+            "completeness": "bounded_window_only",
             "run_id": self.observability.run_id, "ordering": "newest_first",
             "events": events, "returned": len(events),
             "truncated": len(matching) > limit,
+            "newest_included_event": events[0]["timestamp"] if events else None,
+            "oldest_included_event": events[-1]["timestamp"] if events else None,
         }
+        while (len(json.dumps(result, ensure_ascii=False, sort_keys=True))
+               > MAX_DIAGNOSTIC_RESULT_CHARS and result["events"]):
+            result["events"].pop()
+            result["returned"] = len(result["events"])
+            result["truncated"] = True
+            result["oldest_included_event"] = (
+                result["events"][-1]["timestamp"] if result["events"] else None
+            )
+            result["newest_included_event"] = (
+                result["events"][0]["timestamp"] if result["events"] else None
+            )
+        return result
 
     def _diagnostic_effective_config(self) -> dict[str, object]:
         camera = self.camera_backend
         cognition = self._cognition_backend
         body = self.body_backend
+        unknowns = {}
+        if self.options.runtime_mode == "unknown":
+            unknowns["runtime.mode"] = "unknown"
+        if cognition is None:
+            unknowns["backends.cognition_model"] = "unavailable"
+        elif getattr(cognition, "model", None) is None:
+            unknowns["backends.cognition_model"] = "unknown"
         return {
             "status": "ok", "observed_at": self._aware_wall_clock().isoformat(),
-            "source": "effective_runtime", "run_id": self.observability.run_id,
+            "source": "effective_runtime", "scope": "effective_runtime_config",
+            "completeness": "complete_for_allowlisted_fields",
+            "run_id": self.observability.run_id,
             "runtime": {"profile": self.profile.identifier,
                         "hardware_backend": self.hardware.identifier,
-                        "timezone": self.timezone_name},
+                        "timezone": self.timezone_name,
+                        "mode": self.options.runtime_mode},
             "initiative": {
                 "enabled": self.options.initiative_enabled,
                 "platform_attention_enabled": self.options.initiative_platform_attention_enabled,
@@ -4191,23 +4229,34 @@ class RobotApplication:
                            else self.options.camera_backend),
                 "cognition": (cognition.identifier if cognition is not None
                               else self.options.cognition_backend),
+                "cognition_model": (getattr(cognition, "model", None)
+                                    if cognition is not None else None),
+                "vision": ("none" if self._visual_perception_backend is None else
+                           self._visual_perception_backend.identifier),
                 "body": None if body is None else body.identifier,
             },
             "persistent_memory": {"available": self.persistent_memory is not None},
+            "unknowns": unknowns,
         }
 
     def _diagnostic_job_runtime(self) -> dict[str, object]:
         current = self.current_job_run
         if current is None:
             return {"status": "idle", "observed_at": self._aware_wall_clock().isoformat(),
-                    "source": "current_runtime", "run_id": self.observability.run_id,
+                    "source": "current_runtime", "scope": "current_job_occurrence",
+                    "completeness": "complete_for_current_occurrence",
+                    "run_id": self.observability.run_id,
+                    "job_state": "no_active_job",
                     "current_job": None}
         continuation = self.job_continuation
         progress = self.job_progress
         goal = current.task.goal
         return {
             "status": "ok", "observed_at": self._aware_wall_clock().isoformat(),
-            "source": "current_runtime", "run_id": self.observability.run_id,
+            "source": "current_runtime", "scope": "current_job_occurrence",
+            "completeness": "complete_for_current_occurrence",
+            "run_id": self.observability.run_id,
+            "job_state": self._diagnostic_job_state(current, continuation),
             "current_job": {
                 "job": {"job_id": current.job.id, "name": current.job.name,
                         "enabled": current.job.enabled,
@@ -4216,6 +4265,13 @@ class RobotApplication:
                             "status": current.run.status.value},
                 "task": {"task_id": str(current.task.id),
                          "status": current.task.status.value},
+                "task_goal": None if goal is None else {
+                    "description": goal.description,
+                },
+                "active_goal": None if self.active_goal is None else {
+                    "goal_id": self.active_goal.id,
+                    "description": self.active_goal.description,
+                },
                 "goal": None if goal is None else {
                     "goal_id": (None if self.active_goal is None else self.active_goal.id),
                     "description": goal.description,
@@ -4231,7 +4287,9 @@ class RobotApplication:
                                            else continuation.event_type.value),
                     "event_satisfied": continuation.event_satisfied,
                 },
-                "progress": {"evidence_basis": "accepted_runtime_episode_evidence",
+                "progress": {"authority": "runtime",
+                             "provenance": "runtime_evidence_backed",
+                             "meaning": "committed_progress_for_current_occurrence",
                              "counters": ([] if progress is None else [
                                  {"name": item.name, "value": item.value}
                                  for item in progress.counters])},
@@ -4249,6 +4307,20 @@ class RobotApplication:
                                   }),
             },
         }
+
+    @staticmethod
+    def _diagnostic_job_state(
+        current: CurrentJobRun, continuation: JobContinuation | None,
+    ) -> str:
+        if current.task.status is TaskStatus.PAUSED:
+            return "paused"
+        if continuation is None or continuation.readiness is JobContinuationReadiness.READY:
+            return "running"
+        return {
+            JobContinuationReadiness.WAIT_FOR_EVENT: "waiting_for_event",
+            JobContinuationReadiness.AFTER_DELAY: "waiting_for_delay",
+            JobContinuationReadiness.WAIT_FOR_OPERATOR: "waiting_for_operator",
+        }.get(continuation.readiness, "running")
 
     def _inspect_area(self, area: str) -> SelfInspectionResult:
         if area in ("network", "storage"):
