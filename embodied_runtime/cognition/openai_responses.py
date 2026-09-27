@@ -1,6 +1,7 @@
 """Text cognition through the OpenAI Responses API."""
 
 from collections.abc import Sequence
+import base64
 from typing import Any
 import logging
 import os
@@ -16,6 +17,7 @@ from embodied_runtime.cognition.base import (
     TextCognitionBackend,
 )
 from embodied_runtime.observability import RunObservability
+from embodied_runtime.attachments import ImageAttachment
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 PREWARM_INPUT = "Reply ready."
@@ -26,6 +28,7 @@ class OpenAIResponsesBackend(TextCognitionBackend):
     """A lazy, asynchronous OpenAI Responses text adapter."""
 
     identifier = "openai-responses"
+    supports_image_input = True
 
     def __init__(self, *, model: str | None = None, client: Any = None,
                  observability: RunObservability | None = None) -> None:
@@ -178,8 +181,24 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         tools: Sequence[CognitionToolDefinition] = (),
         tool_executor: CognitionToolExecutor | None = None,
         refreshed_instructions: InstructionsProvider | None = None,
+        image_attachments: Sequence[ImageAttachment] = (),
     ) -> str:
-        arguments = {"model": self.model, "input": message}
+        if len(image_attachments) > 1:
+            raise CognitionError("OpenAI Responses permits at most one image attachment")
+        request_input: Any = message
+        if image_attachments:
+            content: list[dict[str, str]] = []
+            if message:
+                content.append({"type": "input_text", "text": message})
+            for attachment in image_attachments:
+                encoded = base64.b64encode(attachment.data).decode("ascii")
+                content.append({
+                    "type": "input_image",
+                    "image_url": f"data:{attachment.media_type};base64,{encoded}",
+                    "detail": "auto",
+                })
+            request_input = [{"role": "user", "content": content}]
+        arguments = {"model": self.model, "input": request_input}
         if instructions is not None:
             arguments["instructions"] = instructions
         if tools:

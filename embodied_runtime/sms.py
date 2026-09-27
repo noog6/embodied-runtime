@@ -12,6 +12,11 @@ import re
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from embodied_runtime.attachments import (
+    ImageAttachment, MAX_INTERACTION_IMAGE_BYTES,
+    SUPPORTED_INTERACTION_IMAGE_TYPES,
+)
+
 from embodied_runtime.interaction import (
     InteractionCadence, InteractionChannel, InteractionContext,
     InteractionInitiator, InteractionMode,
@@ -26,6 +31,10 @@ EMPTY_TWIML = "<Response></Response>"
 TOO_LONG_REPLY = (
     "I generated a reply that was too long for SMS. Please ask me for a shorter version."
 )
+MEDIA_FAILURE_REPLY = (
+    "I received the image, but I couldn't load it safely. Please try sending it again."
+)
+MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 20
 _E164 = re.compile(r"\+[1-9][0-9]{1,14}\Z")
 _REQUIRED_ENV = (
     "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
@@ -83,10 +92,114 @@ class TwilioSmsSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class TwilioMediaReference:
+    url: str
+    declared_media_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class SmsInboundMessage:
     message_sid: str
     sender: str
     body: str
+    media: TwilioMediaReference | None = None
+
+
+class MediaDownloadError(RuntimeError):
+    """A Twilio media resource failed a bounded safety check."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class MediaDownloader(Protocol):
+    async def download(self, reference: TwilioMediaReference) -> ImageAttachment: ...
+
+
+class TwilioMediaDownloader:
+    """Authenticated, bounded acquisition of only Twilio Message Media resources."""
+
+    _PATH = re.compile(
+        r"/2010-04-01/Accounts/([^/]+)/Messages/([^/]+)/Media/([^/.]+)\Z"
+    )
+
+    def __init__(self, settings: TwilioSmsSettings) -> None:
+        self._account_sid = settings.account_sid
+        self._auth_token = settings.auth_token
+
+    def _validate_url(self, url: str) -> None:
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError as error:
+            raise MediaDownloadError("invalid_media_url") from error
+        match = self._PATH.fullmatch(parsed.path)
+        if (
+            parsed.scheme != "https" or parsed.hostname != "api.twilio.com"
+            or port not in (None, 443) or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or match is None
+            or match.group(1) != self._account_sid
+        ):
+            raise MediaDownloadError("invalid_media_url")
+
+    async def download(self, reference: TwilioMediaReference) -> ImageAttachment:
+        declared = _normalized_media_type(reference.declared_media_type)
+        if declared not in SUPPORTED_INTERACTION_IMAGE_TYPES:
+            raise MediaDownloadError("unsupported_media_type")
+        self._validate_url(reference.url)
+        try:
+            from aiohttp import BasicAuth, ClientSession, ClientTimeout
+            timeout = ClientTimeout(
+                total=MEDIA_DOWNLOAD_TIMEOUT_SECONDS, connect=5, sock_read=10,
+            )
+            async with ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    reference.url,
+                    auth=BasicAuth(self._account_sid, self._auth_token),
+                    allow_redirects=False,
+                ) as response:
+                    if response.status == 401 or response.status == 403:
+                        raise MediaDownloadError("media_auth_failed")
+                    if response.status == 404:
+                        raise MediaDownloadError("media_not_found")
+                    if response.status != 200:
+                        raise MediaDownloadError("media_download_failed")
+                    length = response.content_length
+                    if length is not None and length > MAX_INTERACTION_IMAGE_BYTES:
+                        raise MediaDownloadError("media_too_large")
+                    actual = _normalized_media_type(response.headers.get("Content-Type", ""))
+                    if actual != declared:
+                        raise MediaDownloadError("media_type_mismatch")
+                    chunks = bytearray()
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        if len(chunks) + len(chunk) > MAX_INTERACTION_IMAGE_BYTES:
+                            raise MediaDownloadError("media_too_large")
+                        chunks.extend(chunk)
+        except MediaDownloadError:
+            raise
+        except (asyncio.TimeoutError, TimeoutError) as error:
+            raise MediaDownloadError("media_download_timeout") from error
+        except Exception as error:
+            raise MediaDownloadError("media_download_failed") from error
+        data = bytes(chunks)
+        if not _matches_magic(declared, data):
+            raise MediaDownloadError("media_type_mismatch")
+        return ImageAttachment(declared, data)
+
+
+def _normalized_media_type(value: str) -> str:
+    return value.partition(";")[0].strip().lower()
+
+
+def _matches_magic(media_type: str, data: bytes) -> bool:
+    if media_type == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if media_type == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/webp":
+        return len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP"
+    return False
 
 
 class SmsSender(Protocol):
@@ -137,11 +250,13 @@ class TwilioSmsService:
         self, settings: TwilioSmsSettings,
         request_cognition: Callable[..., Awaitable[str]],
         *, gateway: SmsSender | Any | None = None,
+        media_downloader: MediaDownloader | None = None,
         inbox_size: int = SMS_INBOX_SIZE, dedupe_size: int = SMS_DEDUPE_SIZE,
     ) -> None:
         self.settings = settings
         self._request_cognition = request_cognition
         self._gateway = gateway
+        self._media_downloader = media_downloader or TwilioMediaDownloader(settings)
         self._inbox: asyncio.Queue[SmsInboundMessage] = asyncio.Queue(inbox_size)
         self._dedupe_size = dedupe_size
         self._accepted: set[str] = set()
@@ -217,7 +332,7 @@ class TwilioSmsService:
         ):
             LOGGER.info("[SMS] inbound status=rejected reason=invalid_signature")
             return web.Response(status=403)
-        # Only after validating the complete signed form do we select P1 fields.
+        # Only after validating the complete signed form do we select understood fields.
         required = ("MessageSid", "AccountSid", "From", "To", "Body", "NumMedia")
         form: dict[str, str] = {}
         for key in required:
@@ -229,6 +344,32 @@ class TwilioSmsService:
                 LOGGER.info("[SMS] inbound status=rejected reason=ambiguous_fields")
                 return web.Response(status=400)
             form[key] = str(values[0])
+        # Classify the authenticated transport envelope before projecting any
+        # media-specific fields. External participants never expose a media
+        # reference to this runtime, even transiently.
+        if (form["AccountSid"] != self.settings.account_sid
+                or form["To"] != self.settings.twilio_number):
+            LOGGER.info("[SMS] inbound status=rejected reason=account_or_destination")
+            return web.Response(status=403)
+        try:
+            media_count = int(form["NumMedia"])
+        except ValueError:
+            return web.Response(status=400)
+        if media_count < 0:
+            return web.Response(status=400)
+        if form["From"] != self.settings.operator_number:
+            LOGGER.info("[SMS] inbound status=ignored reason=external_participant")
+            return self._twiml(web)
+        if media_count == 1:
+            for key in ("MediaUrl0", "MediaContentType0"):
+                values = form_data.getall(key, [])
+                if not values:
+                    LOGGER.info("[SMS] inbound status=rejected reason=missing_fields")
+                    return web.Response(status=400)
+                if len(values) != 1:
+                    LOGGER.info("[SMS] inbound status=rejected reason=ambiguous_fields")
+                    return web.Response(status=400)
+                form[key] = str(values[0])
         result = self._accept_validated_form(form)
         if result.status == 200:
             return self._twiml(web)
@@ -251,17 +392,24 @@ class TwilioSmsService:
             return _Acceptance(400, "invalid_media_count")
         if media_count < 0:
             return _Acceptance(400, "invalid_media_count")
-        if media_count > 0:
-            LOGGER.info("[SMS] inbound status=ignored reason=media_unsupported")
-            return _Acceptance(200, "media_unsupported")
         if form["From"] != self.settings.operator_number:
             LOGGER.info("[SMS] inbound status=ignored reason=external_participant")
             return _Acceptance(200, "external_participant")
+        if media_count > 1:
+            LOGGER.info("[SMS] inbound status=ignored reason=multiple_media_unsupported")
+            return _Acceptance(200, "media_unsupported")
+        if media_count == 1 and any(
+            not form.get(name) for name in ("MediaUrl0", "MediaContentType0")
+        ):
+            return _Acceptance(400, "missing_fields")
         sid = form["MessageSid"]
         if sid in self._accepted:
             LOGGER.info("[SMS] inbound message_sid=%s status=duplicate", sid)
             return _Acceptance(200, "duplicate")
-        message = SmsInboundMessage(sid, form["From"], form["Body"])
+        media = None if media_count == 0 else TwilioMediaReference(
+            form["MediaUrl0"], form["MediaContentType0"]
+        )
+        message = SmsInboundMessage(sid, form["From"], form["Body"], media)
         # Recheck at the commit boundary: request parsing/signature validation may
         # have yielded while stop() closed acceptance.
         if not self._accepting:
@@ -272,7 +420,8 @@ class TwilioSmsService:
             LOGGER.info("[SMS] inbound status=rejected reason=queue_full")
             return _Acceptance(503, "queue_full")
         self._remember(sid)
-        LOGGER.info("[SMS] inbound message_sid=%s status=accepted sender=operator", sid)
+        LOGGER.info("[SMS] inbound message_sid=%s media=%s status=accepted sender=operator",
+                    sid, media_count)
         return _Acceptance(200, "accepted")
 
     @staticmethod
@@ -298,10 +447,30 @@ class TwilioSmsService:
                     initiator=InteractionInitiator.OPERATOR,
                     response_expected=True,
                 )
+                attachments = ()
+                if message.media is not None:
+                    try:
+                        image = await self._media_downloader.download(message.media)
+                    except asyncio.CancelledError:
+                        raise
+                    except MediaDownloadError as error:
+                        LOGGER.info("[SMS] media message_sid=%s status=failed reason=%s",
+                                    message.message_sid, error.reason)
+                        await self._send_reply(message, MEDIA_FAILURE_REPLY)
+                        continue
+                    except Exception:
+                        LOGGER.info("[SMS] media message_sid=%s status=failed "
+                                    "reason=media_download_failed", message.message_sid)
+                        await self._send_reply(message, MEDIA_FAILURE_REPLY)
+                        continue
+                    attachments = (image,)
+                    LOGGER.info("[SMS] media message_sid=%s type=%s bytes=%s status=loaded",
+                                message.message_sid, image.media_type, len(image.data))
                 try:
-                    response = await self._request_cognition(
-                        message.body, interaction=interaction
-                    )
+                    arguments = {"interaction": interaction}
+                    if attachments:
+                        arguments["image_attachments"] = attachments
+                    response = await self._request_cognition(message.body, **arguments)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -314,15 +483,18 @@ class TwilioSmsService:
                 if len(body) > MAX_SMS_BODY_CHARS:
                     LOGGER.info("[SMS] reply status=failed reason=too_long")
                     body = TOO_LONG_REPLY
-                try:
-                    await asyncio.to_thread(
-                        self._gateway.send, from_=self.settings.twilio_number,
-                        to=message.sender, body=body,
-                    )
-                except Exception:
-                    LOGGER.error("[SMS] reply status=failed reason=provider_error")
-                else:
-                    LOGGER.info("[SMS] reply message_sid=%s chars=%s status=sent",
-                                message.message_sid, len(body))
+                await self._send_reply(message, body)
             finally:
                 self._inbox.task_done()
+
+    async def _send_reply(self, message: SmsInboundMessage, body: str) -> None:
+        try:
+            await asyncio.to_thread(
+                self._gateway.send, from_=self.settings.twilio_number,
+                to=message.sender, body=body,
+            )
+        except Exception:
+            LOGGER.error("[SMS] reply status=failed reason=provider_error")
+        else:
+            LOGGER.info("[SMS] reply message_sid=%s chars=%s status=sent",
+                        message.message_sid, len(body))

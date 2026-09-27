@@ -1,5 +1,11 @@
 # Active visual perception
 
+Operator-supplied MMS images are direct current-interaction input, not visual scene
+acquisitions. They are never synthetic `CameraFrame` values and do not acquire the
+camera resource or increment camera-capture or vision-acquisition accounting. Only
+the scene-inspection path represents a runtime-controlled observation through the
+robot's physical camera.
+
 Phase 14 adds the read-only cognition capability `observe_scene(focus)`. `focus`
 is a trimmed, non-empty string of at most 300 characters without control
 characters. It cannot select a camera, file, URL, crop, exposure, resolution,

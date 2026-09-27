@@ -5,6 +5,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from embodied_runtime.attachments import ImageAttachment
+
 
 class CognitionError(RuntimeError):
     """A text cognition request could not be completed."""
@@ -46,6 +48,7 @@ class TextCognitionBackend(ABC):
     """One independent operator or runtime-generated text request and response."""
 
     identifier: str
+    supports_image_input = False
 
     async def prepare(self) -> None:
         """Perform optional backend-specific preparation before runtime readiness."""
@@ -60,5 +63,6 @@ class TextCognitionBackend(ABC):
         tools: Sequence[CognitionToolDefinition] = (),
         tool_executor: CognitionToolExecutor | None = None,
         refreshed_instructions: InstructionsProvider | None = None,
+        image_attachments: Sequence[ImageAttachment] = (),
     ) -> str:
         """Return the text response to one independent request."""

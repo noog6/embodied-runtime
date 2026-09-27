@@ -49,6 +49,14 @@ authority semantics rather than bypass them. An environment of `remote` does not
 turn an external participant into an operator, and merely adding a channel never
 creates an outbound route.
 
+An inbound MMS image is operator-supplied, request-scoped input to the current
+`remote_text` bounded turn. It changes input modality only: interaction identity,
+tools, acquisition and effect budgets, delivery routes, and process authority are
+identical to a text-only operator turn. It is not a `CameraFrame`, does not imply
+the robot inspected its surroundings, and does not consume a scene acquisition.
+Image bytes are discarded after the request rather than becoming visual history
+or durable state.
+
 ## Operator-directed retained-report delivery
 
 `deliver_report(report_ref, destination)` is distinct from the model-authored

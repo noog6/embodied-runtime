@@ -1,4 +1,4 @@
-# Twilio SMS remote text (P1)
+# Twilio SMS and inbound MMS images
 
 SMS is a provider transport mapped to `remote_text`; it is not a new cognition
 authority. A valid Twilio webhook signature authenticates the request received
@@ -38,7 +38,22 @@ a full queue returns 503 without deduplicating the rejected message. A bounded
 deduplication state are volatile: a restart forgets deduplication, and a crash after
 acknowledgment can lose queued work.
 
-Only text is supported. MMS is acknowledged and ignored. Replies longer than 1,600
+Plain SMS behavior is unchanged. P2 also accepts exactly one JPEG, PNG, or WebP
+image, with or without a caption. The signed webhook queues only its Twilio media
+reference and returns immediately. The sequential worker authenticates to a
+narrowly validated `https://api.twilio.com` Message Media resource using the
+configured Account SID and Auth Token; redirects are disabled. Declared and
+streamed sizes are independently bounded to 4 MiB, and the signed type, HTTP type,
+and JPEG/PNG/WebP magic bytes must agree. Other or multiple media do not enter
+cognition.
+
+The bytes exist only for the current request and are never written to WorkingMemory,
+persistent memory, Job Workspaces, or run-history content. The attachment is
+operator-supplied interaction input, not a camera observation, and consumes no
+scene acquisition. Mira replies by ordinary text SMS; outbound MMS is not
+implemented.
+
+Replies longer than 1,600
 characters are not truncated or split; the runtime makes at most one send using a
 short deterministic explanation. Empty responses are not sent. Cognition failure
 gets no SMS response. Provider sending runs off the asyncio event loop, has one
