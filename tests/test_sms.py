@@ -21,9 +21,11 @@ from embodied_runtime.interaction import (
     InteractionInitiator, InteractionMode,
 )
 from embodied_runtime.sms import (
-    EMPTY_TWIML, MAX_SMS_BODY_CHARS, TOO_LONG_REPLY, SmsConfigurationError,
-    TWILIO_HTTP_LOGGER, TwilioSmsGateway, TwilioSmsService, TwilioSmsSettings,
+    EMPTY_TWIML, MAX_SMS_BODY_CHARS, MEDIA_FAILURE_REPLY, TOO_LONG_REPLY,
+    MediaDownloadError, SmsConfigurationError, TWILIO_HTTP_LOGGER, TwilioMediaDownloader,
+    TwilioMediaReference, TwilioSmsGateway, TwilioSmsService, TwilioSmsSettings,
 )
+from embodied_runtime.attachments import ImageAttachment, MAX_INTERACTION_IMAGE_BYTES
 
 
 AUTH_TOKEN = "test-auth-token-not-a-secret"
@@ -66,6 +68,61 @@ def form(sid="SM1", sender="+15550000002", body="hello", media="0"):
         "Body": body,
         "NumMedia": media,
     }
+
+
+def media_form(**changes):
+    payload = form(media="1")
+    payload.update({
+        "MediaUrl0": (
+            "https://api.twilio.com/2010-04-01/Accounts/"
+            "AC00000000000000000000000000000000/Messages/SM1/Media/ME1"
+        ),
+        "MediaContentType0": "image/jpeg",
+    })
+    payload.update(changes)
+    return payload
+
+
+class FakeMediaDownloader:
+    def __init__(self, image=None):
+        self.image = image or ImageAttachment("image/jpeg", b"\xff\xd8\xffdata")
+        self.calls = []
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def download(self, reference):
+        self.calls.append(reference)
+        self.entered.set()
+        await self.release.wait()
+        return self.image
+
+
+class FailIfCalledDownloader:
+    def __init__(self):
+        self.calls = 0
+
+    async def download(self, reference):
+        self.calls += 1
+        raise AssertionError("external-participant media must not be downloaded")
+
+
+def fake_aiohttp(session):
+    """Return a complete offline seam for TwilioMediaDownloader's local import."""
+    module = types.ModuleType("aiohttp")
+
+    class BasicAuth:
+        def __init__(self, login, password):
+            self.login = login
+            self.password = password
+
+    class ClientTimeout:
+        def __init__(self, **values):
+            self.values = values
+
+    module.BasicAuth = BasicAuth
+    module.ClientTimeout = ClientTimeout
+    module.ClientSession = mock.Mock(return_value=session)
+    return module
 
 
 class SmsSettingsTests(unittest.TestCase):
@@ -210,6 +267,264 @@ class SmsStateMachineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service._inbox.qsize(), 0)
         self.assertEqual(service._accepted, set())
 
+    async def test_one_media_reference_is_queued_without_downloading(self):
+        downloader = FakeMediaDownloader()
+        service = TwilioSmsService(
+            settings(), mock.AsyncMock(), gateway=object(), media_downloader=downloader,
+        )
+        service._accepting = True
+        accepted = service._accept_validated_form(media_form())
+        self.assertEqual((accepted.status, accepted.reason), (200, "accepted"))
+        queued = service._inbox.get_nowait()
+        self.assertEqual(queued.media, TwilioMediaReference(
+            media_form()["MediaUrl0"], "image/jpeg"
+        ))
+        self.assertEqual(downloader.calls, [])
+
+    async def test_worker_download_is_sequential_and_image_reaches_cognition(self):
+        downloader = FakeMediaDownloader()
+        calls = []
+
+        async def cognition(message, *, interaction, image_attachments):
+            calls.append((message, interaction, image_attachments))
+            return "answer"
+
+        gateway = mock.Mock()
+        service = TwilioSmsService(
+            settings(), cognition, gateway=gateway, media_downloader=downloader,
+        )
+        service._accepting = True
+        service._worker = asyncio.create_task(service._run_worker())
+        self.assertEqual(service._accept_validated_form(
+            media_form(Body="")
+        ).status, 200)
+        await downloader.entered.wait()
+        self.assertEqual(calls, [])
+        downloader.release.set()
+        await service._inbox.join()
+        self.assertEqual(calls[0][0], "")
+        self.assertEqual(calls[0][2], (downloader.image,))
+        self.assertEqual(calls[0][1].channel, InteractionChannel.REMOTE_TEXT)
+        await service.stop()
+
+
+class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.downloader = TwilioMediaDownloader(settings())
+
+    @staticmethod
+    def service(cognition):
+        return TwilioSmsService(settings(), cognition, gateway=object())
+
+    def test_only_exact_twilio_account_message_media_urls_are_allowed(self):
+        valid = media_form()["MediaUrl0"]
+        self.downloader._validate_url(valid)
+        invalid = (
+            valid.replace("https://", "http://"),
+            valid.replace("api.twilio.com", "example.com"),
+            valid.replace("https://", "https://user:password@"),
+            valid.replace(settings().account_sid, "ACwrong"),
+            valid + "?download=1",
+            "https://api.twilio.com/2010-04-01/Accounts/"
+            f"{settings().account_sid}/Messages/SM1",
+        )
+        for url in invalid:
+            with self.subTest(url=url), self.assertRaisesRegex(
+                MediaDownloadError, "invalid_media_url"
+            ):
+                self.downloader._validate_url(url)
+
+    def test_magic_bytes_cover_only_p2_image_types(self):
+        from embodied_runtime.sms import _matches_magic
+        accepted = (
+            ("image/jpeg", b"\xff\xd8\xffrest"),
+            ("image/png", b"\x89PNG\r\n\x1a\nrest"),
+            ("image/webp", b"RIFF1234WEBPrest"),
+        )
+        for media_type, data in accepted:
+            with self.subTest(media_type=media_type):
+                self.assertTrue(_matches_magic(media_type, data))
+        for media_type in ("image/gif", "image/heic", "video/mp4", "audio/aac",
+                           "application/pdf"):
+            self.assertFalse(_matches_magic(media_type, b"anything"))
+
+    def test_runtime_image_bound_is_four_mib(self):
+        self.assertEqual(MAX_INTERACTION_IMAGE_BYTES, 4 * 1024 * 1024)
+
+    async def test_download_streams_with_basic_auth_and_no_redirect_or_retry(self):
+        class Content:
+            async def iter_chunked(self, size):
+                yield b"\xff\xd8"
+                yield b"\xffphoto"
+
+        response = types.SimpleNamespace(
+            status=200, content_length=None,
+            headers={"Content-Type": "image/jpeg; charset=binary"}, content=Content(),
+        )
+
+        class Context:
+            async def __aenter__(self):
+                return response
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return Context()
+
+        session = Session()
+        reference = TwilioMediaReference(media_form()["MediaUrl0"], "image/jpeg")
+        with mock.patch.dict(sys.modules, {"aiohttp": fake_aiohttp(session)}):
+            image = await self.downloader.download(reference)
+        self.assertEqual(image, ImageAttachment("image/jpeg", b"\xff\xd8\xffphoto"))
+        self.assertEqual(len(session.calls), 1)
+        url, arguments = session.calls[0]
+        self.assertEqual(url, reference.url)
+        self.assertNotIn(settings().auth_token, url)
+        self.assertFalse(arguments["allow_redirects"])
+        self.assertEqual(arguments["auth"].login, settings().account_sid)
+        self.assertEqual(arguments["auth"].password, settings().auth_token)
+
+    async def test_declared_and_streamed_oversize_are_rejected(self):
+        class Content:
+            def __init__(self, chunk):
+                self.chunk = chunk
+
+            async def iter_chunked(self, size):
+                yield self.chunk
+
+        class Context:
+            def __init__(self, length, chunk):
+                self.response = types.SimpleNamespace(
+                    status=200, content_length=length,
+                    headers={"Content-Type": "image/png"}, content=Content(chunk),
+                )
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self, context):
+                self.context = context
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, *args, **kwargs):
+                return self.context
+
+        reference = TwilioMediaReference(media_form()["MediaUrl0"], "image/png")
+        cases = (
+            Context(MAX_INTERACTION_IMAGE_BYTES + 1, b""),
+            Context(None, b"x" * (MAX_INTERACTION_IMAGE_BYTES + 1)),
+        )
+        for context in cases:
+            session = Session(context)
+            with self.subTest(length=context.response.content_length), mock.patch.dict(
+                sys.modules, {"aiohttp": fake_aiohttp(session)}
+            ), self.assertRaisesRegex(MediaDownloadError, "media_too_large"):
+                await self.downloader.download(reference)
+
+    async def test_mime_magic_timeout_and_status_fail_boundedly(self):
+        class Content:
+            def __init__(self, data):
+                self.data = data
+
+            async def iter_chunked(self, size):
+                yield self.data
+
+        class Context:
+            def __init__(self, *, status=200, media_type="image/jpeg", data=b"\xff\xd8\xff"):
+                self.response = types.SimpleNamespace(
+                    status=status, content_length=len(data),
+                    headers={"Content-Type": media_type}, content=Content(data),
+                )
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *args):
+                return False
+
+        class TimeoutContext:
+            async def __aenter__(self):
+                raise asyncio.TimeoutError
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self, context):
+                self.context = context
+                self.calls = 0
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                return self.context
+
+        reference = TwilioMediaReference(media_form()["MediaUrl0"], "image/jpeg")
+        cases = (
+            (Context(media_type="image/png"), "media_type_mismatch"),
+            (Context(data=b"not-a-jpeg"), "media_type_mismatch"),
+            (TimeoutContext(), "media_download_timeout"),
+            (Context(status=500), "media_download_failed"),
+        )
+        for context, reason in cases:
+            session = Session(context)
+            with self.subTest(reason=reason), mock.patch.dict(
+                sys.modules, {"aiohttp": fake_aiohttp(session)}
+            ), self.assertRaisesRegex(MediaDownloadError, reason):
+                await self.downloader.download(reference)
+            self.assertEqual(session.calls, 1)
+
+    async def test_media_failure_replies_once_and_worker_remains_usable(self):
+        class RejectingDownloader:
+            async def download(self, reference):
+                raise MediaDownloadError("media_type_mismatch")
+
+        cognition = mock.AsyncMock(return_value="plain answer")
+        gateway = mock.Mock()
+        service = TwilioSmsService(
+            settings(), cognition, gateway=gateway,
+            media_downloader=RejectingDownloader(),
+        )
+        service._accepting = True
+        service._worker = asyncio.create_task(service._run_worker())
+        self.assertEqual(service._accept_validated_form(media_form()).status, 200)
+        self.assertEqual(service._accept_validated_form(form("SM2", body="next")).status, 200)
+        await service._inbox.join()
+        cognition.assert_awaited_once()
+        self.assertEqual(cognition.await_args.args, ("next",))
+        self.assertEqual(gateway.send.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["body"] for call in gateway.send.call_args_list],
+            [MEDIA_FAILURE_REPLY, "plain answer"],
+        )
+        await service.stop()
+
     async def test_shutdown_cancels_active_worker_and_never_starts_queued_work(self):
         entered = asyncio.Event()
         blocked = asyncio.Event()
@@ -334,17 +649,58 @@ class SmsServiceTests(unittest.IsolatedAsyncioTestCase):
         }])
         self.assertNotEqual(self.gateway.send_threads, [loop_thread])
 
+    async def test_mms_acknowledges_while_media_download_is_blocked(self):
+        downloader = FakeMediaDownloader()
+        calls = []
+
+        async def cognition(message, *, interaction, image_attachments):
+            calls.append((message, image_attachments))
+            return "image answer"
+
+        self.service._media_downloader = downloader
+        self.service._request_cognition = cognition
+        response = await self.post(media_form())
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.text(), EMPTY_TWIML)
+        await downloader.entered.wait()
+        self.assertEqual(calls, [])
+        self.assertEqual(self.gateway.sent, [])
+        downloader.release.set()
+        await self.service._inbox.join()
+        self.assertEqual(calls, [("hello", (downloader.image,))])
+        self.assertEqual(self.gateway.sent[-1]["body"], "image answer")
+
+    async def test_repeated_media_projection_is_rejected_without_dedupe(self):
+        for field in ("MediaUrl0", "MediaContentType0"):
+            payload = MultiDict(list(media_form().items()))
+            payload.add(field, "ambiguous")
+            signature = RequestValidator(AUTH_TOKEN).compute_signature(EXTERNAL_URL, payload)
+            response = await self.session.post(
+                self.url, data=payload, headers={"X-Twilio-Signature": signature},
+            )
+            self.assertEqual(response.status, 400)
+        self.assertEqual(self.service._accepted, set())
+
     async def test_invalid_and_missing_signatures_fail_closed(self):
         self.assertEqual((await self.post(form(), valid=False)).status, 403)
         self.assertEqual((await self.post(form(), valid=None)).status, 403)
         self.assertEqual(self.calls, [])
 
     async def test_unknown_sender_and_media_are_acknowledged_without_cognition(self):
+        downloader = FailIfCalledDownloader()
+        self.service._media_downloader = downloader
         self.assertEqual((await self.post(form(sender="+15550000003"))).status, 200)
-        self.assertEqual((await self.post(form(sid="SM2", media="1"))).status, 200)
+        external_mms = media_form(MessageSid="SM2", From="+15550000003")
+        self.assertEqual((await self.post(external_mms)).status, 200)
+        # Sender classification precedes operator-only media projection, so even
+        # absent media fields are irrelevant for an authenticated external sender.
+        unprojected = form("SM3", sender="+15550000003", media="1")
+        self.assertEqual((await self.post(unprojected)).status, 200)
         await asyncio.sleep(0)
+        self.assertEqual(downloader.calls, 0)
         self.assertEqual(self.calls, [])
         self.assertEqual(self.gateway.sent, [])
+        self.assertEqual(self.service._accepted, set())
 
     async def test_duplicate_is_processed_once_but_new_sid_is_distinct(self):
         self.assertEqual((await self.post(form())).status, 200)

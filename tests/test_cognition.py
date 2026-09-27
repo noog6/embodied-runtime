@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import embodied_runtime.app as app_module
 from embodied_runtime.app import REMEMBER_TOOL, ApplicationOptions, RobotApplication
+from embodied_runtime.attachments import ImageAttachment
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import (
     CognitionContext,
@@ -92,6 +93,18 @@ class FakeCognition(TextCognitionBackend):
         return self.response
 
 
+class ImageCognition(FakeCognition):
+    supports_image_input = True
+
+    async def respond(
+        self, message, *, instructions=None, tools=(), tool_executor=None,
+        refreshed_instructions=None, image_attachments=(),
+    ):
+        self.requests.append((message, instructions, tools, tool_executor,
+                              refreshed_instructions, image_attachments))
+        return self.response
+
+
 class PreparingCognition(FakeCognition):
     def __init__(self, preparation_error=None):
         super().__init__("later response")
@@ -157,6 +170,39 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_default_backend_preparation_is_a_no_op(self):
         backend = FakeCognition()
         self.assertIsNone(await backend.prepare())
+
+    async def test_current_image_is_request_scoped_grounding_not_camera_evidence(self):
+        backend = ImageCognition("image answer")
+        camera = FakeCamera()
+        app = self.make_application(backend, camera=camera)
+        await app.start()
+        image = ImageAttachment("image/jpeg", b"\xff\xd8\xffprivate")
+        self.assertEqual(await app.request_cognition(
+            "", image_attachments=(image,)
+        ), "image answer")
+        request = backend.requests[0]
+        self.assertEqual(request[-1], (image,))
+        self.assertIn("supplied by the operator", request[1])
+        self.assertIn("not a camera frame", request[1])
+        self.assertEqual(camera.captures, 0)
+        metrics = app.observability.snapshot()["metrics"]
+        self.assertEqual(metrics["camera_captures"], 0)
+        self.assertEqual(metrics["vision_acquisitions"], 0)
+        turn = app.working_memory.snapshot()[0]
+        self.assertEqual(turn.operator_text, "")
+        self.assertNotIn("private", repr(turn))
+        await app.stop()
+
+    async def test_image_fails_before_backend_without_capability(self):
+        backend = FakeCognition()
+        app = self.make_application(backend)
+        await app.start()
+        with self.assertRaisesRegex(RuntimeError, "does not support image"):
+            await app.request_cognition(
+                "caption", image_attachments=(ImageAttachment("image/jpeg", b"x"),)
+            )
+        self.assertEqual(backend.requests, [])
+        await app.stop()
 
     async def test_preparation_precedes_readiness_without_cognition_semantics(self):
         backend = PreparingCognition()
@@ -553,6 +599,51 @@ class FakeResponses:
 
 
 class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_multiple_images_fail_before_provider_request(self):
+        responses = FakeResponses()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        image = ImageAttachment("image/jpeg", b"x")
+        with self.assertRaisesRegex(CognitionError, "at most one image"):
+            await backend.respond("look", image_attachments=(image, image))
+        self.assertEqual(responses.calls, [])
+
+    async def test_multimodal_mapping_and_blank_caption(self):
+        responses = FakeResponses()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        image = ImageAttachment("image/jpeg", b"\xff\xd8\xffphoto")
+        await backend.respond("What is this?", image_attachments=(image,))
+        content = responses.calls[0]["input"][0]["content"]
+        self.assertEqual(content[0], {"type": "input_text", "text": "What is this?"})
+        self.assertEqual(content[1]["type"], "input_image")
+        self.assertEqual(content[1]["detail"], "auto")
+        self.assertEqual(content[1]["image_url"],
+                         "data:image/jpeg;base64,/9j/cGhvdG8=")
+        await backend.respond("", image_attachments=(image,))
+        self.assertEqual([item["type"] for item in
+                          responses.calls[1]["input"][0]["content"]], ["input_image"])
+
+    async def test_image_tool_continuation_does_not_resend_image(self):
+        call = SimpleNamespace(type="function_call", name="inspect", arguments="{}",
+                               call_id="call-1")
+        responses = FakeResponses(results=[
+            SimpleNamespace(output_text="", output=[call], id="initial"),
+            SimpleNamespace(output_text="final", output=[], id="final"),
+        ])
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        tool = app_module.CognitionToolDefinition(
+            "inspect", "inspect", {"type": "object", "properties": {},
+                                    "required": [], "additionalProperties": False},
+        )
+        result = await backend.respond(
+            "look", tools=(tool,),
+            tool_executor=AsyncMock(return_value=CognitionToolResult('{"status":"ok"}')),
+            refreshed_instructions=lambda: "refreshed",
+            image_attachments=(ImageAttachment("image/png", b"png"),),
+        )
+        self.assertEqual(result, "final")
+        self.assertIn("data:image/png;base64", repr(responses.calls[0]))
+        self.assertNotIn("data:image/png;base64", repr(responses.calls[1]))
+        self.assertEqual(responses.calls[1]["previous_response_id"], "initial")
     async def test_provider_authority_accounts_completion_exactly_once(self):
         response = SimpleNamespace(
             output_text="ok", output=[], id="response", usage=SimpleNamespace(

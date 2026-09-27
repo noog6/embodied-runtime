@@ -2802,14 +2802,17 @@ class RobotApplication:
 
     async def request_cognition(
         self, message: str, *, interaction: InteractionContext | None = None,
-        source: str | None = None,
+        source: str | None = None, image_attachments=(),
     ) -> str:
         """Run one finite operator attention episode."""
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Cognition requires a running application")
         if self._cognition_backend is None:
             raise RuntimeError("No cognition backend is configured")
-        if not message or not message.strip():
+        image_attachments = tuple(image_attachments)
+        if len(image_attachments) > 1:
+            raise ValueError("Cognition permits at most one current image attachment")
+        if (not message or not message.strip()) and not image_attachments:
             raise ValueError("Cognition message must be non-empty")
         if interaction is not None and interaction.initiator != InteractionInitiator.OPERATOR:
             raise ValueError("bounded operator cognition requires initiator=operator")
@@ -2824,6 +2827,8 @@ class RobotApplication:
                 "with a response expected"
             )
         backend = self._cognition_backend
+        if image_attachments and not backend.supports_image_input:
+            raise RuntimeError("Configured cognition backend does not support image input")
         trigger_source = (
             interaction.channel.value if interaction is not None
             else source or OPERATOR_SOURCE.get()
@@ -2840,9 +2845,11 @@ class RobotApplication:
             raise RuntimeError("Cognition requires an application task")
         self._active_operator_cognition_task = task
         try:
-            return await self._run_operator_episode(
-                message, backend, episode, interaction
-            )
+            if image_attachments:
+                return await self._run_operator_episode(
+                    message, backend, episode, interaction, image_attachments
+                )
+            return await self._run_operator_episode(message, backend, episode, interaction)
         finally:
             if self._active_operator_cognition_task is task:
                 self._active_operator_cognition_task = None
@@ -2850,6 +2857,7 @@ class RobotApplication:
     async def _run_operator_episode(
         self, message: str, backend: TextCognitionBackend,
         episode: AttentionEpisode, interaction: InteractionContext | None,
+        image_attachments=(),
     ) -> str:
         """Execute an episode while retaining its interaction-layer identity."""
         prior_memory = self.working_memory.snapshot()
@@ -3006,19 +3014,21 @@ class RobotApplication:
                     "[COGNITION] episode=E%s stage=%s source=%s backend=%s request=started",
                     episode.id, stage_name, episode.trigger_source, backend.identifier,
                 )
-                response = await backend.respond(
-                    message,
+                respond_arguments = dict(
                     instructions=self._operator_episode_instructions(
                         episode, message, prior_memory, acquisitions, interaction,
-                        delivery_destinations,
+                        delivery_destinations, has_image_attachment=bool(image_attachments),
                     ),
                     tools=tools,
                     tool_executor=execute_tool if tools else None,
                     refreshed_instructions=lambda: self._operator_episode_instructions(
                         episode, message, prior_memory, acquisitions, interaction,
-                        delivery_destinations,
+                        delivery_destinations, has_image_attachment=bool(image_attachments),
                     ),
                 )
+                if image_attachments:
+                    respond_arguments["image_attachments"] = image_attachments
+                response = await backend.respond(message, **respond_arguments)
                 LOGGER.info(
                     "[COGNITION] episode=E%s stage=%s source=%s backend=%s "
                     "request=completed response_chars=%s",
@@ -3118,6 +3128,7 @@ class RobotApplication:
         acquisitions: list[InitiativeAcquisitionOutcome],
         interaction: InteractionContext | None,
         delivery_destinations: Sequence[OperatorDeliveryDestination] = (),
+        has_image_attachment: bool = False,
     ) -> str:
         remaining = 2 - len(acquisitions)
         lines = [
@@ -3131,6 +3142,13 @@ class RobotApplication:
             lines.append(render_interaction_environment(self.interaction_environment))
             lines.append(interaction.render())
             lines.append(render_dialogue_policy(interaction))
+        if has_image_attachment:
+            lines.append(
+                "Current interaction attachment: one image was supplied by the operator "
+                "as request-scoped input. It is not a camera frame or evidence of the "
+                "robot's present physical surroundings. Do not claim inspect_scene or "
+                "camera observation occurred because this attachment exists."
+            )
         if delivery_destinations:
             lines.append("\n".join((
                 "Available operator delivery destinations",
