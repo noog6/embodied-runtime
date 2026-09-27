@@ -143,46 +143,80 @@ class TwilioMediaDownloader:
         ):
             raise MediaDownloadError("invalid_media_url")
 
+    @staticmethod
+    def _validate_redirect_url(url: str) -> None:
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except (TypeError, ValueError) as error:
+            raise MediaDownloadError("invalid_media_redirect") from error
+        if (
+            parsed.scheme != "https" or parsed.hostname != "mms.twiliocdn.com"
+            or port not in (None, 443) or parsed.username is not None
+            or parsed.password is not None or parsed.fragment
+        ):
+            raise MediaDownloadError("invalid_media_redirect")
+
+    @staticmethod
+    async def _read_image_response(response: Any, declared: str) -> bytes:
+        if response.status == 401 or response.status == 403:
+            raise MediaDownloadError("media_auth_failed")
+        if response.status == 404:
+            raise MediaDownloadError("media_not_found")
+        if response.status != 200:
+            raise MediaDownloadError("media_download_failed")
+        length = response.content_length
+        if length is not None and length > MAX_INTERACTION_IMAGE_BYTES:
+            raise MediaDownloadError("media_too_large")
+        actual = _normalized_media_type(response.headers.get("Content-Type", ""))
+        if actual != declared:
+            raise MediaDownloadError("media_type_mismatch")
+        chunks = bytearray()
+        async for chunk in response.content.iter_chunked(64 * 1024):
+            if len(chunks) + len(chunk) > MAX_INTERACTION_IMAGE_BYTES:
+                raise MediaDownloadError("media_too_large")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
     async def download(self, reference: TwilioMediaReference) -> ImageAttachment:
         declared = _normalized_media_type(reference.declared_media_type)
         if declared not in SUPPORTED_INTERACTION_IMAGE_TYPES:
             raise MediaDownloadError("unsupported_media_type")
         self._validate_url(reference.url)
         try:
-            from aiohttp import BasicAuth, ClientSession, ClientTimeout
+            from aiohttp import ClientSession, ClientTimeout, encode_basic_auth
             timeout = ClientTimeout(
                 total=MEDIA_DOWNLOAD_TIMEOUT_SECONDS, connect=5, sock_read=10,
             )
             async with ClientSession(timeout=timeout) as session:
                 async with session.get(
                     reference.url,
-                    auth=BasicAuth(self._account_sid, self._auth_token),
+                    headers={"Authorization": encode_basic_auth(
+                        self._account_sid, self._auth_token,
+                    )},
                     allow_redirects=False,
                 ) as response:
-                    if response.status == 401 or response.status == 403:
-                        raise MediaDownloadError("media_auth_failed")
-                    if response.status == 404:
-                        raise MediaDownloadError("media_not_found")
-                    if response.status != 200:
-                        raise MediaDownloadError("media_download_failed")
-                    length = response.content_length
-                    if length is not None and length > MAX_INTERACTION_IMAGE_BYTES:
-                        raise MediaDownloadError("media_too_large")
-                    actual = _normalized_media_type(response.headers.get("Content-Type", ""))
-                    if actual != declared:
-                        raise MediaDownloadError("media_type_mismatch")
-                    chunks = bytearray()
-                    async for chunk in response.content.iter_chunked(64 * 1024):
-                        if len(chunks) + len(chunk) > MAX_INTERACTION_IMAGE_BYTES:
-                            raise MediaDownloadError("media_too_large")
-                        chunks.extend(chunk)
+                    if response.status == 200:
+                        data = await self._read_image_response(response, declared)
+                    elif response.status == 307:
+                        location = response.headers.get("Location")
+                        if location is None:
+                            raise MediaDownloadError("invalid_media_redirect")
+                        self._validate_redirect_url(location)
+                        async with session.get(
+                            location, allow_redirects=False,
+                        ) as final_response:
+                            if 300 <= final_response.status < 400:
+                                raise MediaDownloadError("invalid_media_redirect")
+                            data = await self._read_image_response(final_response, declared)
+                    else:
+                        await self._read_image_response(response, declared)
         except MediaDownloadError:
             raise
         except (asyncio.TimeoutError, TimeoutError) as error:
             raise MediaDownloadError("media_download_timeout") from error
         except Exception as error:
             raise MediaDownloadError("media_download_failed") from error
-        data = bytes(chunks)
         if not _matches_magic(declared, data):
             raise MediaDownloadError("media_type_mismatch")
         return ImageAttachment(declared, data)

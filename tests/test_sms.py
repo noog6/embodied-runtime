@@ -110,16 +110,11 @@ def fake_aiohttp(session):
     """Return a complete offline seam for TwilioMediaDownloader's local import."""
     module = types.ModuleType("aiohttp")
 
-    class BasicAuth:
-        def __init__(self, login, password):
-            self.login = login
-            self.password = password
-
     class ClientTimeout:
         def __init__(self, **values):
             self.values = values
 
-    module.BasicAuth = BasicAuth
+    module.encode_basic_auth = lambda login, password: f"Basic {login}:{password}"
     module.ClientTimeout = ClientTimeout
     module.ClientSession = mock.Mock(return_value=session)
     return module
@@ -351,7 +346,7 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
     def test_runtime_image_bound_is_four_mib(self):
         self.assertEqual(MAX_INTERACTION_IMAGE_BYTES, 4 * 1024 * 1024)
 
-    async def test_download_streams_with_basic_auth_and_no_redirect_or_retry(self):
+    async def test_download_streams_with_authorization_header_and_no_redirect_or_retry(self):
         class Content:
             async def iter_chunked(self, size):
                 yield b"\xff\xd8"
@@ -393,8 +388,216 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(url, reference.url)
         self.assertNotIn(settings().auth_token, url)
         self.assertFalse(arguments["allow_redirects"])
-        self.assertEqual(arguments["auth"].login, settings().account_sid)
-        self.assertEqual(arguments["auth"].password, settings().auth_token)
+        self.assertNotIn("auth", arguments)
+        self.assertEqual(
+            arguments["headers"]["Authorization"],
+            f"Basic {settings().account_sid}:{settings().auth_token}",
+        )
+
+    async def test_valid_redirect_is_one_hop_without_credentials_and_validates_final_body(self):
+        class Content:
+            async def iter_chunked(self, size):
+                yield b"\xff\xd8\xffphoto"
+
+        responses = [
+            types.SimpleNamespace(
+                status=307, content_length=0,
+                headers={"Location": "https://mms.twiliocdn.com/path?opaque=private"},
+                content=Content(),
+            ),
+            types.SimpleNamespace(
+                status=200, content_length=8,
+                headers={"Content-Type": "image/jpeg"}, content=Content(),
+            ),
+        ]
+
+        class Context:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return Context(responses[len(self.calls) - 1])
+
+        session = Session()
+        reference = TwilioMediaReference(media_form()["MediaUrl0"], "image/jpeg")
+        with mock.patch.dict(sys.modules, {"aiohttp": fake_aiohttp(session)}):
+            image = await self.downloader.download(reference)
+
+        self.assertEqual(image, ImageAttachment("image/jpeg", b"\xff\xd8\xffphoto"))
+        self.assertEqual(len(session.calls), 2)
+        first_url, first_arguments = session.calls[0]
+        cdn_url, cdn_arguments = session.calls[1]
+        self.assertEqual(first_url, reference.url)
+        self.assertIn("Authorization", first_arguments["headers"])
+        self.assertEqual(cdn_url, "https://mms.twiliocdn.com/path?opaque=private")
+        self.assertNotIn("headers", cdn_arguments)
+        self.assertNotIn("auth", cdn_arguments)
+        self.assertFalse(cdn_arguments["allow_redirects"])
+        for secret in (settings().account_sid, settings().auth_token):
+            self.assertNotIn(secret, cdn_url)
+
+    async def test_invalid_or_missing_redirect_does_not_make_second_request(self):
+        invalid_locations = (
+            None,
+            "http://mms.twiliocdn.com/path",
+            "https://example.com/path",
+            "https://sub.mms.twiliocdn.com/path",
+            "https://user:password@mms.twiliocdn.com/path",
+            "https://mms.twiliocdn.com:8443/path",
+            "https://mms.twiliocdn.com/path#fragment",
+        )
+
+        class Context:
+            def __init__(self, location):
+                headers = {} if location is None else {"Location": location}
+                self.response = types.SimpleNamespace(status=307, headers=headers)
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self, location):
+                self.location = location
+                self.calls = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return Context(self.location)
+
+        reference = TwilioMediaReference(media_form()["MediaUrl0"], "image/jpeg")
+        for location in invalid_locations:
+            session = Session(location)
+            with self.subTest(location=location), mock.patch.dict(
+                sys.modules, {"aiohttp": fake_aiohttp(session)}
+            ), self.assertRaisesRegex(MediaDownloadError, "invalid_media_redirect"):
+                await self.downloader.download(reference)
+            self.assertEqual(len(session.calls), 1)
+
+    async def test_cdn_redirect_chain_is_rejected_without_third_request(self):
+        locations = [
+            "https://mms.twiliocdn.com/path?opaque=private",
+            "https://example.com/elsewhere",
+        ]
+
+        class Context:
+            def __init__(self, location):
+                self.response = types.SimpleNamespace(
+                    status=307, headers={"Location": location},
+                )
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return Context(locations[len(self.calls) - 1])
+
+        session = Session()
+        reference = TwilioMediaReference(media_form()["MediaUrl0"], "image/jpeg")
+        with mock.patch.dict(sys.modules, {"aiohttp": fake_aiohttp(session)}), \
+                self.assertRaisesRegex(MediaDownloadError, "invalid_media_redirect") as caught:
+            await self.downloader.download(reference)
+        self.assertEqual(len(session.calls), 2)
+        rendered = str(caught.exception)
+        self.assertNotIn(settings().account_sid, rendered)
+        self.assertNotIn(settings().auth_token, rendered)
+
+    async def test_redirected_response_uses_existing_mime_size_and_magic_checks(self):
+        class Content:
+            def __init__(self, data):
+                self.data = data
+
+            async def iter_chunked(self, size):
+                yield self.data
+
+        class Context:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self, final):
+                self.responses = [
+                    types.SimpleNamespace(
+                        status=307,
+                        headers={"Location": "https://mms.twiliocdn.com/path"},
+                    ),
+                    final,
+                ]
+                self.calls = 0
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, *args, **kwargs):
+                response = self.responses[self.calls]
+                self.calls += 1
+                return Context(response)
+
+        cases = (
+            ("image/png", 3, b"bad", "media_type_mismatch"),
+            ("image/jpeg", MAX_INTERACTION_IMAGE_BYTES + 1, b"", "media_too_large"),
+            ("image/jpeg", 3, b"bad", "media_type_mismatch"),
+        )
+        reference = TwilioMediaReference(media_form()["MediaUrl0"], "image/jpeg")
+        for media_type, length, data, reason in cases:
+            final = types.SimpleNamespace(
+                status=200, content_length=length,
+                headers={"Content-Type": media_type}, content=Content(data),
+            )
+            session = Session(final)
+            with self.subTest(reason=reason, media_type=media_type), mock.patch.dict(
+                sys.modules, {"aiohttp": fake_aiohttp(session)}
+            ), self.assertRaisesRegex(MediaDownloadError, reason):
+                await self.downloader.download(reference)
+            self.assertEqual(session.calls, 2)
 
     async def test_declared_and_streamed_oversize_are_rejected(self):
         class Content:
