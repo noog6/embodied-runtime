@@ -18,6 +18,7 @@ from embodied_runtime.jobs import (
     JobContinuationState, JobRunStatus, SQLiteJobStore,
 )
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.tasks import TaskStatus
 from tests.test_job_execution import JobBackend, Platform
 
 
@@ -480,6 +481,10 @@ class JobReadinessTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(disposition=disposition, readiness=readiness, delay=delay):
                 outcome = await app.work_current_job_once()
                 self.assertEqual(json.loads(backend.results[index].output)["status"], "rejected")
-                self.assertIsNone(app.job_continuation)
+                self.assertIs(app.job_continuation.state,
+                              JobContinuationState.AWAITING_OPERATOR)
+                self.assertIsNone(app.job_continuation.eligible_at_monotonic)
+                self.assertIsNone(app.job_continuation.event_type)
+                self.assertIs(app.current_job_run.task.status, TaskStatus.PAUSED)
                 self.assertEqual(outcome.disposition.value, "continue")
         await app.stop()

@@ -74,7 +74,7 @@ from embodied_runtime.jobs import (
     WorkspaceValidationError,
     JOB_PROGRESS_BASES, JobProgress, JobProgressUpdate, validate_counter_name,
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
-    JobTriggerType,
+    JobTriggerType, STATE_TENDING_CONDITIONS,
 )
 from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
 from embodied_runtime.memory import (
@@ -128,6 +128,10 @@ LOGGER = logging.getLogger(__name__)
 OPERATOR_SOURCE: ContextVar[str] = ContextVar("operator_source", default="operator")
 CAMERA_RESOURCE = ResourceKey("camera")
 CAMERA_CAPTURE_OWNER = ResourceOwner("runtime", "camera_capture")
+
+# Only implemented effects whose semantics make elapsed time itself useful may opt in.
+# No current Job-work effect changes a tended power, thermal, or memory condition.
+_TIME_DEPENDENT_STATE_TENDING_EFFECTS: frozenset[str] = frozenset()
 VISUAL_PERCEPTION_OWNER = ResourceOwner("runtime", "visual_perception")
 SPEAKER_RESOURCE = ResourceKey("audio.speaker")
 VOICE_SPEAKER_OWNER = ResourceOwner("runtime", "voice")
@@ -1844,7 +1848,7 @@ class RobotApplication:
             )
             return
         if outcome.readiness is None:
-            self._job_continuation = None
+            self._await_operator_after_invalid_outcome(outcome)
             return
         eligible_at = (
             self._monotonic() + outcome.delay_seconds
@@ -1862,12 +1866,9 @@ class RobotApplication:
             outcome.summary, outcome.readiness, eligible_at, event_type,
             event_armed_after_ns,
         )
-        LOGGER.info(
-            "[JOBS] job=JOB%s run=RUN%s continuation=armed readiness=%s%s remaining=%s source=%s",
-            outcome.job_id, outcome.run_id, outcome.readiness.value,
-            (f" delay_s={outcome.delay_seconds}" if outcome.delay_seconds is not None
-             else f" event={event_type.value}" if event_type is not None else ""),
-            self.options.jobs_max_auto_steps, source,
+        self._log_job_continuation_armed(
+            outcome.job_id, outcome.run_id, outcome.readiness,
+            outcome.delay_seconds, event_type, self.options.jobs_max_auto_steps, source,
         )
         if outcome.readiness in (
             JobContinuationReadiness.AFTER_DELAY,
@@ -1875,6 +1876,60 @@ class RobotApplication:
             JobContinuationReadiness.WAIT_FOR_EVENT,
         ):
             self._park_current_job_run()
+
+    def _await_operator_after_invalid_outcome(self, outcome: JobWorkOutcome) -> None:
+        """Park an uncommitted occurrence after its bounded outcome attempts fail."""
+        current = self._current_job_run
+        if current is None or current.run.id != outcome.run_id:
+            return
+        if (self._parked_job_run is not None
+                and self._parked_job_run.binding.run.id != outcome.run_id):
+            LOGGER.warning(
+                "[JOBS] job=JOB%s run=RUN%s continuation=rejected "
+                "reason=parked_slot_occupied action=fail_run",
+                outcome.job_id, outcome.run_id,
+            )
+            self.finish_job_run(
+                JobRunStatus.FAILED,
+                "Continuation capacity unavailable: parked slot occupied",
+            )
+            return
+        previous = self._job_continuation
+        remaining = (
+            previous.automatic_steps_remaining
+            if previous is not None and previous.run_id == outcome.run_id
+            else self.options.jobs_max_auto_steps
+        )
+        last_summary = (
+            previous.last_summary
+            if previous is not None and previous.run_id == outcome.run_id else None
+        )
+        self._job_continuation = JobContinuation(
+            outcome.job_id, outcome.run_id, outcome.task_id,
+            JobContinuationState.AWAITING_OPERATOR, remaining, last_summary,
+            JobContinuationReadiness.WAIT_FOR_OPERATOR,
+        )
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator "
+            "reason=invalid_outcome",
+            outcome.job_id, outcome.run_id,
+        )
+        self._park_current_job_run()
+
+    @staticmethod
+    def _log_job_continuation_armed(
+        job_id: int, run_id: int, readiness: JobContinuationReadiness,
+        delay_seconds: int | None, event_type: JobReadinessEventType | None,
+        remaining: int, source: str,
+    ) -> None:
+        LOGGER.info(
+            "[JOBS] job=JOB%s run=RUN%s continuation=armed readiness=%s%s "
+            "remaining=%s source=%s",
+            job_id, run_id, readiness.value,
+            (f" delay_s={delay_seconds}" if delay_seconds is not None
+             else f" event={event_type.value}" if event_type is not None else ""),
+            remaining, source,
+        )
 
     def _park_current_job_run(self) -> None:
         """Release execution ownership while retaining one exact volatile binding."""
@@ -2154,13 +2209,7 @@ class RobotApplication:
         if current is None:
             return
         if outcome.readiness is None:
-            self._job_continuation = replace(
-                current, state=JobContinuationState.AWAITING_OPERATOR,
-            )
-            LOGGER.warning(
-                "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator reason=invalid_outcome",
-                current.job_id, current.run_id,
-            )
+            self._await_operator_after_invalid_outcome(outcome)
             return
         eligible_at = (
             self._monotonic() + outcome.delay_seconds
@@ -2176,6 +2225,11 @@ class RobotApplication:
                 else None
             ),
             event_satisfied=False, wake_event=None,
+        )
+        self._log_job_continuation_armed(
+            outcome.job_id, outcome.run_id, outcome.readiness,
+            outcome.delay_seconds, outcome.event_type,
+            current.automatic_steps_remaining, "heartbeat",
         )
         if current.automatic_steps_remaining == 0:
             self._job_continuation = replace(
@@ -2252,6 +2306,74 @@ class RobotApplication:
             and self._active_goal is goal
         )
 
+    def _active_state_tending_conditions(
+        self, job_id: int,
+    ) -> tuple[tuple[JobTriggerType, JobReadinessEventType], ...]:
+        """Resolve enabled responsibility conditions from current state authorities."""
+        assert self.jobs is not None
+        active: list[tuple[JobTriggerType, JobReadinessEventType]] = []
+        for trigger in self.jobs.list_triggers():
+            metadata = STATE_TENDING_CONDITIONS.get(trigger.event_type)
+            if trigger.job_id != job_id or not trigger.enabled or metadata is None:
+                continue
+            if trigger.event_type is JobTriggerType.POWER_ATTENTION_REQUIRED:
+                condition_active = (
+                    self._runtime_state.power.condition is PowerCondition.ATTENTION
+                )
+            elif trigger.event_type is JobTriggerType.THERMAL_WARNING_RAISED:
+                condition_active = self._platform_monitor.thermal_warning_active
+            else:
+                condition_active = self._platform_monitor.memory_pressure_active
+            if condition_active:
+                active.append((trigger.event_type, metadata.recovery_event))
+        return tuple(active)
+
+    @staticmethod
+    def _state_tending_delay_has_effect(initiative: InitiativeOutcome) -> bool:
+        """Whether an applied effect explicitly authorizes timed reassessment."""
+        return any(
+            effect.status == "applied"
+            and effect.name in _TIME_DEPENDENT_STATE_TENDING_EFFECTS
+            for effect in initiative.effects
+        )
+
+    def _validate_state_tending_outcome(
+        self, job_id: int, disposition: JobWorkDisposition,
+        readiness: JobContinuationReadiness | None,
+        event_type: JobReadinessEventType | None,
+        initiative: InitiativeOutcome,
+    ) -> None:
+        active = self._active_state_tending_conditions(job_id)
+        if not active:
+            return
+        conditions = ", ".join(trigger.value for trigger, _event in active)
+        recoveries = ", ".join(event.value for _trigger, event in active)
+        if disposition is JobWorkDisposition.COMPLETED:
+            raise ValueError(
+                "Outcome rejected. Configured state-tending condition is still active: "
+                f"{conditions}. Successful completion requires current authoritative "
+                f"recovery. Observable recovery event(s): {recoveries}"
+            )
+        if disposition is not JobWorkDisposition.CONTINUE:
+            return
+        if readiness is JobContinuationReadiness.WAIT_FOR_EVENT:
+            active_recoveries = {event for _trigger, event in active}
+            if event_type not in active_recoveries:
+                raise ValueError(
+                    "Continuation readiness rejected. The requested event does not "
+                    "recover an active configured condition. Independently observable "
+                    f"recovery event(s): {recoveries}"
+                )
+        if (readiness is JobContinuationReadiness.AFTER_DELAY
+                and not self._state_tending_delay_has_effect(initiative)):
+            raise ValueError(
+                "Continuation readiness rejected. The responsibility is waiting for "
+                f"an independently observable recovery: {recoveries}. No applied "
+                "runtime effect makes passage of time itself a new source of evidence. "
+                "Use wait_for_event unless another valid readiness is supported by "
+                "current runtime facts."
+            )
+
     async def _request_job_outcome(
         self, binding: CurrentJobRun, task_binding: _CurrentTaskBinding,
         goal: ActiveGoal, episode: AttentionEpisode, stimulus: AttentionStimulus,
@@ -2269,6 +2391,7 @@ class RobotApplication:
         proposed_event_type: JobReadinessEventType | None = None
         proposed_progress_update: JobProgressUpdate | None = None
         consumed = False
+        attempts = 0
 
         def evidence_lines() -> list[str]:
             workspace_acquisitions = tuple(
@@ -2334,11 +2457,11 @@ class RobotApplication:
             nonlocal consumed, proposed_disposition, proposed_summary, proposed_report
             nonlocal proposed_readiness, proposed_delay_seconds
             nonlocal proposed_event_type
-            nonlocal proposed_progress_update
+            nonlocal proposed_progress_update, attempts
             if consumed:
                 return self._rejected_tool(call.name, "Job outcome request already consumed",
                                            log_prefix="JOBS")
-            consumed = True
+            attempts += 1
             try:
                 if call.name != REPORT_JOB_OUTCOME_TOOL.name:
                     raise RuntimeError("tool is not available")
@@ -2404,12 +2527,18 @@ class RobotApplication:
                         )
                 if not self._job_work_binding_matches(binding, task_binding, goal):
                     raise RuntimeError("exact Job work binding is no longer current")
+                self._validate_state_tending_outcome(
+                    binding.job.id, disposition, readiness, event_type, initiative,
+                )
                 proposed_disposition, proposed_summary, proposed_report = disposition, value, report
                 proposed_readiness, proposed_delay_seconds = readiness, delay_seconds
                 proposed_event_type = event_type
                 proposed_progress_update = progress_update
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as error:
+                if attempts >= 2:
+                    consumed = True
                 return self._rejected_tool(call.name, str(error), log_prefix="JOBS")
+            consumed = True
             return CognitionToolResult(json.dumps({
                 "status": "accepted",
                 "disposition": proposed_disposition.value,

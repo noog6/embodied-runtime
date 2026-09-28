@@ -19,6 +19,7 @@ from .continuation import (
 )
 from .sqlite_store import SQLiteJobStore
 from .scheduling import ScheduledJobController
+from .state_tending import STATE_TENDING_CONDITIONS, StateTendingCondition
 from .store import JobStore
 from .workspace import (
     FilesystemJobWorkspaceStore, JobWorkspaceStore, WorkspaceBackendError,
@@ -40,7 +41,8 @@ __all__ = ["InvalidJobRunTransitionError", "Job", "JobRun", "JobRunStatus", "Job
            "MAX_JOB_CONTINUITY_SUMMARY_CHARS", "MIN_JOB_CONTINUATION_DELAY_SECONDS",
            "MAX_JOB_CONTINUATION_DELAY_SECONDS",
            "project_job_continuity_summary", "render_job_continuity",
-           "ScheduledJobController"]
+           "ScheduledJobController", "STATE_TENDING_CONDITIONS",
+           "StateTendingCondition"]
 __all__.append("MAX_RUN_REPORT_CHARS")
 __all__ += [
     "FilesystemJobWorkspaceStore", "JobWorkspaceStore", "WorkspaceError",
