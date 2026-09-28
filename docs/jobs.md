@@ -517,3 +517,39 @@ future work.
 Each durable Job also owns one durable contained text Workspace shared across
 its occurrences. It remains separate from immutable JobRun result reports and
 from all volatile coordination state. See [Job Workspaces](job-workspaces.md).
+
+## Event-triggered responsibilities
+
+A `JobTrigger` is durable configuration from a bounded runtime-owned catalog,
+separate from the unchanged daily `JobSchedule`. The first supported trigger is
+`power_attention_required`; operators configure it with `job trigger JOB<n>
+power_attention_required` and remove it with `job untrigger`. A matching event
+starts the ordinary JobRun → Task → attention lifecycle only for an enabled Job.
+
+For this phase, each activation event type has at most one enabled trigger binding;
+creating or enabling a second binding fails closed until explicit multi-Job
+arbitration exists. Disabling a Job does not implicitly mutate its trigger row, so
+another Job cannot claim the event type until that enabled binding is disabled or
+removed.
+Only one active occurrence of that event-triggered responsibility is admitted.
+Further matching events coalesce rather than forming a queue. If coordination is
+busy, the application retains one volatile pending bit for that exact trigger and
+retries it at the next lightweight Job activation opportunity. It is discarded on
+shutdown, trigger removal, or authority disablement, and never stores event history
+or payloads. If its continuation is waiting for that semantic event, the same run wakes. `wait_for_event` supports
+`presence_changed`, `power_attention_required`, and `power_recovered`. A wake
+payload proves only the named transition and bounded transition value. Cognition
+must consult current `RuntimeState` or acquire fresh evidence for other facts.
+For power specifically, `PowerRecovered` discards a pending attention activation,
+and admission rechecks authoritative `PowerState.condition` so resolved historical
+transitions cannot start cognition later.
+
+The complete boundary is: a sensor measurement is cheaply classified into
+authoritative `PowerState`; a semantic transition event selects configured Job
+authority; a new JobRun performs bounded cognition; and a later event may wake
+that same run. Interrupted runs are never resurrected. Startup attention creates
+a new occurrence when the condition remains unresolved.
+
+The Jobs database schema version is 5. Opening a version-4 database transactionally
+adds the trigger table and its unique-enabled-owner index without rewriting Jobs,
+JobRuns, schedules, or result reports.

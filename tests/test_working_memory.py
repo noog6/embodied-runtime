@@ -221,6 +221,8 @@ class WorkingMemoryApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_battery_history_uses_sample_time_not_turn_completion_time(self):
         instants = iter((
+            # Initial trustworthy PowerMonitor observation at application startup.
+            datetime(2026, 9, 13, 19, 59, 59, tzinfo=UTC),
             datetime(2026, 9, 13, 20, 0, tzinfo=UTC),
             datetime(2026, 9, 13, 20, 0, 1, tzinfo=UTC),
             datetime(2026, 9, 13, 20, 0, 18, tzinfo=UTC),

@@ -45,6 +45,8 @@ from embodied_runtime.events import (
     BodyOrientationChanged,
     EventBus,
     PresenceChanged,
+    PowerAttentionRequired,
+    PowerRecovered,
 )
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
@@ -68,6 +70,7 @@ from embodied_runtime.jobs import (
     WorkspaceValidationError,
     JOB_PROGRESS_BASES, JobProgress, JobProgressUpdate, validate_counter_name,
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
+    JobTriggerType,
 )
 from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
 from embodied_runtime.memory import (
@@ -100,8 +103,9 @@ from embodied_runtime.platform import (
     PlatformSnapshot,
 )
 from embodied_runtime.state import (
-    BodyState, LifecycleState, PowerState, PresenceState, RuntimeState,
+    BodyState, LifecycleState, PowerCondition, PowerState, PresenceState, RuntimeState,
 )
+from embodied_runtime.power import PowerMonitor, PowerMonitorPolicy
 from embodied_runtime.tasks import Task, TaskGoal, TaskStatus
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
 from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
@@ -354,7 +358,8 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
                               "minimum": MIN_JOB_CONTINUATION_DELAY_SECONDS,
                               "maximum": MAX_JOB_CONTINUATION_DELAY_SECONDS},
             "event_type": {"type": ["string", "null"],
-                           "enum": ["presence_changed", None]},
+                           "enum": ["presence_changed", "power_attention_required",
+                                    "power_recovered", None]},
             "progress_update": {
                 "anyOf": [
                     {"type": "null"},
@@ -789,8 +794,9 @@ JOB_OUTCOME_EVALUATION_REQUEST = (
     "proceed at the next ordinary opportunity; after_delay with a 1..86400 second "
     "delay when waiting itself is useful (choose the shortest reasonable delay); or "
     "wait_for_operator only when meaningful progress specifically requires explicit "
-    "operator involvement; or wait_for_event with event_type presence_changed when a "
-    "later authoritative presence transition would make reconsideration useful. "
+    "operator involvement; or wait_for_event with an event_type from the bounded "
+    "catalog (presence_changed, power_attention_required, power_recovered) when that "
+    "later authoritative transition would make reconsideration useful. "
     "Terminal outcomes require null readiness, delay, and event_type. Event waiting "
     "requires a null delay; every other readiness requires a null event_type. "
     "A wake event proves only its explicitly projected runtime fact; acquire fresh "
@@ -897,6 +903,7 @@ class RobotApplication:
         events: EventBus | None = None,
         platform_provider: PlatformProvider | None = None,
         platform_monitor_policy: PlatformMonitorPolicy | None = None,
+        power_monitor_policy: PowerMonitorPolicy | None = None,
         body_backend: BodyBackend | None = None,
         reflexes: Sequence[Reflex] = (),
         camera_backend: CameraBackend | None = None,
@@ -909,6 +916,7 @@ class RobotApplication:
         temporal_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         job_continuation_sleep: Callable[[float], Awaitable[None]] | None = None,
         job_scheduler_sleep: Callable[[float], Awaitable[None]] | None = None,
+        power_monitor_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic_clock: Callable[[], float] | None = None,
         voice_provider: VoiceProvider | None = None,
         text_to_speech_provider: TextToSpeechProvider | None = None,
@@ -948,10 +956,18 @@ class RobotApplication:
         self._active_operator_cognition_task: asyncio.Task[object] | None = None
         self._active_job_work_task: asyncio.Task[object] | None = None
         self._job_continuation: JobContinuation | None = None
+        # One lossy, volatile activation bit per bounded trigger type; not an event queue.
+        self._pending_job_triggers: set[JobTriggerType] = set()
         # One application-lifetime listener; readiness changes never add workers.
+        self._job_event_subscriptions = (
+            (self.events.subscribe(PresenceChanged, self._on_job_presence_changed),
+             self.events.subscribe(PowerAttentionRequired, self._on_power_attention),
+             self.events.subscribe(PowerRecovered, self._on_power_recovered))
+            if job_store is not None else ()
+        )
+        # Compatibility name for the original presence listener diagnostic.
         self._job_event_subscription = (
-            self.events.subscribe(PresenceChanged, self._on_job_presence_changed)
-            if job_store is not None else None
+            self._job_event_subscriptions[0] if self._job_event_subscriptions else None
         )
         self._operator_message_sink = operator_message_sink
         self._operator_delivery_routes = (
@@ -1019,6 +1035,11 @@ class RobotApplication:
             lambda: self.state is LifecycleState.RUNNING,
             policy=platform_monitor_policy,
         )
+        self._power_monitor = PowerMonitor(
+            self.hardware, self.events, self._replace_power_state,
+            lambda: self.state is LifecycleState.RUNNING, self._aware_wall_clock,
+            policy=power_monitor_policy, sleep=power_monitor_sleep,
+        )
         self.temporal = TemporalFollowupController(
             self.events, is_running=lambda: self.state is LifecycleState.RUNNING,
             current_goal=lambda: self._active_goal, sleep=temporal_sleep,
@@ -1038,7 +1059,7 @@ class RobotApplication:
         self._scheduled_job_controller = (
             ScheduledJobController(
                 self.options.jobs_scheduler_poll_seconds,
-                self._offer_scheduled_job,
+                self._offer_job_activations,
                 sleep=job_scheduler_sleep or asyncio.sleep,
             ) if self.jobs is not None else None
         )
@@ -1133,17 +1154,39 @@ class RobotApplication:
 
     async def _on_job_presence_changed(self, event: PresenceChanged) -> None:
         """Record a matching wake and promptly offer it through the normal gate."""
-        continuation = self._job_continuation
-        current = self._current_job_run
+        self._satisfy_job_event(
+            JobReadinessEventType.PRESENCE_CHANGED, event.timestamp_ns,
+            JobWakeEvent(JobReadinessEventType.PRESENCE_CHANGED, present=event.present))
+
+    async def _on_power_recovered(self, event: PowerRecovered) -> None:
+        trigger_type = JobTriggerType.POWER_ATTENTION_REQUIRED
+        if trigger_type in self._pending_job_triggers:
+            self._pending_job_triggers.discard(trigger_type)
+            LOGGER.info("[JOBS] trigger=%s action=discarded reason=condition_resolved",
+                        trigger_type.value)
+        self._satisfy_job_event(JobReadinessEventType.POWER_RECOVERED, event.timestamp_ns,
+                                JobWakeEvent(JobReadinessEventType.POWER_RECOVERED,
+                                             battery_voltage_v=event.battery_voltage_v))
+
+    async def _on_power_attention(self, event: PowerAttentionRequired) -> None:
+        if self._satisfy_job_event(JobReadinessEventType.POWER_ATTENTION_REQUIRED,
+                                   event.timestamp_ns,
+                                   JobWakeEvent(
+                                       JobReadinessEventType.POWER_ATTENTION_REQUIRED,
+                                       battery_voltage_v=event.battery_voltage_v)):
+            return
+        await self._activate_triggered_jobs(JobTriggerType.POWER_ATTENTION_REQUIRED)
+
+    def _satisfy_job_event(self, event_type: JobReadinessEventType, timestamp_ns: int,
+                           wake_event: JobWakeEvent) -> bool:
+        continuation, current = self._job_continuation, self._current_job_run
         task_binding = self._current_task_binding
-        if (self.state is not LifecycleState.RUNNING
-                or continuation is None
+        if (self.state is not LifecycleState.RUNNING or continuation is None
                 or continuation.readiness is not JobContinuationReadiness.WAIT_FOR_EVENT
-                or continuation.event_type is not JobReadinessEventType.PRESENCE_CHANGED
+                or continuation.event_type is not event_type
                 or continuation.event_armed_after_ns is None
-                or event.timestamp_ns <= continuation.event_armed_after_ns
-                or continuation.event_satisfied
-                or self._active_job_work_task is not None
+                or timestamp_ns <= continuation.event_armed_after_ns
+                or continuation.event_satisfied or self._active_job_work_task is not None
                 or current is None
                 or current.job.id != continuation.job_id
                 or current.run.id != continuation.run_id
@@ -1151,20 +1194,94 @@ class RobotApplication:
                 or current.run.status is not JobRunStatus.RUNNING
                 or task_binding is None
                 or task_binding.task.id != continuation.task_id):
-            return
+            return False
         self._job_continuation = replace(
-            continuation, event_satisfied=True,
-            wake_event=JobWakeEvent(JobReadinessEventType.PRESENCE_CHANGED, event.present),
-        )
-        LOGGER.info(
-            "[JOBS] job=JOB%s run=RUN%s continuation=event_satisfied event=%s",
-            continuation.job_id, continuation.run_id, continuation.event_type.value,
-        )
-        LOGGER.info(
-            "[JOBS] continuation=offer trigger=event event_type=%s run=RUN%s",
-            continuation.event_type.value, continuation.run_id,
-        )
+            continuation, event_satisfied=True, wake_event=wake_event)
+        LOGGER.info("[JOBS] event=%s run=RUN%s action=wake", event_type.value,
+                    continuation.run_id)
         self._offer_job_continuation(trigger="event")
+        return True
+
+    async def _activate_triggered_jobs(self, trigger_type: JobTriggerType) -> bool:
+        if self.jobs is None or self.state is not LifecycleState.RUNNING:
+            return False
+        was_pending = trigger_type in self._pending_job_triggers
+        enabled = tuple(trigger for trigger in self.jobs.list_triggers(trigger_type)
+                        if trigger.enabled)
+        if len(enabled) > 1:
+            # Persistence enforces this for current stores; fail closed for custom stores.
+            LOGGER.error("[JOBS] trigger=%s action=rejected reason=multiple_enabled_owners",
+                         trigger_type.value)
+            self._pending_job_triggers.discard(trigger_type)
+            return False
+        if not enabled:
+            self._pending_job_triggers.discard(trigger_type)
+            return False
+        trigger = enabled[0]
+        job = self.jobs.get_job(trigger.job_id)
+        if job is None or not job.enabled:
+            self._pending_job_triggers.discard(trigger_type)
+            return False
+        active = next((run for run in self.jobs.list_runs(job.id)
+                       if run.status in (JobRunStatus.PENDING, JobRunStatus.RUNNING)), None)
+        if active is not None or (self._current_job_run is not None
+                                  and self._current_job_run.job.id == job.id):
+            LOGGER.info("[JOBS] trigger=%s job=JOB%s action=coalesced active_run=RUN%s",
+                        trigger_type.value, job.id,
+                        active.id if active else self._current_job_run.run.id)
+            self._pending_job_triggers.discard(trigger_type)
+            return False
+        # Existing coordination remains authoritative. Retain exactly one activation bit.
+        if (self._current_job_run is not None or self._current_task_binding is not None
+                or self._active_goal is not None or self._active_job_work_task is not None
+                or self._cognition_backend is None or self.episode_coordinator.operator_waiting
+                or self.episode_coordinator.current is not None):
+            already_pending = trigger_type in self._pending_job_triggers
+            self._pending_job_triggers.add(trigger_type)
+            LOGGER.info("[JOBS] trigger=%s job=JOB%s action=%s reason=busy",
+                        trigger_type.value, job.id,
+                        "coalesced" if already_pending else "deferred")
+            return False
+        if (was_pending
+                and trigger_type is JobTriggerType.POWER_ATTENTION_REQUIRED
+                and self._runtime_state.power.condition is not PowerCondition.ATTENTION):
+            self._pending_job_triggers.discard(trigger_type)
+            LOGGER.info("[JOBS] trigger=%s job=JOB%s action=discarded "
+                        "reason=condition_resolved", trigger_type.value, job.id)
+            return False
+        run = self.jobs.create_triggered_run(job.id)
+        if run is None:
+            self._pending_job_triggers.discard(trigger_type)
+            return False
+        binding = self._start_job_occurrence(job, run)
+        prepared = self._validate_job_work_preconditions()
+        episode = self._try_start_job_work_episode(binding, prepared[2])
+        if episode is None:
+            return False
+        self._pending_job_triggers.discard(trigger_type)
+        LOGGER.info("[JOBS] trigger=%s job=JOB%s action=start", trigger_type.value, job.id)
+        task = asyncio.create_task(self._run_triggered_initial_work(prepared, episode),
+                                   name="job-triggered-initial-work")
+        self._active_job_work_task = task
+        return True
+
+    async def _offer_job_activations(self) -> None:
+        """Retry volatile state-tending activations before ordinary daily schedules."""
+        for trigger_type in tuple(self._pending_job_triggers):
+            if await self._activate_triggered_jobs(trigger_type):
+                return
+        await self._offer_scheduled_job()
+
+    async def _run_triggered_initial_work(self, prepared, episode) -> None:
+        try:
+            outcome = await self._work_current_job_once(
+                "event_trigger", prepared=prepared, episode=episode)
+            if outcome.disposition is JobWorkDisposition.CONTINUE:
+                self._arm_job_continuation(outcome, source="event_trigger")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.warning("[JOBS] triggered initial work failed", exc_info=True)
 
     @property
     def job_continuation_controller(self) -> JobContinuationController | None:
@@ -1465,17 +1582,22 @@ class RobotApplication:
             raise RuntimeError("another Job work episode is already active")
         self._active_job_work_task = current_async_task
         target = "unassigned" if binding.job.target is None else str(binding.job.target)
-        wake_facts = () if wake_event is None else (
-            SemanticObservationFact("continuation_wake_event", wake_event.event_type.value),
-            SemanticObservationFact("presence_reported", str(wake_event.present).lower()),
-            SemanticObservationFact(
-                "wake_event_authority",
-                "The runtime event occurred after this JobRun began waiting. Its "
-                "presence_reported field is authoritative only for reported presence; "
-                "it establishes no identity, object visibility, safety, or other "
-                "mutable condition.",
-            ),
-        )
+        wake_facts = ()
+        if wake_event is not None:
+            detail = (SemanticObservationFact(
+                "presence_reported", str(wake_event.present).lower())
+                if wake_event.event_type is JobReadinessEventType.PRESENCE_CHANGED else
+                SemanticObservationFact("battery_voltage_v_at_transition",
+                                        f"{wake_event.battery_voltage_v:.3f}"))
+            wake_facts = (
+                SemanticObservationFact("continuation_wake_event",
+                                        wake_event.event_type.value), detail,
+                SemanticObservationFact(
+                    "wake_event_authority",
+                    "The runtime event establishes only its named transition and bounded "
+                    "value; unrelated mutable facts require current RuntimeState or fresh "
+                    "acquisition."),
+            )
         stimulus = AttentionStimulus(SemanticObservation(
             "job_run_work", f"JOB{binding.job.id}/RUN{binding.run.id}", (
                 SemanticObservationFact("job_id", str(binding.job.id)),
@@ -2391,14 +2513,21 @@ class RobotApplication:
     def _replace_platform_state(self, snapshot: PlatformSnapshot) -> None:
         self._runtime_state = replace(self._runtime_state, platform=snapshot)
 
+    def _replace_power_state(self, power: PowerState) -> None:
+        self._runtime_state = replace(self._runtime_state, power=power)
+
     def refresh_power_state(self) -> PowerState:
         """Refresh backend-neutral authoritative power state on demand."""
         power = PowerState(battery_voltage_v=None)
         if "battery_voltage" in self.hardware.capabilities:
             try:
                 voltage = self.hardware.read_battery_voltage_v()
+                if not math.isfinite(voltage):
+                    raise ValueError("battery voltage must be finite")
                 power = PowerState(
                     battery_voltage_v=voltage,
+                    # Classification and transitions belong exclusively to PowerMonitor.
+                    condition=self._runtime_state.power.condition,
                     observed_at=(
                         self._aware_wall_clock() if self.state is LifecycleState.RUNNING
                         else None
@@ -2456,7 +2585,6 @@ class RobotApplication:
                     )
             self.hardware.start()
             hardware_started = True
-            self.refresh_power_state()
             LOGGER.info(
                 "[HW] backend=%s physical=%s status=ready",
                 self.hardware.identifier,
@@ -2546,8 +2674,15 @@ class RobotApplication:
             await self.stop()
             raise
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
+        try:
+            await self._power_monitor.sample_once()
+        except Exception:
+            # A transient initial read must not strand an otherwise running runtime.
+            # The periodic monitor remains enabled and will retry normally.
+            LOGGER.exception("[POWER] status=initial_sample_failed continuing=true")
         await self.events.publish(ApplicationStarted(source="application"))
         self._platform_monitor.start()
+        self._power_monitor.start()
         self.voice.start_wake_listener()
         if self._job_continuation_controller is not None:
             self._job_continuation_controller.start()
@@ -2571,6 +2706,7 @@ class RobotApplication:
         if self.state is LifecycleState.STOPPED:
             return
         self._set_lifecycle(LifecycleState.STOPPING)
+        self._pending_job_triggers.clear()
         LOGGER.info("[APP] stopping")
         failure: BaseException | None = None
         if self._sms_service is not None:
@@ -2655,6 +2791,10 @@ class RobotApplication:
             failure = error
         try:
             await self._platform_monitor.stop()
+        except BaseException as error:
+            failure = error
+        try:
+            await self._power_monitor.stop()
         except BaseException as error:
             failure = error
         try:

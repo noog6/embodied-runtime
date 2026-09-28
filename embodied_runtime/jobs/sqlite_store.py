@@ -7,10 +7,11 @@ import sqlite3
 
 from .model import (
     InvalidJobRunTransitionError, Job, JobRun, JobRunStatus, JobSchedule, JobTarget,
+    JobTrigger, JobTriggerType,
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _JOB_RUNS_SCHEMA = """CREATE TABLE job_runs (
        id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
        status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','stopped','interrupted')),
@@ -31,6 +32,13 @@ _SCHEMA = (
        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
        local_time TEXT NOT NULL, timezone TEXT NOT NULL,
        last_started_local_date TEXT)""",
+    """CREATE TABLE IF NOT EXISTS job_triggers (
+       job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+       event_type TEXT NOT NULL CHECK(event_type IN ('power_attention_required')),
+       enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+       PRIMARY KEY(job_id,event_type))""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_job_triggers_enabled_event
+       ON job_triggers(event_type) WHERE enabled=1""",
 )
 
 
@@ -54,11 +62,22 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
+        if version == 4:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(_SCHEMA[-2])
+                self._connection.execute(_SCHEMA[-1])
+                self._connection.execute("PRAGMA user_version = 5")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+            return
         if version in (1, 2, 3):
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 if version == 1:
-                    self._connection.execute(_SCHEMA[-1])
+                    self._connection.execute(_SCHEMA[-3])
                 if version in (1, 2):
                     self._connection.execute("ALTER TABLE job_runs ADD COLUMN result_report TEXT")
                 self._connection.execute("ALTER TABLE job_runs RENAME TO job_runs_v3")
@@ -73,7 +92,9 @@ class SQLiteJobStore:
                 )
                 self._connection.execute("DROP TABLE job_runs_v3")
                 self._connection.execute("CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)")
-                self._connection.execute("PRAGMA user_version = 4")
+                self._connection.execute(_SCHEMA[-2])
+                self._connection.execute(_SCHEMA[-1])
+                self._connection.execute("PRAGMA user_version = 5")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -206,6 +227,67 @@ class SQLiteJobStore:
         return self._connection.execute(
             "DELETE FROM job_schedules WHERE job_id=?", (job_id,)
         ).rowcount == 1
+
+    def set_trigger(self, job_id: int, event_type: JobTriggerType, *,
+                    enabled: bool = True) -> JobTrigger:
+        trigger = JobTrigger(job_id, enabled, event_type)
+        if self.get_job(job_id) is None:
+            raise KeyError(f"unknown job: {job_id}")
+        try:
+            self._connection.execute(
+                """INSERT INTO job_triggers(job_id,event_type,enabled) VALUES(?,?,?)
+                   ON CONFLICT(job_id,event_type) DO UPDATE SET enabled=excluded.enabled""",
+                (job_id, event_type.value, int(enabled)))
+        except sqlite3.IntegrityError as error:
+            raise ValueError(
+                f"event trigger already has an enabled Job owner: {event_type.value}"
+            ) from error
+        return trigger
+
+    def get_trigger(self, job_id: int, event_type: JobTriggerType) -> JobTrigger | None:
+        JobTrigger(job_id, True, event_type)
+        row = self._connection.execute(
+            "SELECT * FROM job_triggers WHERE job_id=? AND event_type=?",
+            (job_id, event_type.value)).fetchone()
+        return None if row is None else JobTrigger(row["job_id"], bool(row["enabled"]),
+                                                    JobTriggerType(row["event_type"]))
+
+    def list_triggers(self, event_type: JobTriggerType | None = None) -> tuple[JobTrigger, ...]:
+        if event_type is not None and not isinstance(event_type, JobTriggerType):
+            raise TypeError("event_type must be a JobTriggerType or None")
+        rows = self._connection.execute(
+            "SELECT * FROM job_triggers" + (" WHERE event_type=?" if event_type else "") +
+            " ORDER BY job_id,event_type", (() if event_type is None else (event_type.value,))
+        ).fetchall()
+        return tuple(JobTrigger(row["job_id"], bool(row["enabled"]),
+                                JobTriggerType(row["event_type"])) for row in rows)
+
+    def remove_trigger(self, job_id: int, event_type: JobTriggerType) -> bool:
+        JobTrigger(job_id, True, event_type)
+        return self._connection.execute(
+            "DELETE FROM job_triggers WHERE job_id=? AND event_type=?",
+            (job_id, event_type.value)).rowcount == 1
+
+    def create_triggered_run(self, job_id: int) -> JobRun | None:
+        """Atomically admit one event occurrence only when no active run exists."""
+        _id(job_id, "job")
+        now = self._now()
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            active = self._connection.execute(
+                "SELECT id FROM job_runs WHERE job_id=? AND status IN ('pending','running') LIMIT 1",
+                (job_id,)).fetchone()
+            if active is not None:
+                self._connection.rollback()
+                return None
+            cursor = self._connection.execute(
+                "INSERT INTO job_runs(job_id,status,created_at) VALUES(?,'pending',?)",
+                (job_id, _format(now)))
+            self._connection.commit()
+            return JobRun(cursor.lastrowid, job_id, JobRunStatus.PENDING, now)
+        except BaseException:
+            self._connection.rollback()
+            raise
 
     def create_scheduled_run(self, job_id: int, local_date: str) -> JobRun | None:
         """Atomically consume today's schedule marker and create its occurrence."""

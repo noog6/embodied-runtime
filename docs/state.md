@@ -175,3 +175,11 @@ Current RuntimeState remains authoritative continuous truth while an attention
 episode is active. Operator acquisition stages reconstruct it afresh and include
 the current zero-or-one ActiveGoal even though operator episodes normally are not
 goal-bound. Episode lifecycle state is volatile, session-local, and not persisted.
+
+## Power condition
+
+For hardware exposing `battery_voltage`, the runtime's deterministic power monitor
+stores the latest voltage, `normal` or `attention` condition, and observation time
+in `PowerState`. Hardware without that capability keeps these values unavailable;
+the runtime does not invent a reading. The current `PowerState`, rather than an
+event history, is authoritative.
