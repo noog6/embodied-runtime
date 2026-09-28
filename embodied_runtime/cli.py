@@ -49,6 +49,7 @@ from embodied_runtime.interaction import (
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 from embodied_runtime.reflexes import PresenceCenteringReflex
 from embodied_runtime.platform import PlatformMonitorPolicy, PlatformSnapshot
+from embodied_runtime.power import PowerMonitorPolicy
 from embodied_runtime.perception import (
     OpenAIResponsesVisualPerceptionBackend, VisualPerceptionBackend,
 )
@@ -264,6 +265,9 @@ def parse_launch_arguments(
     args.jobs_heartbeat_seconds = effective.jobs_heartbeat_seconds
     args.jobs_max_auto_steps = effective.jobs_max_auto_steps
     args.jobs_scheduler_poll_seconds = effective.jobs_scheduler_poll_seconds
+    args.power_interval_seconds = effective.power_interval_seconds
+    args.power_attention_voltage_v = effective.power_attention_voltage_v
+    args.power_recovery_voltage_v = effective.power_recovery_voltage_v
     args.sms_enabled = effective.sms_enabled
     args.sms_backend = effective.sms_backend
     args.sms_bind_host = effective.sms_bind_host
@@ -535,6 +539,11 @@ async def _run_application(
         operator_message_sink=message_channel,
         operator_delivery_routes=delivery_routes,
         platform_monitor_policy=build_platform_monitor_policy(args),
+        power_monitor_policy=PowerMonitorPolicy(
+            interval_seconds=args.power_interval_seconds,
+            attention_voltage_v=args.power_attention_voltage_v,
+            recovery_voltage_v=args.power_recovery_voltage_v,
+        ),
         voice_provider=(FusionHatVoiceProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
         text_to_speech_provider=build_text_to_speech_provider(args),
         voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),

@@ -419,6 +419,47 @@ class JobReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(app.job_continuation.readiness, JobContinuationReadiness.READY)
         await app.stop()
 
+    async def test_after_delay_yields_to_unrelated_job_and_remains_eligible(self):
+        backend = ReadinessBackend((
+            {"disposition": "continue", "summary": "delayed",
+             "readiness": "after_delay", "delay_seconds": 60},
+            {"disposition": "completed", "summary": "other done",
+             "readiness": None, "delay_seconds": None},
+            {"disposition": "completed", "summary": "original done",
+             "readiness": None, "delay_seconds": None},
+        ))
+        app = self.app(backend)
+        await self.start_job(app)
+        original = app.current_job_run
+        await app.work_current_job_once()
+        other = app.start_job_run(self.store.create_job("Other").id)
+        self.clock.now = 200
+        app._offer_job_continuation()
+        self.assertEqual(app.current_job_run.run.id, other.run.id)
+        await app.work_current_job_once()
+        self.assertIs(self.store.get_run(other.run.id).status, JobRunStatus.COMPLETED)
+        app._offer_job_continuation()
+        await app._active_job_work_task
+        self.assertIs(self.store.get_run(original.run.id).status,
+                      JobRunStatus.COMPLETED)
+        await app.stop()
+
+    async def test_explicit_operator_work_rejects_disabled_parked_authority(self):
+        backend = ReadinessBackend((
+            {"disposition": "continue", "summary": "operator needed",
+             "readiness": "wait_for_operator", "delay_seconds": None},
+        ))
+        app = self.app(backend)
+        await self.start_job(app)
+        job_id = app.current_job_run.job.id
+        await app.work_current_job_once()
+        self.store.set_job_enabled(job_id, False)
+        with self.assertRaisesRegex(RuntimeError, "authority is stale"):
+            await app.work_current_job_once()
+        self.assertIsNone(app.job_continuation)
+        self.assertIsNone(app._parked_job_run)
+        await app.stop()
+
     async def test_invalid_cross_field_combinations_do_not_arm(self):
         invalid = (
             ("completed", "ready", None), ("failed", "wait_for_operator", None),

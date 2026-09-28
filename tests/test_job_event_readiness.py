@@ -1,8 +1,10 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 import tempfile
 import unittest
+from uuid import uuid4
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.console import RuntimeConsole
@@ -251,6 +253,111 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(app.job_continuation.event_satisfied)
         await app.stop()
 
+    async def test_job_current_scopes_continuation_to_displayed_occurrence(self):
+        app, _ = await self.start_waiting((
+            {"disposition": "continue", "summary": "waiting for power",
+             "readiness": "wait_for_event", "delay_seconds": None,
+             "event_type": "power_recovered"},
+        ))
+        parked = app.current_job_run
+        continuation = app.job_continuation
+        active = app.start_job_run(self.store.create_job("Unrelated active").id)
+
+        output = RuntimeConsole(app).execute("job current")[0]
+        self.assertIn(f"job:           JOB{active.job.id}", output)
+        self.assertIn(f"run:           RUN{active.run.id}", output)
+        self.assertIn("readiness:     none", output)
+        self.assertIn("auto_continuation:    none", output)
+        self.assertIn("auto_steps_remaining: 0", output)
+        self.assertNotIn("power_recovered", output)
+        self.assertNotIn("waiting_event:", output)
+        self.assertNotIn("event_satisfied:", output)
+        self.assertNotIn("delay_remaining:", output)
+        self.assertIs(app.job_continuation, continuation)
+
+        app.finish_job_run(JobRunStatus.STOPPED, "unrelated finished")
+        output = RuntimeConsole(app).execute("job current")[0]
+        self.assertIn(f"job:           JOB{parked.job.id}", output)
+        self.assertIn(f"run:           RUN{parked.run.id}", output)
+        self.assertIn("readiness:     wait_for_event", output)
+        self.assertIn("waiting_event: power_recovered", output)
+        self.assertIn("event_satisfied: false", output)
+        self.assertIn("auto_continuation:    armed", output)
+        self.assertIs(app.job_continuation, continuation)
+        await app.stop()
+
+    async def test_job_work_scopes_continuation_to_outcome_occurrence(self):
+        app, _ = await self.start_waiting((
+            {"disposition": "continue", "summary": "waiting for power",
+             "readiness": "wait_for_event", "delay_seconds": None,
+             "event_type": "power_recovered"},
+            {"disposition": "completed", "summary": "unrelated complete",
+             "readiness": None, "delay_seconds": None, "event_type": None},
+        ))
+        parked = app.current_job_run
+        continuation = app.job_continuation
+        active = app.start_job_run(self.store.create_job("Unrelated active").id)
+
+        output, should_exit = await RuntimeConsole(app).execute_async("job work")
+        self.assertFalse(should_exit)
+        self.assertIn(f"job:           JOB{active.job.id}", output)
+        self.assertIn(f"run:           RUN{active.run.id}", output)
+        self.assertIn("disposition:   completed", output)
+        self.assertIn("auto_continuation: none", output)
+        self.assertIn("auto_steps:    0", output)
+        self.assertNotIn("power_recovered", output)
+        self.assertIs(app.job_continuation, continuation)
+
+        current = RuntimeConsole(app).execute("job current")[0]
+        self.assertIn(f"job:           JOB{parked.job.id}", current)
+        self.assertIn(f"run:           RUN{parked.run.id}", current)
+        self.assertIn("readiness:     wait_for_event", current)
+        self.assertIn("waiting_event: power_recovered", current)
+        self.assertIs(app.job_continuation, continuation)
+        await app.stop()
+
+    async def test_disabled_parked_job_cannot_restore(self):
+        app, _ = await self.start_waiting((
+            {"disposition": "continue", "summary": "A",
+             "readiness": "wait_for_event", "delay_seconds": None,
+             "event_type": "presence_changed"},
+        ))
+        parked = app.current_job_run
+        self.store.set_job_enabled(parked.job.id, False)
+        await self.publish_presence(app)
+        self.assertIsNone(app.job_continuation)
+        self.assertIsNone(app._parked_job_run)
+        self.assertIs(self.store.get_run(parked.run.id).status, JobRunStatus.RUNNING)
+        await app.stop()
+
+    async def test_terminal_durable_parked_run_cannot_restore(self):
+        app, _ = await self.start_waiting((
+            {"disposition": "continue", "summary": "A",
+             "readiness": "wait_for_event", "delay_seconds": None,
+             "event_type": "presence_changed"},
+        ))
+        parked = app.current_job_run
+        self.store.transition_run(parked.run.id, JobRunStatus.STOPPED,
+                                  outcome_summary="external stop")
+        await self.publish_presence(app)
+        self.assertIsNone(app.job_continuation)
+        self.assertIsNone(app._parked_job_run)
+        self.assertIs(self.store.get_run(parked.run.id).status, JobRunStatus.STOPPED)
+        await app.stop()
+
+    async def test_mismatched_parked_continuation_cannot_restore(self):
+        app, _ = await self.start_waiting((
+            {"disposition": "continue", "summary": "A",
+             "readiness": "wait_for_event", "delay_seconds": None,
+             "event_type": "presence_changed"},
+        ))
+        app._job_continuation = replace(app.job_continuation, task_id=uuid4())
+        with self.assertRaisesRegex(RuntimeError, "authority is stale"):
+            await app.work_current_job_once()
+        self.assertIsNone(app.job_continuation)
+        self.assertIsNone(app._parked_job_run)
+        await app.stop()
+
     async def test_event_is_sticky_while_paused_and_diagnostic_is_bounded(self):
         app, backend = await self.start_waiting((
             {"disposition": "continue", "summary": "A", "readiness": "wait_for_event",
@@ -422,7 +529,7 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         marker = self.store.get_schedule(job.id).last_started_local_date
         self.assertEqual(len(self.store.list_runs(job.id)), 1)
         self.assertIs(run.run.status, JobRunStatus.RUNNING)
-        self.assertIs(run.task.status, TaskStatus.RUNNING)
+        self.assertIs(run.task.status, TaskStatus.PAUSED)
         self.assertIs(app.job_continuation.readiness,
                       JobContinuationReadiness.WAIT_FOR_EVENT)
         self.assertFalse(app.job_continuation.event_satisfied)

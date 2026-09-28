@@ -120,6 +120,31 @@ class ConfigurationTests(unittest.TestCase):
             ),
         )
 
+    def test_power_policy_defaults_overrides_and_validation(self):
+        defaults = self.effective("")
+        self.assertEqual(
+            (defaults.power_interval_seconds, defaults.power_attention_voltage_v,
+             defaults.power_recovery_voltage_v),
+            (30.0, 7.4, 7.7),
+        )
+        configured = self.effective(
+            "[power]\ninterval_seconds=12.5\nattention_voltage_v=7.2\n"
+            "recovery_voltage_v=7.8\n"
+        )
+        self.assertEqual(
+            (configured.power_interval_seconds,
+             configured.power_attention_voltage_v,
+             configured.power_recovery_voltage_v),
+            (12.5, 7.2, 7.8),
+        )
+        for contents in (
+            "[power]\ninterval_seconds=0\n",
+            "[power]\ninterval_seconds='often'\n",
+            "[power]\nattention_voltage_v=7.7\nrecovery_voltage_v=7.7\n",
+        ):
+            with self.subTest(contents=contents), self.assertRaises(ConfigurationError):
+                load_runtime_config(self.write(contents))
+
     def test_jobs_configuration_is_independent_and_resolves_relative_path(self):
         effective = self.effective(
             "[jobs]\nenabled=true\ndatabase_path='data/jobs.sqlite3'\n"

@@ -71,6 +71,16 @@ def proposal(*, progress=None, disposition="continue", readiness="wait_for_event
 
 
 class JobProgressModelTests(unittest.TestCase):
+    def test_outcome_instructions_distinguish_operator_authority_from_events(self):
+        self.assertIn("new information or authority from the operator",
+                      JOB_OUTCOME_EVALUATION_REQUEST)
+        self.assertIn("Physical operator involvement alone does not imply",
+                      JOB_OUTCOME_EVALUATION_REQUEST)
+        self.assertIn("wait_for_event(power_recovered)",
+                      JOB_OUTCOME_EVALUATION_REQUEST)
+        self.assertIn("independently observable world change",
+                      REPORT_JOB_OUTCOME_TOOL.description)
+
     def test_counter_grammar_and_harness_owned_increment(self):
         for name in ("presence_changes_seen", "log_chunks_reviewed"):
             self.assertEqual(validate_counter_name(name), name)

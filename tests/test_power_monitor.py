@@ -60,13 +60,18 @@ class PowerMonitorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_transitions_are_silent_while_stable_and_use_hysteresis(self):
         monitor = self.monitor((7.8, 7.3, 7.5, 7.2, 7.7, 7.8))
-        for _ in range(6):
-            await monitor.sample_once()
+        with self.assertLogs("embodied_runtime.power", level="INFO") as logs:
+            for _ in range(6):
+                await monitor.sample_once()
         import asyncio
         await asyncio.sleep(0)
         self.assertEqual([type(event) for event in self.events],
                          [PowerAttentionRequired, PowerRecovered])
         self.assertEqual(self.states[-1].condition, PowerCondition.NORMAL)
+        publications = [line for line in logs.output if "status=published" in line]
+        self.assertEqual(len(publications), 2)
+        self.assertIn("event=power_attention_required", publications[0])
+        self.assertIn("event=power_recovered", publications[1])
 
     async def test_initial_attention_reconciles_startup(self):
         await self.monitor((7.3,)).sample_once()

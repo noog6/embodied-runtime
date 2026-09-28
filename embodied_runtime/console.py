@@ -181,6 +181,9 @@ class RuntimeConsole:
                 outcome = await self._application.work_current_job_once()
             except (CognitionError, RuntimeError, ValueError) as error:
                 return f"Unable to work current Job: {error}.", False
+            continuation = self._job_continuation_for(
+                outcome.job_id, outcome.run_id, outcome.task_id,
+            )
             return "\n".join((
                 "Job work",
                 f"  job:           JOB{outcome.job_id}",
@@ -190,8 +193,8 @@ class RuntimeConsole:
                 f"  action:        {outcome.action or 'none'}",
                 f"  action_status: {outcome.action_status or 'none'}",
                 f"  summary:       {outcome.summary or 'none'}",
-                f"  auto_continuation: {self._job_continuation_state()}",
-                f"  auto_steps:    {self._job_continuation_steps()}",
+                f"  auto_continuation: {self._job_continuation_state(continuation)}",
+                f"  auto_steps:    {self._job_continuation_steps(continuation)}",
             )), False
         if lowered[:2] == ["camera", "capture"]:
             if len(words) != 3:
@@ -648,6 +651,9 @@ class RuntimeConsole:
         binding = self._application.current_job_run
         if binding is None:
             return "Current Job\n  none"
+        continuation = self._job_continuation_for(
+            binding.job.id, binding.run.id, binding.task.id,
+        )
         target = "unassigned" if binding.job.target is None else str(binding.job.target)
         return "\n".join((
             "Current Job",
@@ -659,11 +665,11 @@ class RuntimeConsole:
             f"  task_id:       {binding.task.id}",
             f"  task_status:   {binding.task.status.value}",
             f"  progress:      {self._job_progress()}",
-            f"  readiness:     {self._job_continuation_readiness()}",
-            *self._job_continuation_delay_lines(),
-            *self._job_continuation_event_lines(),
-            f"  auto_continuation:    {self._job_continuation_state()}",
-            f"  auto_steps_remaining: {self._job_continuation_steps()}",
+            f"  readiness:     {self._job_continuation_readiness(continuation)}",
+            *self._job_continuation_delay_lines(continuation),
+            *self._job_continuation_event_lines(continuation),
+            f"  auto_continuation:    {self._job_continuation_state(continuation)}",
+            f"  auto_steps_remaining: {self._job_continuation_steps(continuation)}",
         ))
 
     def _job_progress(self) -> str:
@@ -674,28 +680,39 @@ class RuntimeConsole:
             f"{counter.name}={counter.value}" for counter in progress.counters
         )
 
-    def _job_continuation_state(self) -> str:
+    def _job_continuation_for(self, job_id, run_id, task_id):
+        """Return continuation diagnostics only for one exact occurrence."""
         continuation = self._application.job_continuation
+        if (continuation is None
+                or (continuation.job_id, continuation.run_id, continuation.task_id)
+                != (job_id, run_id, task_id)):
+            return None
+        return continuation
+
+    @staticmethod
+    def _job_continuation_state(continuation) -> str:
         return "none" if continuation is None else continuation.state.value
 
-    def _job_continuation_steps(self) -> str:
-        continuation = self._application.job_continuation
+    @staticmethod
+    def _job_continuation_steps(continuation) -> str:
         return "0" if continuation is None else str(
             continuation.automatic_steps_remaining
         )
 
-    def _job_continuation_readiness(self) -> str:
-        continuation = self._application.job_continuation
+    @staticmethod
+    def _job_continuation_readiness(continuation) -> str:
         return "none" if continuation is None else continuation.readiness.value
 
-    def _job_continuation_delay_lines(self) -> tuple[str, ...]:
+    def _job_continuation_delay_lines(self, continuation) -> tuple[str, ...]:
+        if continuation is None:
+            return ()
         remaining = self._application.job_continuation_delay_remaining()
         if remaining is None:
             return ()
         return (f"  delay_remaining: {remaining}s",)
 
-    def _job_continuation_event_lines(self) -> tuple[str, ...]:
-        continuation = self._application.job_continuation
+    @staticmethod
+    def _job_continuation_event_lines(continuation) -> tuple[str, ...]:
         if (continuation is None
                 or continuation.readiness.value != "wait_for_event"
                 or continuation.event_type is None):

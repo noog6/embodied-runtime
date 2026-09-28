@@ -10,6 +10,7 @@ from embodied_runtime.jobs import JobContinuationState, JobRunStatus, SQLiteJobS
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.tasks import Task
 from tests.test_job_continuation import SequencedBackend
+from tests.test_job_readiness import ReadinessBackend
 from tests.test_job_execution import BlockingBackend, JobBackend, Platform
 
 
@@ -67,6 +68,85 @@ class ScheduledJobActivationTests(unittest.IsolatedAsyncioTestCase):
         await self.settle_work(app)
         self.assertEqual(len(self.store.list_runs(job.id)), 1)
         self.assertIs(self.store.list_runs(job.id)[0].status, JobRunStatus.COMPLETED)
+        await app.stop()
+
+    async def test_waiting_occurrence_releases_slot_and_retains_busy_event_wake(self):
+        backend = ReadinessBackend((
+            {"disposition": "continue", "summary": "wait for recovery",
+             "readiness": "wait_for_event", "delay_seconds": None,
+             "event_type": "power_recovered"},
+            {"disposition": "completed", "summary": "daily done",
+             "readiness": None, "delay_seconds": None, "event_type": None},
+            {"disposition": "completed", "summary": "power restored",
+             "readiness": None, "delay_seconds": None, "event_type": None},
+        ))
+        waiting = self.store.create_job("Power stewardship")
+        daily = self.store.create_job("Daily")
+        self.store.set_schedule(daily.id, "01:00", "America/Toronto")
+        self.clock.value = datetime.fromisoformat("2026-09-21T03:00:00-04:00")
+        app = self.app(backend, auto_continue=True)
+        await app.start()
+        original = app.start_job_run(waiting.id)
+        await app.work_current_job_once()
+        self.assertIsNotNone(app._parked_job_run)
+        self.assertIsNone(app._current_job_run)
+
+        await app._offer_scheduled_job()
+        active = app._active_job_work_task
+        self.assertIsNotNone(active)
+        await app._on_power_recovered(type("Recovery", (), {
+            "timestamp_ns": app.job_continuation.event_armed_after_ns + 1,
+            "battery_voltage_v": 7.7,
+        })())
+        self.assertTrue(app.job_continuation.event_satisfied)
+        await active
+        self.assertEqual(len(self.store.list_runs(waiting.id)), 1)
+
+        app._offer_job_continuation()
+        await app._active_job_work_task
+        self.assertIs(self.store.get_run(original.run.id).status,
+                      JobRunStatus.COMPLETED)
+        self.assertEqual(len(self.store.list_runs(waiting.id)), 1)
+        await app.stop()
+
+    async def test_second_dormant_wait_fails_without_replacing_parked_occurrence(self):
+        backend = ReadinessBackend((
+            {"disposition": "continue", "summary": "A waits",
+             "readiness": "wait_for_event", "delay_seconds": None,
+             "event_type": "power_recovered"},
+            {"disposition": "continue", "summary": "B also waits",
+             "readiness": "wait_for_operator", "delay_seconds": None,
+             "event_type": None},
+            {"disposition": "completed", "summary": "A recovered",
+             "readiness": None, "delay_seconds": None, "event_type": None},
+        ))
+        job_a = self.store.create_job("Power stewardship")
+        job_b = self.store.create_job("Daily waits")
+        self.store.set_schedule(job_b.id, "01:00", "America/Toronto")
+        self.clock.value = datetime.fromisoformat("2026-09-21T03:00:00-04:00")
+        app = self.app(backend, auto_continue=True)
+        await app.start()
+        original = app.start_job_run(job_a.id)
+        await app.work_current_job_once()
+        original_continuation = app.job_continuation
+
+        await app._offer_scheduled_job()
+        await app._active_job_work_task
+        run_b = self.store.list_runs(job_b.id)[0]
+        self.assertIs(run_b.status, JobRunStatus.FAILED)
+        self.assertIn("parked slot occupied", run_b.error_summary)
+        self.assertIs(app.job_continuation, original_continuation)
+        self.assertEqual(app._parked_job_run.binding.run.id, original.run.id)
+        self.assertIsNone(app._current_job_run)
+
+        await app._on_power_recovered(type("Recovery", (), {
+            "timestamp_ns": app.job_continuation.event_armed_after_ns + 1,
+            "battery_voltage_v": 7.7,
+        })())
+        await app._active_job_work_task
+        self.assertIs(self.store.get_run(original.run.id).status,
+                      JobRunStatus.COMPLETED)
+        self.assertEqual(len(self.store.list_runs(job_a.id)), 1)
         await app.stop()
 
     async def test_catch_up_is_once_and_does_not_backfill(self):

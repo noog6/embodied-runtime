@@ -79,6 +79,13 @@ class SmsFileConfig:
 
 
 @dataclass(frozen=True)
+class PowerFileConfig:
+    interval_seconds: float = 30.0
+    attention_voltage_v: float = 7.4
+    recovery_voltage_v: float = 7.7
+
+
+@dataclass(frozen=True)
 class RuntimeFileConfiguration:
     runtime: RuntimeFileConfig = RuntimeFileConfig()
     initiative: InitiativeFileConfig = InitiativeFileConfig()
@@ -87,6 +94,7 @@ class RuntimeFileConfiguration:
     jobs: JobsFileConfig = JobsFileConfig()
     interaction: InteractionFileConfig = InteractionFileConfig()
     sms: SmsFileConfig = SmsFileConfig()
+    power: PowerFileConfig = PowerFileConfig()
 
 
 @dataclass(frozen=True)
@@ -132,6 +140,9 @@ class LaunchConfiguration:
     sms_bind_host: str
     sms_bind_port: int
     sms_webhook_path: str
+    power_interval_seconds: float
+    power_attention_voltage_v: float
+    power_recovery_voltage_v: float
 
 
 HISTORICAL_DEFAULTS = LaunchConfiguration(
@@ -154,6 +165,8 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     jobs_scheduler_poll_seconds=30.0,
     sms_enabled=False, sms_backend="twilio", sms_bind_host="127.0.0.1",
     sms_bind_port=8080, sms_webhook_path="/sms",
+    power_interval_seconds=30.0, power_attention_voltage_v=7.4,
+    power_recovery_voltage_v=7.7,
 )
 
 _RUNTIME_KEYS = {
@@ -177,6 +190,7 @@ _JOBS_KEYS = {
 }
 _INTERACTION_KEYS = {"environment"}
 _SMS_KEYS = {"enabled", "backend", "bind_host", "bind_port", "webhook_path"}
+_POWER_KEYS = {"interval_seconds", "attention_voltage_v", "recovery_voltage_v"}
 _ENUMS = {
     "runtime.hardware": {"virtual", "fusion-hat"},
     "runtime.camera": {"none", "picamera2"},
@@ -201,7 +215,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "initiative", "voice", "memory", "jobs", "interaction", "sms"})
+    _reject_unknown(data, {"runtime", "initiative", "voice", "memory", "jobs", "interaction", "sms", "power"})
     runtime = _table(data, "runtime")
     initiative = _table(data, "initiative")
     voice = _table(data, "voice")
@@ -209,6 +223,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     jobs = _table(data, "jobs")
     interaction = _table(data, "interaction")
     sms = _table(data, "sms")
+    power = _table(data, "power")
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
@@ -216,6 +231,24 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     _reject_unknown(jobs, _JOBS_KEYS, "jobs")
     _reject_unknown(interaction, _INTERACTION_KEYS, "interaction")
     _reject_unknown(sms, _SMS_KEYS, "sms")
+    _reject_unknown(power, _POWER_KEYS, "power")
+
+    power_values = {
+        "interval_seconds": power.get("interval_seconds", 30.0),
+        "attention_voltage_v": power.get("attention_voltage_v", 7.4),
+        "recovery_voltage_v": power.get("recovery_voltage_v", 7.7),
+    }
+    for key, value in power_values.items():
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            raise ConfigurationError(f"power.{key} must be a finite number")
+        power_values[key] = float(value)
+    if power_values["interval_seconds"] <= 0:
+        raise ConfigurationError("power.interval_seconds must be positive")
+    if power_values["recovery_voltage_v"] <= power_values["attention_voltage_v"]:
+        raise ConfigurationError(
+            "power.recovery_voltage_v must exceed power.attention_voltage_v"
+        )
 
     if "enabled" in sms and not isinstance(sms["enabled"], bool):
         raise ConfigurationError("sms.enabled must be boolean")
@@ -370,6 +403,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         ),
         InteractionFileConfig(**interaction),
         SmsFileConfig(sms.get("enabled", False), backend, bind_host, bind_port, webhook_path),
+        PowerFileConfig(**power_values),
     )
 
 
@@ -385,6 +419,7 @@ def resolve_launch_configuration(
     jobs = file_config.jobs
     interaction = file_config.interaction
     sms = file_config.sms
+    power = file_config.power
 
     def scalar(name: str, configured: object, historical: object) -> object:
         explicit = getattr(cli_values, name, None)
@@ -461,6 +496,9 @@ def resolve_launch_configuration(
         sms_bind_host=sms.bind_host,
         sms_bind_port=sms.bind_port,
         sms_webhook_path=sms.webhook_path,
+        power_interval_seconds=power.interval_seconds,
+        power_attention_voltage_v=power.attention_voltage_v,
+        power_recovery_voltage_v=power.recovery_voltage_v,
     )
 
 

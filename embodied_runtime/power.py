@@ -81,9 +81,13 @@ class PowerMonitor:
         if self._may_publish() and changed and condition is PowerCondition.ATTENTION:
             await self._events.publish(PowerAttentionRequired(
                 source=SOURCE, battery_voltage_v=voltage))
+            LOGGER.info("[POWER] event=power_attention_required voltage_v=%.3f status=published",
+                        voltage)
         elif (self._may_publish() and previous is PowerCondition.ATTENTION
               and condition is PowerCondition.NORMAL):
             await self._events.publish(PowerRecovered(source=SOURCE, battery_voltage_v=voltage))
+            LOGGER.info("[POWER] event=power_recovered voltage_v=%.3f status=published",
+                        voltage)
         return state
 
     def start(self) -> None:

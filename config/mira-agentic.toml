@@ -42,6 +42,11 @@ auto_continue = true
 heartbeat_seconds = 30
 max_auto_steps = 3
 
+[power]
+interval_seconds = 30.0
+attention_voltage_v = 7.4
+recovery_voltage_v = 7.7
+
 [sms]
 enabled = false
 backend = "twilio"
