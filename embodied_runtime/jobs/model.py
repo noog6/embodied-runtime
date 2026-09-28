@@ -19,6 +19,8 @@ class JobTriggerType(StrEnum):
     """Bounded runtime-owned catalog of durable activation triggers."""
 
     POWER_ATTENTION_REQUIRED = "power_attention_required"
+    THERMAL_WARNING_RAISED = "thermal_warning_raised"
+    MEMORY_PRESSURE_RAISED = "memory_pressure_raised"
 
 
 @dataclass(frozen=True, slots=True)

@@ -68,8 +68,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.events = RecordingEventBus()
         self.first_platform = snapshot(hostname="first")
         self.second_platform = snapshot(hostname="second", captured_monotonic=2.0)
+        self.third_platform = snapshot(hostname="third", captured_monotonic=3.0)
         self.platform_provider = FakePlatformProvider(
-            [self.first_platform, self.second_platform]
+            [self.first_platform, self.second_platform, self.third_platform]
         )
         self.application = RobotApplication(
             RobotProfile("test", "Test Robot"), self.hardware,
@@ -100,7 +101,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_captures_platform_state(self) -> None:
         await self.application.start()
-        self.assertIs(self.application.runtime_state.platform, self.first_platform)
+        self.assertIs(self.application.runtime_state.platform, self.second_platform)
         self.assertIsNone(self.application.runtime_state.power.battery_voltage_v)
         await self.application.stop()
 
@@ -108,9 +109,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await self.application.start()
         previous_state = self.application.runtime_state
         refreshed = self.application.refresh_platform_state()
-        self.assertIs(refreshed, self.second_platform)
-        self.assertIs(self.application.runtime_state.platform, self.second_platform)
-        self.assertIs(previous_state.platform, self.first_platform)
+        self.assertIs(refreshed, self.third_platform)
+        self.assertIs(self.application.runtime_state.platform, self.third_platform)
+        self.assertIs(previous_state.platform, self.second_platform)
         await self.application.stop()
 
     async def test_runtime_state_cannot_be_mutated(self) -> None:

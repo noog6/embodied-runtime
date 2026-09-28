@@ -96,7 +96,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             memory_available_bytes=260 * 1024 * 1024,
             cpu_temperature_celsius=39.24, captured_monotonic=10,
         )
-        self.provider = CountingProvider([self.first])
+        self.provider = CountingProvider([self.first, self.first])
         self.app = RobotApplication(
             RobotProfile("test", "Test Robot"), VirtualHardwareBackend(),
             ApplicationOptions(startup_prompt="secret words"),
@@ -119,7 +119,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             workspaces = FilesystemJobWorkspaceStore(Path(temporary) / "jobs-workspaces")
             app = RobotApplication(
                 RobotProfile("jobs", "Jobs Robot"), VirtualHardwareBackend(),
-                platform_provider=CountingProvider([self.first]), job_store=store,
+                platform_provider=CountingProvider([self.first, self.first]), job_store=store,
                 job_workspace_store=workspaces,
             )
             await app.start()
@@ -187,7 +187,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             workspaces = FilesystemJobWorkspaceStore(Path(temporary) / "jobs-workspaces")
             app = RobotApplication(
                 RobotProfile("jobs", "Jobs Robot"), VirtualHardwareBackend(),
-                platform_provider=CountingProvider([self.first]), job_store=store,
+                platform_provider=CountingProvider([self.first, self.first]), job_store=store,
                 job_workspace_store=workspaces,
             )
             await app.start()
@@ -418,7 +418,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             database = Path(directory) / "memory.sqlite3"
             first_app = RobotApplication(
                 RobotProfile("restart", "Restart"), VirtualHardwareBackend(),
-                platform_provider=CountingProvider([self.first]),
+                platform_provider=CountingProvider([self.first, self.first]),
                 persistent_memory_store=SQLiteMemoryStore(database),
             )
             await first_app.start()
@@ -454,7 +454,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
 
             second_app = RobotApplication(
                 RobotProfile("restart", "Restart"), VirtualHardwareBackend(),
-                platform_provider=CountingProvider([self.first]),
+                platform_provider=CountingProvider([self.first, self.first]),
                 persistent_memory_store=SQLiteMemoryStore(database),
             )
             await second_app.start()
@@ -587,7 +587,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         app = RobotApplication(
             RobotProfile("camera", "Camera Robot"),
             VirtualHardwareBackend(),
-            platform_provider=CountingProvider([self.first]),
+            platform_provider=CountingProvider([self.first, self.first]),
             camera_backend=camera,
         )
         await app.start()
@@ -653,7 +653,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         app = RobotApplication(
             RobotProfile("camera", "Camera Robot"),
             VirtualHardwareBackend(),
-            platform_provider=CountingProvider([self.first]),
+            platform_provider=CountingProvider([self.first, self.first]),
             camera_backend=camera,
         )
         await app.start()

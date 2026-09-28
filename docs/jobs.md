@@ -262,8 +262,10 @@ does not resume it. Explicit work may override either waiting readiness and
 receives the latest valid semantic continuity summary.
 
 `wait_for_event` fully yields until a supported semantic runtime event occurs.
-The bounded catalog contains `presence_changed`, `power_attention_required`, and
-`power_recovered`, mapped by the harness to their semantic runtime events; model
+The bounded catalog contains `presence_changed`, `power_attention_required`,
+`power_recovered`, `thermal_warning_raised`, `thermal_warning_cleared`,
+`memory_pressure_raised`, and `memory_pressure_cleared`, mapped by the harness to
+their semantic runtime events; model
 output cannot name Python classes or provide predicates.
 The event must arrive after the exact wait is armed. A matching event satisfies
 the current wake and immediately offers continuation through the same ordinary
@@ -553,9 +555,10 @@ from all volatile coordination state. See [Job Workspaces](job-workspaces.md).
 ## Event-triggered responsibilities
 
 A `JobTrigger` is durable configuration from a bounded runtime-owned catalog,
-separate from the unchanged daily `JobSchedule`. The first supported trigger is
-`power_attention_required`; operators configure it with `job trigger JOB<n>
-power_attention_required` and remove it with `job untrigger`. A matching event
+separate from the unchanged daily `JobSchedule`. Supported triggers are
+`power_attention_required`, `thermal_warning_raised`, and
+`memory_pressure_raised`; operators configure one with `job trigger JOB<n>
+<event_type>` and remove it with `job untrigger`. A matching event
 starts the ordinary JobRun → Task → attention lifecycle only for an enabled Job.
 
 For this phase, each activation event type has at most one enabled trigger binding;
@@ -563,18 +566,34 @@ creating or enabling a second binding fails closed until explicit multi-Job
 arbitration exists. Disabling a Job does not implicitly mutate its trigger row, so
 another Job cannot claim the event type until that enabled binding is disabled or
 removed.
-Only one active occurrence of that event-triggered responsibility is admitted.
+Multiple trigger types may point to the same durable responsibility. Only one active
+occurrence of that Job is admitted regardless of which configured trigger fires.
 Further matching events coalesce rather than forming a queue. If coordination is
 busy, the application retains one volatile pending bit for that exact trigger and
 retries it at the next lightweight Job activation opportunity. It is discarded on
 shutdown, trigger removal, or authority disablement, and never stores event history
 or payloads. If its continuation is waiting for that semantic event, the same run wakes. `wait_for_event` supports
-`presence_changed`, `power_attention_required`, and `power_recovered`. A wake
+`presence_changed`, `power_attention_required`, `power_recovered`,
+`thermal_warning_raised`, `thermal_warning_cleared`, `memory_pressure_raised`,
+and `memory_pressure_cleared`. A wake
 payload proves only the named transition and bounded transition value. Cognition
 must consult current `RuntimeState` or acquire fresh evidence for other facts.
 For power specifically, `PowerRecovered` discards a pending attention activation,
 and admission rechecks authoritative `PowerState.condition` so resolved historical
 transitions cannot start cognition later.
+Thermal and memory-pressure admission follows the same fail-closed rule: a deferred
+activation is admitted only while the `PlatformMonitor`'s current hysteretic condition
+remains active. Cleared events proactively discard pending bits, while this current-state
+check also protects retry ordering without treating the earlier event payload as authority.
+
+Once normal event and attention coordination is ready, startup takes a fresh platform
+snapshot, installs it as current `RuntimeState`, and re-establishes the monitor baseline
+from that same observation. Earlier initialization-time samples are diagnostics, not
+semantic transition history. The monitor publishes at most one semantic raised event
+for each condition active at this operational handoff. Its retained hysteresis state
+prevents the first periodic sample from publishing the same transition again. Normal
+handoff conditions publish nothing, and simultaneous health conditions still pass
+through ordinary per-Job active-occurrence coalescing rather than creating a backlog.
 
 The complete boundary is: a sensor measurement is cheaply classified into
 authoritative `PowerState`; a semantic transition event selects configured Job
@@ -582,6 +601,7 @@ authority; a new JobRun performs bounded cognition; and a later event may wake
 that same run. Interrupted runs are never resurrected. Startup attention creates
 a new occurrence when the condition remains unresolved.
 
-The Jobs database schema version is 5. Opening a version-4 database transactionally
-adds the trigger table and its unique-enabled-owner index without rewriting Jobs,
-JobRuns, schedules, or result reports.
+The Jobs database schema version is 6. Opening a version-4 database transactionally
+adds the trigger table; opening version 5 expands its bounded event-type constraint.
+Both migrations preserve Jobs, JobRuns, schedules, result reports, trigger rows,
+and the unique-enabled-owner invariant.

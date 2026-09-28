@@ -507,7 +507,7 @@ class RuntimeConsole:
     def _job_trigger(self, words: list[str], *, remove: bool) -> str:
         store = self._application.jobs
         usage = f"Usage: job {'untrigger' if remove else 'trigger'} JOB<n>" \
-                " [power_attention_required]."
+                " [power_attention_required|thermal_warning_raised|memory_pressure_raised]."
         if store is None:
             return "Jobs persistence is disabled."
         if len(words) not in ((4,) if remove else (3, 4)) \
