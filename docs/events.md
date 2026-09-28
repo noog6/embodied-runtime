@@ -74,8 +74,13 @@ Attention may project one selected event into an immutable
 it identifies the transition while fresh `RuntimeState` describes current
 reality. The projection is request-local, retains no raw event, and creates no
 history. Supported projections are reflex-sourced `BodyOrientationChanged` and,
-when explicitly enabled, existing thermal and memory-pressure raised/cleared
-platform events. `PresenceChanged` is deliberately not subscribed: presence
+when explicitly enabled, thermal-warning raised/cleared platform events.
+Memory-pressure transitions remain semantic runtime observations available to
+state, health inspection, history, and deterministic consumers, but are not
+currently eligible for generic autonomous attention because cognition itself
+has a meaningful memory cost on constrained hardware. A future cheap,
+deterministic survival or reflex mechanism may consume them instead.
+`PresenceChanged` is deliberately not subscribed: presence
 centering can publish the more informative reflex body transition, avoiding
 competing episodes without timers, priorities, or coalescing.
 

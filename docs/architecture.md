@@ -334,9 +334,11 @@ persistent memory, or provider session.
 
 Phase 11 projects selected authoritative events into immutable, request-local
 `SemanticObservation` values before goal-directed attention runs. Reflex-sourced
-body orientation changes remain enabled by `--initiative`; thermal-warning and
-memory-pressure raised/cleared transitions additionally require
-`--initiative-platform-attention`. The event says what transitioned, fresh
+body orientation changes remain enabled by `--initiative`; thermal-warning
+raised/cleared transitions additionally require `--initiative-platform-attention`.
+Memory-pressure transitions remain semantic observations for deterministic
+consumers and health inspection but are not eligible for generic autonomous
+attention. The event says what transitioned, fresh
 `RuntimeState` remains authoritative, and the observation only says why this
 request occurred. No observation is stored, queued, polled, or added to working
 memory. `PresenceChanged` is intentionally excluded because its centering reflex
