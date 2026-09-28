@@ -12,10 +12,8 @@ from embodied_runtime.cognition.outcome import (
 )
 
 from embodied_runtime.events import (
-    BodyOrientationChanged, Event, EventBus, MemoryPressureCleared,
-    MemoryPressureRaised, Subscription, ThermalWarningCleared,
-    ThermalWarningRaised,
-    TemporalFollowupDue,
+    BodyOrientationChanged, Event, EventBus, Subscription,
+    ThermalWarningCleared, ThermalWarningRaised, TemporalFollowupDue,
 )
 from embodied_runtime.observations import (
     SemanticObservation, SemanticObservationFact,
@@ -432,10 +430,7 @@ class GoalAttentionController:
             TemporalFollowupDue, self._on_temporal_event
         ))
         if self.platform_attention_enabled:
-            for event_type in (
-                ThermalWarningRaised, ThermalWarningCleared,
-                MemoryPressureRaised, MemoryPressureCleared,
-            ):
+            for event_type in (ThermalWarningRaised, ThermalWarningCleared):
                 self._subscriptions.append(events.subscribe(event_type, self._on_platform_event))
         LOGGER.info("[ATTENTION] policy=goal_semantic_transitions platform=%s status=ready",
                     "enabled" if self.platform_attention_enabled else "disabled")
@@ -534,8 +529,7 @@ class GoalAttentionController:
         await self._consider(observation_from_body_orientation(event))
 
     async def _on_platform_event(self, event: Event) -> None:
-        assert isinstance(event, (ThermalWarningRaised, ThermalWarningCleared,
-                                  MemoryPressureRaised, MemoryPressureCleared))
+        assert isinstance(event, (ThermalWarningRaised, ThermalWarningCleared))
         if event.source != "platform_monitor":
             return
         await self._consider(observation_from_platform_transition(event))

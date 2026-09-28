@@ -114,24 +114,51 @@ class PlatformAttentionTests(unittest.IsolatedAsyncioTestCase):
         while app.attention.status().state == "in_flight":
             await asyncio.sleep(0)
 
-    async def test_platform_transitions_wake_with_generic_ordered_facts(self):
+    async def test_thermal_transitions_wake_with_generic_ordered_facts(self):
         backend = RecordingCognition()
         app = self.make_app(backend)
         await app.start()
         app.set_goal("notice platform transitions")
-        for count, event in enumerate((thermal(), thermal(False), memory(), memory(False)), 1):
+        for count, event in enumerate((thermal(), thermal(False)), 1):
             await app.events.publish(event)
             await self.wait_complete(app, count)
         self.assertEqual(
             [app_request[1].split("Semantic observation:\n", 1)[1].splitlines()[0]
              for app_request in backend.requests],
-            ["  kind: thermal_warning_raised", "  kind: thermal_warning_cleared",
-             "  kind: memory_pressure_raised", "  kind: memory_pressure_cleared"],
+            ["  kind: thermal_warning_raised", "  kind: thermal_warning_cleared"],
         )
         self.assertIn("condition: thermal\n  transition: raised", backend.requests[0][1])
         self.assertIn("source: platform_monitor", backend.requests[0][1])
         self.assertIn("cpu_temp_c: 30.0", backend.requests[0][1])
         self.assertEqual(app.working_memory.snapshot(), ())
+        await app.stop()
+
+    async def test_memory_transitions_are_delivered_without_waking_attention(self):
+        backend = RecordingCognition()
+        app = self.make_app(backend)
+        received = []
+
+        async def receive(event):
+            received.append(event)
+
+        subscriptions = (
+            app.events.subscribe(MemoryPressureRaised, receive),
+            app.events.subscribe(MemoryPressureCleared, receive),
+        )
+        await app.start()
+        app.set_goal("notice platform transitions")
+        events = (memory(), memory(False))
+        for event in events:
+            await app.events.publish(event)
+        while len(received) < len(events):
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertEqual(received, list(events))
+        self.assertEqual(backend.requests, [])
+        self.assertIsNone(app.attention.coordinator.current)
+        self.assertIsNone(app.attention.coordinator.last)
+        for subscription in subscriptions:
+            await subscription.close()
         await app.stop()
 
     async def test_disabled_and_presence_do_not_wake(self):
@@ -172,7 +199,7 @@ class PlatformAttentionTests(unittest.IsolatedAsyncioTestCase):
         app.set_goal("opaque")
         await app.events.publish(thermal())
         await backend.started.wait()
-        await app.events.publish(memory())
+        await app.events.publish(thermal(False))
         await asyncio.sleep(0)
         self.assertEqual(len(backend.requests), 1)
         backend.release.set()

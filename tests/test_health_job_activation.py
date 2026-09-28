@@ -179,6 +179,20 @@ class HealthJobActivationTests(unittest.IsolatedAsyncioTestCase):
                                           memory_total_bytes=1000, available_ratio=.09,
                                           pressure_threshold_ratio=.10))
 
+    async def test_memory_raise_without_matching_trigger_creates_no_run(self):
+        job = self.store.create_job("Thermal health only")
+        self.store.set_trigger(job.id, JobTriggerType.THERMAL_WARNING_RAISED)
+        app = self.app(BlockingBackend())
+        await app.start()
+        await app.events.publish(MemoryPressureRaised(
+            source="platform_monitor", memory_available_bytes=90,
+            memory_total_bytes=1000, available_ratio=.09,
+            pressure_threshold_ratio=.10,
+        ))
+        await self.drain()
+        self.assertEqual(self.store.list_runs(job.id), ())
+        await app.stop()
+
     async def _assert_raise_coalesces(self, trigger_type, event):
         backend = BlockingBackend()
         job = self.store.create_job(f"Health {trigger_type.value}")

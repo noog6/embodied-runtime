@@ -59,7 +59,10 @@ class RuntimeDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 camera_backend="none",
                 diagnostics_enabled=True, runtime_mode="run",
             ),
-            platform_provider=Platform(), observability=self.observability,
+            platform_provider=Platform(snapshot(
+                hostname="diagnostic-host", memory_total_bytes=1000,
+                memory_available_bytes=90,
+            )), observability=self.observability,
             wall_clock=lambda: self.now, timezone_name="UTC",
             voice_wake_words=["robot"],
         )
@@ -93,6 +96,8 @@ class RuntimeDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["runtime"]["profile"], "test")
         self.assertEqual(result["runtime"]["hardware_backend"], "virtual")
         self.assertEqual(result["platform"]["hostname"], "diagnostic-host")
+        self.assertEqual(result["platform"]["memory_total_bytes"], 1000)
+        self.assertEqual(result["platform"]["memory_available_bytes"], 90)
         self.assertIsNone(result["platform"]["throttling"])
         self.assertEqual(result["unknowns"]["platform.throttling"], "not_reported")
         self.assertEqual(result["scope"], "current_runtime_snapshot")
