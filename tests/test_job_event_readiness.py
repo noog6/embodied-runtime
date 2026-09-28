@@ -231,8 +231,12 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(proposal=proposal):
                 outcome = await app.work_current_job_once()
                 self.assertIsNone(outcome.summary)
-                self.assertIsNone(app.job_continuation)
+                self.assertIs(app.job_continuation.state,
+                              JobContinuationState.AWAITING_OPERATOR)
+                self.assertIsNone(app.job_continuation.eligible_at_monotonic)
+                self.assertIsNone(app.job_continuation.event_type)
                 self.assertIsNotNone(app.current_job_run)
+                self.assertIs(app.current_job_run.task.status, TaskStatus.PAUSED)
         await app.stop()
 
     async def test_old_and_unrelated_events_do_not_satisfy_wait(self):

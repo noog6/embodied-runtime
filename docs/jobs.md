@@ -251,6 +251,35 @@ continuation records.
 
 ### Continuation readiness
 
+State-tending Jobs are validated against current runtime authority at outcome
+acceptance, not against the event that originally activated the run. An enabled
+`power_attention_required` trigger reads `RuntimeState.power.condition`; enabled
+thermal and memory triggers read the PlatformMonitor's current hysteresis
+classifications. Such a Job cannot successfully complete while any configured
+authoritative condition remains active. Each condition remains independent, so
+clearing thermal warning does not establish memory-pressure recovery on a Job
+configured for both.
+
+When progress depends on an independently observable recovery transition,
+`wait_for_event` is preferred. `after_delay` is for cases where elapsed time itself
+creates a justified reason to reassess, such as settling after an applied runtime
+effect; it is not a substitute for a known recovery event. In particular, asking the
+operator to connect power does not change power state and therefore requires
+`wait_for_event(power_recovered)`, not `after_delay(30)` followed by asking again.
+Read-only inspection and unknown effects likewise do not justify timed polling.
+State-tending delayed reassessment requires an applied effect in the runtime's small
+positive time-dependent-effect catalog. That catalog is currently empty because no
+implemented Job-work effect changes a tended power, thermal, or memory condition;
+future capabilities may opt in only with implemented and tested settling semantics.
+
+An invalid completion, mismatched recovery event, or unjustified delay is rejected
+through the outcome tool with bounded runtime-authored correction evidence. Cognition
+may make one corrected proposal in the same bounded evaluation. If no valid proposal
+is accepted, the fail-closed outcome parks the exact running JobRun and paused Task in
+an `awaiting_operator` continuation. It schedules neither a timer nor an invented
+recovery event, so an invalid completion is not terminalized, invalid polling is not
+scheduled, and the active execution slot remains available to unrelated Jobs.
+
 A continuing Job occurrence separates its non-terminal outcome from when
 another bounded work episode is useful. `ready` permits work at the next
 ordinary heartbeat opportunity. `after_delay` suppresses autonomous work until

@@ -192,5 +192,7 @@ class PowerJobActivationTests(unittest.IsolatedAsyncioTestCase):
         runs = self.store.list_runs(job.id)
         self.assertEqual(len(runs), 2)
         self.assertIs(runs[0].status, JobRunStatus.INTERRUPTED)
-        self.assertIs(runs[1].status, JobRunStatus.COMPLETED)
+        # Current power authority still reports ATTENTION, so successful completion
+        # is rejected and the occurrence remains available for corrected work.
+        self.assertIs(runs[1].status, JobRunStatus.RUNNING)
         await app.stop()
