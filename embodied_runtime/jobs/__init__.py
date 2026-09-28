@@ -2,7 +2,7 @@
 
 from .model import (
     MAX_RUN_REPORT_CHARS, InvalidJobRunTransitionError, Job, JobRun, JobRunStatus,
-    JobSchedule, JobTarget,
+    JobSchedule, JobTarget, JobTrigger, JobTriggerType,
 )
 from .execution import JobWorkDisposition, JobWorkOutcome
 from .progress import (
@@ -28,7 +28,7 @@ from .workspace import (
     workspace_root_for_database,
 )
 
-__all__ = ["InvalidJobRunTransitionError", "Job", "JobRun", "JobRunStatus", "JobSchedule",
+__all__ = ["InvalidJobRunTransitionError", "Job", "JobRun", "JobRunStatus", "JobSchedule", "JobTrigger", "JobTriggerType",
            "JobStore", "JobTarget", "JobWorkDisposition", "JobWorkOutcome",
            "SQLiteJobStore", "JobContinuation", "JobContinuationController",
            "JobContinuationState", "JobContinuationReadiness",

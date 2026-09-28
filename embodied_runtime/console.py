@@ -19,7 +19,7 @@ from embodied_runtime.interaction import (
     InteractionContext,
 )
 from embodied_runtime.jobs import (
-    JobRun, JobRunStatus, JobTarget, WorkspaceError,
+    JobRun, JobRunStatus, JobTarget, JobTriggerType, WorkspaceError,
 )
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
@@ -460,6 +460,8 @@ class RuntimeConsole:
             return self._job_schedule(words)
         if action == "unschedule":
             return self._job_unschedule(words)
+        if action in ("trigger", "untrigger"):
+            return self._job_trigger(words, remove=action == "untrigger")
         if action == "start":
             if len(words) != 3 or (job_id := _catalog_id(words[2], "JOB")) is None:
                 return "Usage: job start JOB<n>."
@@ -496,8 +498,36 @@ class RuntimeConsole:
                 return f"Unable to {action} Job: persistence operation failed."
             return f"Job RUN{binding.run.id} {binding.run.status.value}."
         return (
-            "Usage: job add|update|enable|disable|start|schedule|unschedule|work|current|complete|fail|stop."
+            "Usage: job add|update|enable|disable|start|schedule|unschedule|trigger|untrigger|work|current|complete|fail|stop."
         )
+
+    def _job_trigger(self, words: list[str], *, remove: bool) -> str:
+        store = self._application.jobs
+        usage = f"Usage: job {'untrigger' if remove else 'trigger'} JOB<n>" \
+                " [power_attention_required]."
+        if store is None:
+            return "Jobs persistence is disabled."
+        if len(words) not in ((4,) if remove else (3, 4)) \
+                or (job_id := _catalog_id(words[2], "JOB")) is None:
+            return usage
+        if store.get_job(job_id) is None:
+            return f"Job not found: JOB{job_id}."
+        if len(words) == 3:
+            triggers = [item for item in store.list_triggers() if item.job_id == job_id]
+            return (f"JOB{job_id} has no event triggers." if not triggers else "\n".join(
+                ["Job triggers", f"  job: JOB{job_id}"] +
+                [f"  {item.event_type.value}: enabled={str(item.enabled).lower()}"
+                 for item in triggers]))
+        try:
+            event_type = JobTriggerType(words[3].lower())
+            if remove:
+                removed = store.remove_trigger(job_id, event_type)
+                return (f"Removed {event_type.value} trigger from JOB{job_id}." if removed
+                        else f"JOB{job_id} has no {event_type.value} trigger.")
+            store.set_trigger(job_id, event_type)
+        except (KeyError, TypeError, ValueError) as error:
+            return f"Unable to configure Job trigger: {error}."
+        return f"Configured JOB{job_id} trigger {event_type.value}."
 
     def _job_schedule(self, words: list[str]) -> str:
         store = self._application.jobs

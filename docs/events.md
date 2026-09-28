@@ -89,3 +89,11 @@ while attention is in flight occupies the one temporal `due_pending` handoff.
 It is released after the current episode ends and passes RUNNING and exact-goal
 identity fences. Body and platform events remain lossy and are never replayed.
 See [Bounded temporal follow-up](temporal-followup.md).
+
+## Power transitions
+
+`PowerAttentionRequired` and `PowerRecovered` describe transitions of the
+authoritative power condition. They are not voltage telemetry: stable samples are
+silent, hysteresis prevents threshold chatter, and an initial trustworthy
+attention observation is emitted so startup can reconcile an unresolved need.
+Events are transient notifications, not a durable event queue.

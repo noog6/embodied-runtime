@@ -61,6 +61,8 @@ class JobReadinessEventType(str, Enum):
     """Stable model-facing catalog of events that may wake Job work."""
 
     PRESENCE_CHANGED = "presence_changed"
+    POWER_ATTENTION_REQUIRED = "power_attention_required"
+    POWER_RECOVERED = "power_recovered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +70,8 @@ class JobWakeEvent:
     """One bounded, runtime-authored event projection for the next episode."""
 
     event_type: JobReadinessEventType
-    present: bool
+    present: bool | None = None
+    battery_voltage_v: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

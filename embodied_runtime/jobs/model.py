@@ -15,6 +15,26 @@ _TOKEN = re.compile(r"^[^\W\d][\w-]*$", re.UNICODE)
 _LOCAL_TIME = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 
 
+class JobTriggerType(StrEnum):
+    """Bounded runtime-owned catalog of durable activation triggers."""
+
+    POWER_ATTENTION_REQUIRED = "power_attention_required"
+
+
+@dataclass(frozen=True, slots=True)
+class JobTrigger:
+    job_id: int
+    enabled: bool
+    event_type: JobTriggerType
+
+    def __post_init__(self) -> None:
+        _positive_id(self.job_id, "job ID")
+        if not isinstance(self.enabled, bool):
+            raise TypeError("enabled must be boolean")
+        if not isinstance(self.event_type, JobTriggerType):
+            raise TypeError("event_type must be a JobTriggerType")
+
+
 @dataclass(frozen=True, slots=True)
 class JobSchedule:
     """One durable daily, explicitly zoned activation schedule."""

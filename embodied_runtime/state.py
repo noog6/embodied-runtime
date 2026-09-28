@@ -27,9 +27,15 @@ class PresenceState:
     source: str
 
 
+class PowerCondition(StrEnum):
+    NORMAL = "normal"
+    ATTENTION = "attention"
+
+
 @dataclass(frozen=True, slots=True)
 class PowerState:
     battery_voltage_v: float | None
+    condition: PowerCondition | None = None
     observed_at: datetime | None = None
 
     def __post_init__(self) -> None:

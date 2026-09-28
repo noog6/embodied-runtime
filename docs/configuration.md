@@ -233,3 +233,13 @@ The strict optional `[sms]` table accepts `enabled`, `backend` (`twilio` only),
 checked-in configuration. Provider identifiers, telephone numbers, credentials,
 and the public URL are environment settings, never TOML or CLI values. See
 [`sms.md`](sms.md).
+## Power monitor
+
+The runtime-owned monitor defaults to a 30-second cadence, attention at or below
+7.4 V, and recovery at or above 7.7 V. These are conservative development values
+for the initial nominal two-cell platform, not battery chemistry or percentage
+estimates, and must be tuned during hardware testing. `PowerMonitorPolicy` allows
+embedders to configure all three values; the separated thresholds provide
+hysteresis. The monitor clock and sleep function are injectable independently for
+deterministic embedding and tests. Sampling never invokes cognition, and hard
+protection remains outside Jobs.
