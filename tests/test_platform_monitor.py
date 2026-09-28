@@ -347,6 +347,7 @@ class ApplicationMonitorTests(unittest.IsolatedAsyncioTestCase):
         provider = Provider(
             [
                 snapshot(cpu_temperature_celsius=70),
+                snapshot(cpu_temperature_celsius=70),
                 RuntimeError("once"),
                 snapshot(cpu_temperature_celsius=81),
                 snapshot(),
@@ -369,7 +370,7 @@ class ApplicationMonitorTests(unittest.IsolatedAsyncioTestCase):
 
         subscription = bus.subscribe(ThermalWarningRaised, blocked)
         provider = Provider(
-            [snapshot(cpu_temperature_celsius=70)]
+            [snapshot(cpu_temperature_celsius=70)] * 2
             + [snapshot(cpu_temperature_celsius=81)] * 10
         )
         app = self.app(provider, bus=bus, interval=0.1)

@@ -45,6 +45,21 @@ class JobTriggerStoreTests(unittest.TestCase):
                 second.id)
             store.close()
 
+    def test_health_triggers_are_durable_and_one_job_may_own_both(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "jobs.sqlite3"
+            store = SQLiteJobStore(path)
+            job = store.create_job("Tend runtime health")
+            thermal = store.set_trigger(job.id, JobTriggerType.THERMAL_WARNING_RAISED)
+            memory = store.set_trigger(job.id, JobTriggerType.MEMORY_PRESSURE_RAISED)
+            other = store.create_job("Other")
+            with self.assertRaises(ValueError):
+                store.set_trigger(other.id, JobTriggerType.THERMAL_WARNING_RAISED)
+            store.close()
+            reopened = SQLiteJobStore(path)
+            self.assertEqual(set(reopened.list_triggers()), {thermal, memory})
+            reopened.close()
+
     def test_pre_trigger_v4_database_migrates_transactionally_and_idempotently(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "jobs.sqlite3"
@@ -73,8 +88,59 @@ class JobTriggerStoreTests(unittest.TestCase):
             self.assertEqual(store.get_job(1).description, "preserved")
             self.assertEqual(store.get_schedule(1).local_time, "02:00")
             self.assertEqual(store._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 5)
+                "PRAGMA user_version").fetchone()[0], 6)
             store.close()
             reopened = SQLiteJobStore(path)
             self.assertEqual(reopened.list_triggers(), ())
+            reopened.close()
+
+    def test_v5_migration_preserves_enabled_power_trigger_and_unique_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "jobs.sqlite3"
+            stamp = "2026-01-01T00:00:00Z"
+            with sqlite3.connect(path) as connection:
+                connection.executescript(f"""
+                    CREATE TABLE jobs (
+                      id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+                      enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+                      target_kind TEXT, target_identifier TEXT,
+                      created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                    CREATE TABLE job_runs (
+                      id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id),
+                      status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT,
+                      finished_at TEXT, outcome_summary TEXT, error_summary TEXT,
+                      result_report TEXT);
+                    CREATE INDEX idx_job_runs_job ON job_runs(job_id,id);
+                    CREATE TABLE job_schedules (
+                      job_id INTEGER PRIMARY KEY REFERENCES jobs(id), enabled INTEGER NOT NULL,
+                      local_time TEXT NOT NULL, timezone TEXT NOT NULL,
+                      last_started_local_date TEXT);
+                    CREATE TABLE job_triggers (
+                      job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+                      event_type TEXT NOT NULL CHECK(event_type IN ('power_attention_required')),
+                      enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+                      PRIMARY KEY(job_id,event_type));
+                    CREATE UNIQUE INDEX idx_job_triggers_enabled_event
+                      ON job_triggers(event_type) WHERE enabled=1;
+                    INSERT INTO jobs VALUES(12,'Runtime health','',1,NULL,NULL,'{stamp}','{stamp}');
+                    INSERT INTO job_triggers VALUES(12,'power_attention_required',1);
+                    PRAGMA user_version=5;
+                """)
+            store = SQLiteJobStore(path)
+            expected = store.get_trigger(12, JobTriggerType.POWER_ATTENTION_REQUIRED)
+            self.assertIsNotNone(expected)
+            self.assertTrue(expected.enabled)
+            self.assertEqual(expected.job_id, 12)
+            self.assertEqual(store._connection.execute(
+                "PRAGMA user_version").fetchone()[0], 6)
+            other = store.create_job("Other")
+            with self.assertRaises(ValueError):
+                store.set_trigger(other.id, JobTriggerType.POWER_ATTENTION_REQUIRED)
+            store.set_trigger(12, JobTriggerType.THERMAL_WARNING_RAISED)
+            store.set_trigger(12, JobTriggerType.MEMORY_PRESSURE_RAISED)
+            store.close()
+            reopened = SQLiteJobStore(path)
+            self.assertEqual(reopened.get_trigger(
+                12, JobTriggerType.POWER_ATTENTION_REQUIRED), expected)
+            self.assertEqual(len(reopened.list_triggers()), 3)
             reopened.close()

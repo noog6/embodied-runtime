@@ -75,6 +75,7 @@ class PlatformMonitor:
         self._task: asyncio.Task[None] | None = None
         self._successful_samples = 0
         self._last_heartbeat_monotonic = 0.0
+        self._baseline_reconciled = False
 
     @property
     def is_running(self) -> bool:
@@ -82,11 +83,50 @@ class PlatformMonitor:
 
     def establish_baseline(self, snapshot: PlatformSnapshot) -> None:
         value = snapshot.cpu_temperature_celsius
-        if value is not None and math.isfinite(value):
-            self._thermal_warning = value >= self.policy.thermal_warning_celsius
+        self._thermal_warning = (
+            value >= self.policy.thermal_warning_celsius
+            if value is not None and math.isfinite(value) else None
+        )
         ratio = self._memory_ratio(snapshot)
-        if ratio is not None:
-            self._memory_pressure = ratio <= self.policy.memory_pressure_ratio
+        self._memory_pressure = (
+            ratio <= self.policy.memory_pressure_ratio if ratio is not None else None
+        )
+
+    @property
+    def thermal_warning_active(self) -> bool:
+        """Whether monitor hysteresis currently classifies thermal warning active."""
+        return self._thermal_warning is True
+
+    @property
+    def memory_pressure_active(self) -> bool:
+        """Whether monitor hysteresis currently classifies memory pressure active."""
+        return self._memory_pressure is True
+
+    async def reconcile_baseline(self, snapshot: PlatformSnapshot) -> None:
+        """Publish each active initial advisory once after runtime coordination is ready."""
+        if self._baseline_reconciled:
+            return
+        self._baseline_reconciled = True
+        if self._thermal_warning is True:
+            value = snapshot.cpu_temperature_celsius
+            if value is not None and math.isfinite(value) and self._may_publish():
+                await self._events.publish(ThermalWarningRaised(
+                    source=SOURCE,
+                    cpu_temperature_celsius=value,
+                    warning_threshold_celsius=self.policy.thermal_warning_celsius,
+                ))
+        if self._memory_pressure is True:
+            ratio = self._memory_ratio(snapshot)
+            if ratio is not None and self._may_publish():
+                assert snapshot.memory_available_bytes is not None
+                assert snapshot.memory_total_bytes is not None
+                await self._events.publish(MemoryPressureRaised(
+                    source=SOURCE,
+                    memory_available_bytes=snapshot.memory_available_bytes,
+                    memory_total_bytes=snapshot.memory_total_bytes,
+                    available_ratio=ratio,
+                    pressure_threshold_ratio=self.policy.memory_pressure_ratio,
+                ))
 
     def start(self) -> None:
         if self.is_running:

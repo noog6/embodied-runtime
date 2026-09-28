@@ -44,9 +44,13 @@ from embodied_runtime.events import (
     ApplicationStarted,
     BodyOrientationChanged,
     EventBus,
+    MemoryPressureCleared,
+    MemoryPressureRaised,
     PresenceChanged,
     PowerAttentionRequired,
     PowerRecovered,
+    ThermalWarningCleared,
+    ThermalWarningRaised,
 )
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
@@ -362,7 +366,9 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
                               "maximum": MAX_JOB_CONTINUATION_DELAY_SECONDS},
             "event_type": {"type": ["string", "null"],
                            "enum": ["presence_changed", "power_attention_required",
-                                    "power_recovered", None]},
+                                    "power_recovered", "thermal_warning_raised",
+                                    "thermal_warning_cleared", "memory_pressure_raised",
+                                    "memory_pressure_cleared", None]},
             "progress_update": {
                 "anyOf": [
                     {"type": "null"},
@@ -802,7 +808,9 @@ JOB_OUTCOME_EVALUATION_REQUEST = (
     "missing parameter, or operator-supplied fact). Physical operator involvement "
     "alone does not imply wait_for_operator. Use wait_for_event with an event_type "
     "from the bounded "
-    "catalog (presence_changed, power_attention_required, power_recovered) when that "
+    "catalog (presence_changed, power_attention_required, power_recovered, "
+    "thermal_warning_raised, thermal_warning_cleared, memory_pressure_raised, "
+    "memory_pressure_cleared) when that "
     "later authoritative transition would make reconsideration useful, including "
     "when an operator must physically act but no reply is required. Canonical "
     "example: asking an operator to connect external power, when the runtime can "
@@ -983,7 +991,11 @@ class RobotApplication:
         self._job_event_subscriptions = (
             (self.events.subscribe(PresenceChanged, self._on_job_presence_changed),
              self.events.subscribe(PowerAttentionRequired, self._on_power_attention),
-             self.events.subscribe(PowerRecovered, self._on_power_recovered))
+             self.events.subscribe(PowerRecovered, self._on_power_recovered),
+             self.events.subscribe(ThermalWarningRaised, self._on_thermal_warning_raised),
+             self.events.subscribe(ThermalWarningCleared, self._on_thermal_warning_cleared),
+             self.events.subscribe(MemoryPressureRaised, self._on_memory_pressure_raised),
+             self.events.subscribe(MemoryPressureCleared, self._on_memory_pressure_cleared))
             if job_store is not None else ()
         )
         # Compatibility name for the original presence listener diagnostic.
@@ -1202,6 +1214,53 @@ class RobotApplication:
             return
         await self._activate_triggered_jobs(JobTriggerType.POWER_ATTENTION_REQUIRED)
 
+    async def _on_thermal_warning_raised(self, event: ThermalWarningRaised) -> None:
+        wake = JobWakeEvent(
+            JobReadinessEventType.THERMAL_WARNING_RAISED,
+            cpu_temperature_celsius=event.cpu_temperature_celsius,
+            threshold_celsius=event.warning_threshold_celsius,
+        )
+        if not self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake):
+            await self._activate_triggered_jobs(JobTriggerType.THERMAL_WARNING_RAISED)
+
+    async def _on_thermal_warning_cleared(self, event: ThermalWarningCleared) -> None:
+        self._discard_resolved_job_trigger(JobTriggerType.THERMAL_WARNING_RAISED)
+        wake = JobWakeEvent(
+            JobReadinessEventType.THERMAL_WARNING_CLEARED,
+            cpu_temperature_celsius=event.cpu_temperature_celsius,
+            threshold_celsius=event.clear_threshold_celsius,
+        )
+        self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake)
+
+    async def _on_memory_pressure_raised(self, event: MemoryPressureRaised) -> None:
+        wake = JobWakeEvent(
+            JobReadinessEventType.MEMORY_PRESSURE_RAISED,
+            memory_available_bytes=event.memory_available_bytes,
+            memory_total_bytes=event.memory_total_bytes,
+            available_ratio=event.available_ratio,
+            threshold_ratio=event.pressure_threshold_ratio,
+        )
+        if not self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake):
+            await self._activate_triggered_jobs(JobTriggerType.MEMORY_PRESSURE_RAISED)
+
+    async def _on_memory_pressure_cleared(self, event: MemoryPressureCleared) -> None:
+        self._discard_resolved_job_trigger(JobTriggerType.MEMORY_PRESSURE_RAISED)
+        wake = JobWakeEvent(
+            JobReadinessEventType.MEMORY_PRESSURE_CLEARED,
+            memory_available_bytes=event.memory_available_bytes,
+            memory_total_bytes=event.memory_total_bytes,
+            available_ratio=event.available_ratio,
+            threshold_ratio=event.clear_threshold_ratio,
+        )
+        self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake)
+
+    def _discard_resolved_job_trigger(self, trigger_type: JobTriggerType) -> None:
+        if trigger_type not in self._pending_job_triggers:
+            return
+        self._pending_job_triggers.discard(trigger_type)
+        LOGGER.info("[JOBS] trigger=%s action=discarded reason=condition_resolved",
+                    trigger_type.value)
+
     def _satisfy_job_event(self, event_type: JobReadinessEventType, timestamp_ns: int,
                            wake_event: JobWakeEvent) -> bool:
         continuation = self._job_continuation
@@ -1281,6 +1340,20 @@ class RobotApplication:
             LOGGER.info("[JOBS] trigger=%s job=JOB%s action=discarded "
                         "reason=condition_resolved", trigger_type.value, job.id)
             return False
+        if was_pending and trigger_type in (
+            JobTriggerType.THERMAL_WARNING_RAISED,
+            JobTriggerType.MEMORY_PRESSURE_RAISED,
+        ):
+            condition_active = (
+                self._platform_monitor.thermal_warning_active
+                if trigger_type is JobTriggerType.THERMAL_WARNING_RAISED
+                else self._platform_monitor.memory_pressure_active
+            )
+            if not condition_active:
+                self._pending_job_triggers.discard(trigger_type)
+                LOGGER.info("[JOBS] trigger=%s job=JOB%s action=discarded "
+                            "reason=condition_resolved", trigger_type.value, job.id)
+                return False
         run = self.jobs.create_triggered_run(job.id)
         if run is None:
             self._pending_job_triggers.discard(trigger_type)
@@ -1624,14 +1697,41 @@ class RobotApplication:
         target = "unassigned" if binding.job.target is None else str(binding.job.target)
         wake_facts = ()
         if wake_event is not None:
-            detail = (SemanticObservationFact(
-                "presence_reported", str(wake_event.present).lower())
-                if wake_event.event_type is JobReadinessEventType.PRESENCE_CHANGED else
-                SemanticObservationFact("battery_voltage_v_at_transition",
-                                        f"{wake_event.battery_voltage_v:.3f}"))
+            details: tuple[SemanticObservationFact, ...]
+            if wake_event.event_type is JobReadinessEventType.PRESENCE_CHANGED:
+                details = (SemanticObservationFact(
+                    "presence_reported", str(wake_event.present).lower()),)
+            elif wake_event.event_type in (
+                JobReadinessEventType.POWER_ATTENTION_REQUIRED,
+                JobReadinessEventType.POWER_RECOVERED,
+            ):
+                details = (SemanticObservationFact(
+                    "battery_voltage_v_at_transition",
+                    f"{wake_event.battery_voltage_v:.3f}"),)
+            elif wake_event.event_type in (
+                JobReadinessEventType.THERMAL_WARNING_RAISED,
+                JobReadinessEventType.THERMAL_WARNING_CLEARED,
+            ):
+                details = (
+                    SemanticObservationFact("cpu_temperature_celsius_at_transition",
+                                            f"{wake_event.cpu_temperature_celsius:.1f}"),
+                    SemanticObservationFact("threshold_celsius",
+                                            f"{wake_event.threshold_celsius:.1f}"),
+                )
+            else:
+                details = (
+                    SemanticObservationFact("memory_available_bytes_at_transition",
+                                            str(wake_event.memory_available_bytes)),
+                    SemanticObservationFact("memory_total_bytes_at_transition",
+                                            str(wake_event.memory_total_bytes)),
+                    SemanticObservationFact("available_ratio_at_transition",
+                                            f"{wake_event.available_ratio:.6f}"),
+                    SemanticObservationFact("threshold_ratio",
+                                            f"{wake_event.threshold_ratio:.6f}"),
+                )
             wake_facts = (
                 SemanticObservationFact("continuation_wake_event",
-                                        wake_event.event_type.value), detail,
+                                        wake_event.event_type.value), *details,
                 SemanticObservationFact(
                     "wake_event_authority",
                     "The runtime event establishes only its named transition and bounded "
@@ -2857,6 +2957,16 @@ class RobotApplication:
             await self.stop()
             raise
         LOGGER.info("[APP] running profile=%s", self.profile.identifier)
+        try:
+            operational_platform_state = self.refresh_platform_state()
+            self._platform_monitor.establish_baseline(operational_platform_state)
+            await self._platform_monitor.reconcile_baseline(operational_platform_state)
+        except BaseException:
+            LOGGER.exception(
+                "[PLATFORM] status=operational_sample_failed startup=aborted"
+            )
+            await self.stop()
+            raise
         try:
             await self._power_monitor.sample_once()
         except Exception:

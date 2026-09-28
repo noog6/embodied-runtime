@@ -63,6 +63,10 @@ class JobReadinessEventType(str, Enum):
     PRESENCE_CHANGED = "presence_changed"
     POWER_ATTENTION_REQUIRED = "power_attention_required"
     POWER_RECOVERED = "power_recovered"
+    THERMAL_WARNING_RAISED = "thermal_warning_raised"
+    THERMAL_WARNING_CLEARED = "thermal_warning_cleared"
+    MEMORY_PRESSURE_RAISED = "memory_pressure_raised"
+    MEMORY_PRESSURE_CLEARED = "memory_pressure_cleared"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +76,12 @@ class JobWakeEvent:
     event_type: JobReadinessEventType
     present: bool | None = None
     battery_voltage_v: float | None = None
+    cpu_temperature_celsius: float | None = None
+    threshold_celsius: float | None = None
+    memory_available_bytes: int | None = None
+    memory_total_bytes: int | None = None
+    available_ratio: float | None = None
+    threshold_ratio: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
