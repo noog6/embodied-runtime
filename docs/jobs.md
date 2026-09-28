@@ -262,13 +262,17 @@ does not resume it. Explicit work may override either waiting readiness and
 receives the latest valid semantic continuity summary.
 
 `wait_for_event` fully yields until a supported semantic runtime event occurs.
-The initial catalog contains only `presence_changed`, mapped by the harness to
-`PresenceChanged`; model output cannot name Python classes or provide predicates.
+The bounded catalog contains `presence_changed`, `power_attention_required`, and
+`power_recovered`, mapped by the harness to their semantic runtime events; model
+output cannot name Python classes or provide predicates.
 The event must arrive after the exact wait is armed. A matching event satisfies
 the current wake and immediately offers continuation through the same ordinary
 gate used by the heartbeat. That gate still decides whether work starts based on
 the exact occurrence binding, lifecycle, Task state, authority and budget,
-operator priority, attention, and active-work ownership. Event satisfaction
+operator priority, attention, and active-work ownership. A waiting occurrence stays
+durably `RUNNING`, but its exact volatile Job/Run/Task continuation is parked and its
+Task is paused, so it does not own the single execution slot. An unrelated due Job
+may use that slot; cognition remains single-flight. Event satisfaction
 does not itself run cognition or consume budget. The periodic heartbeat remains
 the fallback for reconciliation and retry after temporary contention. The
 projected `present` boolean is a bounded runtime-authored fact; it establishes
@@ -276,8 +280,9 @@ reported presence only, not a person's identity, object visibility, safety, or
 unrelated mutable conditions. Fresh acquisition remains necessary for facts
 outside that payload.
 
-Event satisfaction remains sticky through pause, operator fairness, and busy
-attention, and matching events coalesce rather than queue. Acceptance through
+Event satisfaction remains sticky through operator fairness, busy attention, and an
+unrelated active Job. The one bounded wake is retained until the exact parked binding
+can be restored; matching events coalesce rather than queue. Acceptance through
 the ordinary continuation gate consumes the one wake context even if the
 provider then fails. If that episode selects `wait_for_event` again, a new later
 event is required. Events arriving while a bounded Job-work episode is active
@@ -290,6 +295,33 @@ on terminal state, shutdown, or restart. A daily schedule starts a new
 occurrence; readiness only gates another episode of that same occurrence.
 Events never discover or create JobRuns, and no selector, payload, subscription,
 or event history is persisted.
+
+`wait_for_operator` is reserved for new operator information or authority the runtime
+cannot independently observe: an answer, decision, approval, missing parameter, or
+operator-supplied fact. Physical involvement alone is not sufficient. When an
+external condition is represented by a supported semantic event, use
+`wait_for_event` even if the operator must cause it—for example, asking someone to
+connect power uses `wait_for_event(power_recovered)`. `job work` explicitly restores
+the sole parked occurrence when the execution slot is free; unrelated conversation
+does not satisfy operator readiness.
+
+Before restoration, the runtime re-reads the Job and JobRun and requires the Job to
+still exist and be enabled, the Run to still exist in `running`, and every
+Job/Run/Task continuation identifier to match. A stale, disabled, missing, or
+terminal authority clears only that volatile parked binding and fails closed. The
+runtime does not scan durable runs for replacement work.
+
+There is deliberately only one parked-continuation slot. If a second occurrence asks
+to continue while that slot is occupied, the original parked authority is preserved
+and the second occurrence becomes `failed` with the runtime-authored summary
+`Continuation capacity unavailable: parked slot occupied`. `failed` is used because
+the occurrence attempted bounded work but the runtime cannot safely preserve the
+requested continuation; leaving it `running` would falsely imply resumable authority.
+
+Power transitions log publication as `[POWER] event=power_attention_required
+voltage_v=<v> status=published` or `[POWER] event=power_recovered voltage_v=<v>
+status=published`. Job wake logs distinguish `action=matched` from
+`action=retained_busy`.
 
 ### Semantic continuity
 

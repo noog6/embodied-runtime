@@ -238,8 +238,9 @@ and the public URL are environment settings, never TOML or CLI values. See
 The runtime-owned monitor defaults to a 30-second cadence, attention at or below
 7.4 V, and recovery at or above 7.7 V. These are conservative development values
 for the initial nominal two-cell platform, not battery chemistry or percentage
-estimates, and must be tuned during hardware testing. `PowerMonitorPolicy` allows
-embedders to configure all three values; the separated thresholds provide
-hysteresis. The monitor clock and sleep function are injectable independently for
-deterministic embedding and tests. Sampling never invokes cognition, and hard
-protection remains outside Jobs.
+estimates. The strict `[power]` table exposes `interval_seconds` (default `30.0`),
+`attention_voltage_v` (default `7.4`), and `recovery_voltage_v` (default `7.7`) so
+hardware tuning does not require Python changes. Values must be finite, the interval
+must be positive, and recovery must exceed attention; omitted values keep the
+defaults. The separated thresholds provide hysteresis. Sampling never invokes
+cognition, and deterministic hardware/BMS protection remains outside Jobs.

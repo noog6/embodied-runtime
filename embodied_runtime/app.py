@@ -339,7 +339,10 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
     description=(
         "Report the outcome of this exact Job occurrence. Complete only when the "
         "evidence establishes its TaskGoal; fail only when authoritative evidence "
-        "establishes that it cannot reasonably proceed; otherwise continue."
+        "establishes that it cannot reasonably proceed; otherwise continue. "
+        "wait_for_operator is only for missing operator information or authority; "
+        "use wait_for_event for a supported independently observable world change, "
+        "even when an operator must physically cause it."
     ),
     parameters={
         "type": "object",
@@ -794,9 +797,17 @@ JOB_OUTCOME_EVALUATION_REQUEST = (
     "proceed at the next ordinary opportunity; after_delay with a 1..86400 second "
     "delay when waiting itself is useful (choose the shortest reasonable delay); or "
     "wait_for_operator only when meaningful progress specifically requires explicit "
-    "operator involvement; or wait_for_event with an event_type from the bounded "
+    "new information or authority from the operator that the runtime cannot "
+    "independently infer or observe (for example an answer, decision, approval, "
+    "missing parameter, or operator-supplied fact). Physical operator involvement "
+    "alone does not imply wait_for_operator. Use wait_for_event with an event_type "
+    "from the bounded "
     "catalog (presence_changed, power_attention_required, power_recovered) when that "
-    "later authoritative transition would make reconsideration useful. "
+    "later authoritative transition would make reconsideration useful, including "
+    "when an operator must physically act but no reply is required. Canonical "
+    "example: asking an operator to connect external power, when the runtime can "
+    "detect recovery, requires wait_for_event(power_recovered), not "
+    "wait_for_operator. Apply this observable-world-change rule generically. "
     "Terminal outcomes require null readiness, delay, and event_type. Event waiting "
     "requires a null delay; every other readiness requires a null event_type. "
     "A wake event proves only its explicitly projected runtime fact; acquire fresh "
@@ -882,6 +893,15 @@ class CurrentJobRun:
 
 
 @dataclass(frozen=True, slots=True)
+class _ParkedJobRun:
+    """One exact dormant occurrence that does not own execution authority."""
+
+    binding: CurrentJobRun
+    task_binding: _CurrentTaskBinding
+    progress: JobProgress | None
+
+
+@dataclass(frozen=True, slots=True)
 class RetainedReportSnapshot:
     """One volatile, operator-episode-scoped retained report snapshot."""
 
@@ -956,6 +976,7 @@ class RobotApplication:
         self._active_operator_cognition_task: asyncio.Task[object] | None = None
         self._active_job_work_task: asyncio.Task[object] | None = None
         self._job_continuation: JobContinuation | None = None
+        self._parked_job_run: _ParkedJobRun | None = None
         # One lossy, volatile activation bit per bounded trigger type; not an event queue.
         self._pending_job_triggers: set[JobTriggerType] = set()
         # One application-lifetime listener; readiness changes never add workers.
@@ -1105,8 +1126,10 @@ class RobotApplication:
 
     @property
     def current_job_run(self) -> CurrentJobRun | None:
-        """Return the current volatile JobRun association, if one exists."""
-        return self._current_job_run
+        """Return the active or sole parked volatile JobRun association."""
+        if self._current_job_run is not None:
+            return self._current_job_run
+        return None if self._parked_job_run is None else self._parked_job_run.binding
 
     @property
     def job_continuation(self) -> JobContinuation | None:
@@ -1117,7 +1140,9 @@ class RobotApplication:
     def job_progress(self) -> JobProgress | None:
         """Return progress only when it belongs to the exact current occurrence."""
         progress = self._job_progress
-        current = self._current_job_run
+        current = self.current_job_run
+        if progress is None and self._parked_job_run is not None:
+            progress = self._parked_job_run.progress
         if (progress is None or current is None
                 or (progress.job_id, progress.run_id, progress.task_id)
                 != (current.job.id, current.run.id, current.task.id)):
@@ -1179,14 +1204,19 @@ class RobotApplication:
 
     def _satisfy_job_event(self, event_type: JobReadinessEventType, timestamp_ns: int,
                            wake_event: JobWakeEvent) -> bool:
-        continuation, current = self._job_continuation, self._current_job_run
-        task_binding = self._current_task_binding
+        continuation = self._job_continuation
+        parked = self._parked_job_run
+        current = self._current_job_run if parked is None else parked.binding
+        task_binding = self._current_task_binding if parked is None else parked.task_binding
         if (self.state is not LifecycleState.RUNNING or continuation is None
                 or continuation.readiness is not JobContinuationReadiness.WAIT_FOR_EVENT
                 or continuation.event_type is not event_type
                 or continuation.event_armed_after_ns is None
                 or timestamp_ns <= continuation.event_armed_after_ns
-                or continuation.event_satisfied or self._active_job_work_task is not None
+                or continuation.event_satisfied
+                or (self._active_job_work_task is not None
+                    and self._current_job_run is not None
+                    and self._current_job_run.run.id == continuation.run_id)
                 or current is None
                 or current.job.id != continuation.job_id
                 or current.run.id != continuation.run_id
@@ -1197,8 +1227,10 @@ class RobotApplication:
             return False
         self._job_continuation = replace(
             continuation, event_satisfied=True, wake_event=wake_event)
-        LOGGER.info("[JOBS] event=%s run=RUN%s action=wake", event_type.value,
-                    continuation.run_id)
+        busy = self._current_job_run is not None or self._active_job_work_task is not None \
+            or self.episode_coordinator.current is not None
+        LOGGER.info("[JOBS] event=%s run=RUN%s action=%s", event_type.value,
+                    continuation.run_id, "retained_busy" if busy else "matched")
         self._offer_job_continuation(trigger="event")
         return True
 
@@ -1487,9 +1519,13 @@ class RobotApplication:
                     f"result_report must be at most {MAX_RUN_REPORT_CHARS} characters"
                 )
         binding = self._current_job_run
+        if binding is None and self._parked_job_run is not None:
+            binding = self._restore_parked_job_run()
         if binding is None:
             raise RuntimeError("no current JobRun")
-        self._clear_job_continuation(status.value)
+        continuation = self._job_continuation
+        if continuation is not None and continuation.run_id == binding.run.id:
+            self._clear_job_continuation(status.value)
         task_status = TaskStatus(status.value)
         task = binding.task
         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED):
@@ -1539,9 +1575,13 @@ class RobotApplication:
         # decides whether a fresh grant is created.
         if self._active_job_work_task is not None:
             raise RuntimeError("another Job work episode is already active")
+        if self._current_job_run is None and self._parked_job_run is not None:
+            self._restore_parked_job_run()
         prepared = self._validate_job_work_preconditions()
         previous_work_summary = self._valid_job_continuity_summary(*prepared[:2])
-        self._job_continuation = None
+        continuation = self._job_continuation
+        if continuation is not None and continuation.run_id == prepared[0].run.id:
+            self._job_continuation = None
         try:
             outcome = await self._work_current_job_once(
                 "manual", prepared=prepared,
@@ -1689,6 +1729,20 @@ class RobotApplication:
         current = self._current_job_run
         if current is None or current.run.id != outcome.run_id:
             return
+        if (self._parked_job_run is not None
+                and self._parked_job_run.binding.run.id != outcome.run_id):
+            LOGGER.warning("[JOBS] job=JOB%s run=RUN%s continuation=rejected "
+                           "reason=parked_slot_occupied action=fail_run",
+                           outcome.job_id, outcome.run_id)
+            # The bounded runtime cannot preserve a second continuation without
+            # overwriting the first occurrence's exact authority. Treat that as an
+            # execution-level failure rather than leaving this run active with its
+            # requested readiness silently discarded.
+            self.finish_job_run(
+                JobRunStatus.FAILED,
+                "Continuation capacity unavailable: parked slot occupied",
+            )
+            return
         if outcome.readiness is None:
             self._job_continuation = None
             return
@@ -1715,6 +1769,100 @@ class RobotApplication:
              else f" event={event_type.value}" if event_type is not None else ""),
             self.options.jobs_max_auto_steps, source,
         )
+        if outcome.readiness in (
+            JobContinuationReadiness.AFTER_DELAY,
+            JobContinuationReadiness.WAIT_FOR_OPERATOR,
+            JobContinuationReadiness.WAIT_FOR_EVENT,
+        ):
+            self._park_current_job_run()
+
+    def _park_current_job_run(self) -> None:
+        """Release execution ownership while retaining one exact volatile binding."""
+        if self._parked_job_run is not None:
+            LOGGER.warning("[JOBS] continuation=park_rejected reason=parked_slot_occupied")
+            return
+        binding = self._current_job_run
+        task_binding = self._current_task_binding
+        if binding is None or task_binding is None or task_binding.task is not binding.task:
+            self._clear_job_continuation("binding_changed")
+            return
+        paused = self.pause_task()
+        paused_binding = self._current_task_binding
+        assert paused_binding is not None
+        parked_binding = CurrentJobRun(binding.job, binding.run, paused)
+        self._parked_job_run = _ParkedJobRun(
+            parked_binding, paused_binding, self._job_progress,
+        )
+        self._current_job_run = None
+        self._current_task_binding = None
+        self._job_progress = None
+        LOGGER.info("[JOBS] job=JOB%s run=RUN%s continuation=parked task=%s",
+                    binding.job.id, binding.run.id, binding.task.id)
+
+    def _restore_parked_job_run(self) -> CurrentJobRun:
+        """Restore the exact parked Task binding, failing closed on any conflict."""
+        parked = self._parked_job_run
+        if parked is None:
+            raise RuntimeError("no parked JobRun")
+        if (self._current_job_run is not None or self._current_task_binding is not None
+                or self._active_goal is not None):
+            raise RuntimeError("execution slot is busy")
+        continuation = self._job_continuation
+        binding = parked.binding
+        reason = None
+        if (continuation is None
+                or (continuation.job_id, continuation.run_id, continuation.task_id)
+                != (binding.job.id, binding.run.id, binding.task.id)
+                or parked.task_binding.task is not binding.task
+                or parked.task_binding.active_goal is not None
+                or binding.task.status is not TaskStatus.PAUSED):
+            reason = "binding_changed"
+        authoritative_job = authoritative_run = None
+        if reason is None:
+            assert self.jobs is not None
+            try:
+                authoritative_job = self.jobs.get_job(binding.job.id)
+                authoritative_run = self.jobs.get_run(binding.run.id)
+            except Exception:
+                reason = "authority_unavailable"
+            else:
+                if authoritative_job is None:
+                    reason = "job_missing"
+                elif not authoritative_job.enabled:
+                    reason = "job_disabled"
+                elif authoritative_run is None:
+                    reason = "run_missing"
+                elif authoritative_run.job_id != authoritative_job.id:
+                    reason = "run_job_mismatch"
+                elif authoritative_run.status is not JobRunStatus.RUNNING:
+                    reason = "run_not_running"
+        if reason is not None:
+            self._parked_job_run = None
+            self._job_progress = None
+            self._clear_job_continuation(reason)
+            LOGGER.warning(
+                "[JOBS] job=JOB%s run=RUN%s continuation=restore_rejected reason=%s",
+                binding.job.id, binding.run.id, reason,
+            )
+            raise RuntimeError(f"parked JobRun authority is stale: {reason}")
+        assert authoritative_job is not None and authoritative_run is not None
+        binding = CurrentJobRun(authoritative_job, authoritative_run, binding.task)
+        self._current_job_run = binding
+        self._current_task_binding = parked.task_binding
+        loose_progress = self._job_progress
+        self._job_progress = (
+            loose_progress
+            if loose_progress is not None
+            and (loose_progress.job_id, loose_progress.run_id, loose_progress.task_id)
+            == (binding.job.id, binding.run.id, binding.task.id)
+            else parked.progress
+        )
+        self._parked_job_run = None
+        self.resume_task()
+        assert self._current_job_run is not None
+        LOGGER.info("[JOBS] job=JOB%s run=RUN%s continuation=restored task=%s",
+                    binding.job.id, binding.run.id, binding.task.id)
+        return self._current_job_run
 
     def _set_job_continuation_awaiting_operator(self) -> None:
         continuation = self._job_continuation
@@ -1764,8 +1912,9 @@ class RobotApplication:
         if self.state is not LifecycleState.RUNNING or self.jobs is None \
                 or not self.options.jobs_auto_continue:
             return
-        current = self._current_job_run
-        task_binding = self._current_task_binding
+        parked = self._parked_job_run
+        current = self._current_job_run if parked is None else parked.binding
+        task_binding = self._current_task_binding if parked is None else parked.task_binding
         if (current is None or current.job.id != continuation.job_id
                 or current.run.id != continuation.run_id
                 or current.run.status is not JobRunStatus.RUNNING
@@ -1789,12 +1938,15 @@ class RobotApplication:
                 return
             if self._monotonic() < continuation.eligible_at_monotonic:
                 return
-        if current.task.status is TaskStatus.PAUSED:
+        if parked is not None and (
+            self._current_job_run is not None or self._current_task_binding is not None
+        ):
+            self._log_job_continuation_deferred(continuation, "execution_busy")
+            return
+        if parked is None and current.task.status is TaskStatus.PAUSED:
             self._log_job_continuation_deferred(continuation, "task_paused")
             return
-        if (current.task.status is not TaskStatus.RUNNING
-                or task_binding.active_goal is None
-                or self._active_goal is not task_binding.active_goal):
+        if parked is not None and current.task.status is not TaskStatus.PAUSED:
             self._clear_job_continuation("binding_changed")
             return
         if self._active_job_work_task is not None:
@@ -1810,6 +1962,17 @@ class RobotApplication:
             self._job_continuation = replace(
                 continuation, state=JobContinuationState.AWAITING_OPERATOR,
             )
+            return
+        if parked is not None:
+            try:
+                current = self._restore_parked_job_run()
+            except RuntimeError:
+                return
+            task_binding = self._current_task_binding
+        if (task_binding is None or task_binding.active_goal is None
+                or current.task.status is not TaskStatus.RUNNING
+                or self._active_goal is not task_binding.active_goal):
+            self._clear_job_continuation("binding_changed")
             return
         # The attention claim is the acceptance boundary. Nothing is charged until
         # this synchronous single-flight operation succeeds; a contender that wins
@@ -1929,6 +2092,12 @@ class RobotApplication:
                     "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator reason=model_readiness",
                     current.job_id, current.run_id,
                 )
+        if outcome.readiness in (
+            JobContinuationReadiness.AFTER_DELAY,
+            JobContinuationReadiness.WAIT_FOR_OPERATOR,
+            JobContinuationReadiness.WAIT_FOR_EVENT,
+        ):
+            self._park_current_job_run()
 
     async def _finish_job_work_episode(
         self, episode: AttentionEpisode, reason: EpisodeCompletionReason,
@@ -2413,6 +2582,13 @@ class RobotApplication:
             raise RuntimeError("Pausing a Task requires a running application")
         binding = self._current_task_binding
         if binding is None:
+            if self._parked_job_run is not None:
+                if self._job_continuation is not None:
+                    self._job_continuation = replace(
+                        self._job_continuation,
+                        state=JobContinuationState.AWAITING_OPERATOR,
+                    )
+                return self._parked_job_run.binding.task
             raise RuntimeError("no current Task exists")
         if binding.task.status is not TaskStatus.RUNNING:
             raise RuntimeError("current Task must be running")
@@ -2432,6 +2608,13 @@ class RobotApplication:
             raise RuntimeError("Resuming a Task requires a running application")
         binding = self._current_task_binding
         if binding is None:
+            if self._parked_job_run is not None:
+                task = self._restore_parked_job_run().task
+                if self._job_continuation is not None:
+                    self._job_continuation = replace(
+                        self._job_continuation, state=JobContinuationState.ARMED,
+                    )
+                return task
             raise RuntimeError("no current Task exists")
         if binding.task.status is not TaskStatus.PAUSED:
             raise RuntimeError("current Task must be paused")
@@ -2743,8 +2926,15 @@ class RobotApplication:
             await self.temporal.stop()
         except BaseException as error:
             failure = error
-        if self._current_job_run is not None and self.jobs is not None:
-            current = self._current_job_run
+        shutdown_jobs = tuple(
+            binding for binding in (
+                self._current_job_run,
+                None if self._parked_job_run is None else self._parked_job_run.binding,
+            ) if binding is not None
+        )
+        for current in shutdown_jobs:
+            if self.jobs is None:
+                break
             try:
                 durable = self.jobs.get_run(current.run.id)
                 if durable is not None and durable.status in (
@@ -2785,6 +2975,13 @@ class RobotApplication:
                 current.job.id, current.run.id, current.task.id,
             )
             self._current_job_run = None
+        if self._parked_job_run is not None:
+            current = self._parked_job_run.binding
+            LOGGER.info(
+                "[JOBS] job=JOB%s run=RUN%s task=%s status=detached",
+                current.job.id, current.run.id, current.task.id,
+            )
+            self._parked_job_run = None
         try:
             await self.attention.stop()
         except BaseException as error:
