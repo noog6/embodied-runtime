@@ -6,12 +6,15 @@ from collections.abc import Sequence
 import logging
 import math
 from pathlib import Path
+import signal
 import sys
 import threading
 import time
 from typing import Any, Coroutine
 
-from embodied_runtime.app import ApplicationOptions, RobotApplication, RuntimeSummary
+from embodied_runtime.app import (
+    ApplicationOptions, LifecycleState, RobotApplication, RuntimeSummary,
+)
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import TextCognitionBackend
 from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
@@ -193,6 +196,11 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         help="allow one post-effect evaluation to complete the same active goal",
     )
     modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
+        "--mode", choices=("run", "console", "diagnostics"),
+        default=configurable_default(None),
+        help="override the configured runtime mode",
+    )
     modes.add_argument("--diagnostics", action="store_true",
                        default=configurable_default(False))
     modes.add_argument("--console", action="store_true",
@@ -239,6 +247,7 @@ def parse_launch_arguments(
     args.interaction_environment = effective.interaction_environment
     args.console = effective.mode == "console"
     args.diagnostics = effective.mode == "diagnostics"
+    args.mode = effective.mode
     args.initiative = effective.initiative
     args.initiative_platform_attention = effective.initiative_platform_attention
     args.initiative_actions = effective.initiative_actions
@@ -475,6 +484,7 @@ async def _run_application(
     history_root: Path = DEFAULT_HISTORY_ROOT,
     history_evidence: RunHistoryEvidenceReader | None = None,
     observability: RunObservability | None = None,
+    shutdown_requested: asyncio.Event | None = None,
 ) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
@@ -494,12 +504,21 @@ async def _run_application(
 
         sms_service = TwilioSmsService(settings, request_sms_cognition)
     message_channel = ConsoleOperatorMessageChannel() if args.console else None
-    delivery_routes = OperatorDeliveryRouteCatalog((OperatorDeliveryRoute(
-        OperatorDeliveryDestination(
-            "console", InteractionChannel.CONSOLE, "local plain-text console"
-        ),
-        message_channel,
-    ),)) if message_channel is not None else OperatorDeliveryRouteCatalog()
+    routes: list[OperatorDeliveryRoute] = []
+    if message_channel is not None:
+        routes.append(OperatorDeliveryRoute(
+            OperatorDeliveryDestination(
+                "console", InteractionChannel.CONSOLE, "local plain-text console"
+            ), message_channel,
+        ))
+    if sms_service is not None:
+        routes.append(OperatorDeliveryRoute(
+            OperatorDeliveryDestination(
+                "sms", InteractionChannel.REMOTE_TEXT, "configured operator SMS"
+            ), sms_service,
+        ))
+    delivery_routes = OperatorDeliveryRouteCatalog(routes)
+    notification_sink = message_channel or sms_service
     persistent_memory = build_persistent_memory_store(args)
     jobs = build_job_store(args)
     try:
@@ -536,7 +555,7 @@ async def _run_application(
         camera_backend=camera,
         cognition_backend=cognition,
         visual_perception_backend=vision,
-        operator_message_sink=message_channel,
+        operator_message_sink=notification_sink,
         operator_delivery_routes=delivery_routes,
         platform_monitor_policy=build_platform_monitor_policy(args),
         power_monitor_policy=PowerMonitorPolicy(
@@ -592,8 +611,74 @@ async def _run_application(
             history_root,
         )
 
-    await application.run()
+    return await _run_headless_application(application, shutdown_requested)
+
+
+async def _run_headless_application(
+    application: RobotApplication,
+    shutdown_requested: asyncio.Event | None = None,
+) -> int:
+    """Run one headless application, including the daemon shutdown race."""
+    if shutdown_requested is None:
+        await application.run()
+        return 0
+    run_task = asyncio.create_task(application.run(), name="application-run")
+    signal_task = asyncio.create_task(shutdown_requested.wait(), name="sigterm-wait")
+    done, _ = await asyncio.wait(
+        (run_task, signal_task), return_when=asyncio.FIRST_COMPLETED,
+    )
+    if signal_task in done and not run_task.done():
+        application.request_stop()
+        if application.state is not LifecycleState.RUNNING:
+            # Startup may be blocked in provider preparation. Cancellation is
+            # only the wake-up mechanism; RobotApplication.run() still owns
+            # partial-start cleanup in its finally block.
+            run_task.cancel()
+    signal_task.cancel()
+    await asyncio.gather(signal_task, return_exceptions=True)
+    try:
+        await run_task
+    except asyncio.CancelledError:
+        if not shutdown_requested.is_set():
+            raise
     return 0
+
+
+async def _run_process_application(
+    args: argparse.Namespace, profile: RobotProfile, history_root: Path,
+    history_evidence: RunHistoryEvidenceReader, observability: RunObservability,
+) -> int:
+    """Own run-mode process signals while delegating cleanup to the lifecycle."""
+    if args.mode != "run":
+        return await _run_application(
+            args, profile, history_root, history_evidence, observability,
+        )
+    loop = asyncio.get_running_loop()
+    shutdown_requested = asyncio.Event()
+    logged = False
+
+    def request_shutdown() -> None:
+        nonlocal logged
+        if logged:
+            return
+        logged = True
+        LOGGER.info("[PROCESS] signal=SIGTERM action=shutdown_requested")
+        shutdown_requested.set()
+
+    installed = False
+    try:
+        loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+        installed = True
+    except (NotImplementedError, RuntimeError):
+        pass
+    try:
+        return await _run_application(
+            args, profile, history_root, history_evidence, observability,
+            shutdown_requested,
+        )
+    finally:
+        if installed:
+            loop.remove_signal_handler(signal.SIGTERM)
 
 
 def main(
@@ -610,8 +695,11 @@ def main(
         parser.error("--initiative-actions requires --initiative")
     if args.initiative_messages and not args.initiative:
         parser.error("--initiative-messages requires --initiative")
-    if args.initiative_messages and not args.console:
-        parser.error("--initiative-messages requires --console")
+    if args.initiative_messages and not (args.console or args.sms_enabled):
+        parser.error(
+            "--initiative-messages requires a configured operator delivery route "
+            "(--console or enabled SMS)"
+        )
     if args.initiative_continuation and not args.initiative:
         parser.error("--initiative-continuation requires --initiative")
     if (args.initiative_continuation and
@@ -698,7 +786,7 @@ def main(
     LOGGER.info("[OBS] status=ready")
     try:
         result = _run_with_asyncio_cleanup(
-            _run_application(
+            _run_process_application(
                 args, profile, history_root,
                 RunHistoryEvidenceReader(history_root, history.run_id,
                                          timezone_name=args.timezone)

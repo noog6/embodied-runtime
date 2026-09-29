@@ -19,7 +19,7 @@ from embodied_runtime.attachments import (
 
 from embodied_runtime.interaction import (
     InteractionCadence, InteractionChannel, InteractionContext,
-    InteractionInitiator, InteractionMode,
+    InteractionInitiator, InteractionMode, OperatorMessage, OperatorMessageSink,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -277,7 +277,7 @@ class TwilioSmsGateway:
         self._client.messages.create(from_=from_, to=to, body=body)
 
 
-class TwilioSmsService:
+class TwilioSmsService(OperatorMessageSink):
     """Own one aiohttp endpoint, bounded FIFO, dedupe cache, and worker."""
 
     def __init__(
@@ -298,6 +298,46 @@ class TwilioSmsService:
         self._runner: Any = None
         self._worker: asyncio.Task[None] | None = None
         self._accepting = False
+
+    @property
+    def channel(self) -> InteractionChannel:
+        return InteractionChannel.REMOTE_TEXT
+
+    async def deliver(self, message: OperatorMessage) -> None:
+        """Deliver one bounded runtime message to the configured operator only."""
+        interaction = message.interaction
+        notification = (
+            interaction.channel == self.channel
+            and interaction.mode == InteractionMode.NOTIFICATION
+            and interaction.initiator == InteractionInitiator.RUNTIME
+            and interaction.response_expected is False
+        )
+        delivery = (
+            interaction.channel == self.channel
+            and interaction.mode == InteractionMode.DELIVERY
+            and interaction.initiator == InteractionInitiator.OPERATOR
+            and interaction.response_expected is False
+        )
+        if not (notification or delivery):
+            raise ValueError("SMS accepts only valid operator notifications or deliveries")
+        if not self._accepting or self._gateway is None:
+            raise RuntimeError("SMS service is not ready")
+        body = message.text.strip()
+        if not body:
+            raise ValueError("SMS operator message must be non-empty")
+        if len(body) > MAX_SMS_BODY_CHARS:
+            raise ValueError(
+                f"SMS operator message must be at most {MAX_SMS_BODY_CHARS} characters"
+            )
+        try:
+            await asyncio.to_thread(
+                self._gateway.send, from_=self.settings.twilio_number,
+                to=self.settings.operator_number, body=body,
+            )
+        except Exception:
+            LOGGER.error("[SMS] operator_delivery status=failed reason=provider_error")
+            raise
+        LOGGER.info("[SMS] operator_delivery chars=%s status=sent", len(body))
 
     @property
     def diagnostics(self) -> dict[str, object]:

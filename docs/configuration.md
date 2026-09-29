@@ -84,8 +84,34 @@ or `remote`, and defaults to `workstation`. It is a fixed runtime interaction
 posture, not physical-presence evidence or a permission setting.
 
 `hardware`, `camera`, and `cognition` accept the same values as their existing
-CLI options. `runtime.mode` is exactly one of `run`, `console`, or `diagnostics`;
-it maps to neither mode flag, `--console`, or `--diagnostics`, respectively.
+CLI options. `runtime.mode` is exactly one of `run`, `console`, or `diagnostics`:
+
+- `run` is the headless, long-lived runtime suitable for process supervisors;
+- `console` adds the interactive development/operator console; and
+- `diagnostics` performs bounded startup and diagnostic execution.
+
+The canonical CLI override is `--mode`, and it takes precedence over the file:
+
+```bash
+python main.py --config config/mira-agentic.toml --mode run
+```
+
+The compatibility shortcuts `--console` and `--diagnostics` remain available.
+Mode selectors are mutually exclusive. An intended future supervised launch
+can therefore run the same robot configuration headlessly with configured SMS:
+
+```bash
+python main.py \
+  --config /absolute/path/config/mira-agentic.toml \
+  --mode run \
+  --sms
+```
+
+This makes the ordinary foreground process daemon-ready; it does **not**
+install or define a systemd service. `SIGTERM` requests graceful shutdown and
+returns success, while `SIGINT`/Ctrl-C remains an interrupted development exit.
+`SIGKILL`, an OOM kill, and power loss have no graceful-cleanup guarantee.
+
 The initiative values, `voice.enabled`, and `voice.wake_word_enabled` must be
 TOML booleans. `voice.wake_words` must be a non-empty TOML array whose entries
 are non-empty strings after trimming. Both voice timeouts must be positive TOML

@@ -18,7 +18,8 @@ except ImportError:
 
 from embodied_runtime.interaction import (
     InteractionCadence, InteractionChannel, InteractionEnvironment,
-    InteractionInitiator, InteractionMode,
+    InteractionInitiator, InteractionMode, OperatorMessage, operator_delivery,
+    runtime_notification,
 )
 from embodied_runtime.sms import (
     EMPTY_TWIML, MAX_SMS_BODY_CHARS, MEDIA_FAILURE_REPLY, TOO_LONG_REPLY,
@@ -300,6 +301,58 @@ class SmsStateMachineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][0], "")
         self.assertEqual(calls[0][2], (downloader.image,))
         self.assertEqual(calls[0][1].channel, InteractionChannel.REMOTE_TEXT)
+        await service.stop()
+
+
+class SmsOperatorDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def service(self):
+        gateway = mock.Mock()
+        gateway.sent = []
+        gateway.send.side_effect = lambda **message: gateway.sent.append(message)
+        service = TwilioSmsService(settings(), mock.AsyncMock(), gateway=gateway)
+        service._accepting = True
+        return service, gateway
+
+    async def test_delivery_uses_configured_numbers_without_logging_them(self):
+        service, gateway = self.service()
+        message = OperatorMessage(
+            "Power is low", "initiative",
+            runtime_notification(InteractionChannel.REMOTE_TEXT),
+        )
+        with self.assertLogs("embodied_runtime.sms", level="INFO") as captured:
+            await service.deliver(message)
+        self.assertEqual(gateway.sent, [{
+            "from_": settings().twilio_number,
+            "to": settings().operator_number,
+            "body": "Power is low",
+        }])
+        rendered = "\n".join(captured.output)
+        self.assertNotIn(settings().twilio_number, rendered)
+        self.assertNotIn(settings().operator_number, rendered)
+
+    async def test_delivery_rejects_oversized_body_without_sending(self):
+        service, gateway = self.service()
+        with self.assertRaisesRegex(ValueError, "at most"):
+            await service.deliver(OperatorMessage(
+                "x" * (MAX_SMS_BODY_CHARS + 1), "operator",
+                operator_delivery(InteractionChannel.REMOTE_TEXT),
+            ))
+        self.assertEqual(gateway.sent, [])
+
+    async def test_normal_inbound_cognition_sends_one_reply_not_a_notification(self):
+        gateway = mock.Mock()
+        cognition = mock.AsyncMock(return_value="one ordinary reply")
+        service = TwilioSmsService(settings(), cognition, gateway=gateway)
+        service._accepting = True
+        service._worker = asyncio.create_task(service._run_worker())
+        self.assertEqual(service._accept_validated_form(form("SM1")).status, 200)
+        await asyncio.wait_for(service._inbox.join(), timeout=1)
+        cognition.assert_awaited_once()
+        gateway.send.assert_called_once_with(
+            from_=settings().twilio_number,
+            to=settings().operator_number,
+            body="one ordinary reply",
+        )
         await service.stop()
 
 

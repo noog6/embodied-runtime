@@ -2,13 +2,16 @@ import asyncio
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.app import ApplicationOptions, LifecycleState, RobotApplication
 from embodied_runtime.cli import (
     _live_non_daemon_thread_names, _run_console_application,
-    _run_with_asyncio_cleanup, build_cognition_backend, build_hardware_backend,
-    build_parser, format_platform, format_summary, main,
+    _run_application, _run_headless_application, _run_process_application,
+    _run_with_asyncio_cleanup,
+    build_cognition_backend, build_hardware_backend,
+    build_parser, format_platform, format_summary, main, parse_launch_arguments,
 )
 from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
 from embodied_runtime.hardware.fusion_hat import (
@@ -270,6 +273,152 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logs.count("[APP] stopped"), 1)
 
 
+class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    class ControlledApplication(RobotApplication):
+        def __init__(self, *, block_startup: bool):
+            super().__init__(
+                RobotProfile("test", "Test Robot"), VirtualHardwareBackend(),
+                ApplicationOptions(),
+            )
+            self.block_startup = block_startup
+            self.start_entered = asyncio.Event()
+            self.start_release = asyncio.Event()
+            self.stop_reached = asyncio.Event()
+            self.start_calls = 0
+            self.stop_calls = 0
+            self.request_stop_calls = 0
+            self.start_cancelled = False
+
+        async def start(self):
+            self.start_calls += 1
+            self._set_lifecycle(LifecycleState.STARTING)
+            self.start_entered.set()
+            if self.block_startup:
+                try:
+                    await self.start_release.wait()
+                except asyncio.CancelledError:
+                    self.start_cancelled = True
+                    raise
+            self._set_lifecycle(LifecycleState.RUNNING)
+
+        async def stop(self):
+            self.stop_calls += 1
+            self._set_lifecycle(LifecycleState.STOPPED)
+            self.stop_reached.set()
+
+        def request_stop(self):
+            self.request_stop_calls += 1
+            super().request_stop()
+
+    async def test_sigterm_during_startup_cancels_start_and_reaches_stop(self):
+        application = self.ControlledApplication(block_startup=True)
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(_run_headless_application(application, shutdown))
+        await asyncio.wait_for(application.start_entered.wait(), timeout=1)
+        shutdown.set()
+        with patch("embodied_runtime.app.LOGGER.info") as log:
+            result = await asyncio.wait_for(task, timeout=1)
+        self.assertEqual(result, 0)
+        self.assertTrue(application.start_cancelled)
+        self.assertTrue(application.stop_reached.is_set())
+        self.assertEqual(application.start_calls, 1)
+        self.assertEqual(application.stop_calls, 1)
+        self.assertEqual(application.request_stop_calls, 1)
+        self.assertNotIn(
+            "[APP] interrupted", [call.args[0] for call in log.call_args_list]
+        )
+
+    async def test_sigterm_after_running_requests_one_ordinary_stop(self):
+        application = self.ControlledApplication(block_startup=False)
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(_run_headless_application(application, shutdown))
+        await asyncio.wait_for(application.start_entered.wait(), timeout=1)
+        while application.state is not LifecycleState.RUNNING:
+            await asyncio.sleep(0)
+        shutdown.set()
+        shutdown.set()
+        result = await asyncio.wait_for(task, timeout=1)
+        self.assertEqual(result, 0)
+        self.assertFalse(application.start_cancelled)
+        self.assertEqual(application.start_calls, 1)
+        self.assertEqual(application.request_stop_calls, 1)
+        self.assertEqual(application.stop_calls, 1)
+
+    async def test_signal_handler_is_installed_only_for_run_mode(self):
+        profile = RobotProfile("test", "Test Robot")
+        placeholders = (mock.Mock(), mock.Mock())
+        for mode in ("console", "diagnostics"):
+            args = SimpleNamespace(mode=mode)
+            with self.subTest(mode=mode), patch(
+                "embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)
+            ) as run, patch(
+                "embodied_runtime.cli.asyncio.get_running_loop",
+                side_effect=AssertionError("non-run mode must not install a handler"),
+            ):
+                self.assertEqual(await _run_process_application(
+                    args, profile, mock.Mock(), *placeholders,
+                ), 0)
+                self.assertIsNone(run.await_args.args[5] if len(run.await_args.args) > 5 else None)
+
+        loop = asyncio.get_running_loop()
+        callbacks = []
+
+        async def run_mode(*args):
+            shutdown = args[5]
+            callbacks[0]()
+            callbacks[0]()
+            self.assertTrue(shutdown.is_set())
+            return 0
+
+        with patch.object(
+            loop, "add_signal_handler",
+            side_effect=lambda _signal, callback: callbacks.append(callback),
+        ) as add_handler, patch.object(
+            loop, "remove_signal_handler", return_value=True,
+        ) as remove_handler, patch(
+            "embodied_runtime.cli._run_application", side_effect=run_mode,
+        ), self.assertLogs("embodied_runtime.cli", level="INFO") as captured:
+            self.assertEqual(await _run_process_application(
+                SimpleNamespace(mode="run"), profile, mock.Mock(), *placeholders,
+            ), 0)
+        add_handler.assert_called_once()
+        remove_handler.assert_called_once()
+        self.assertEqual(
+            "\n".join(captured.output).count(
+                "signal=SIGTERM action=shutdown_requested"
+            ), 1,
+        )
+
+    async def test_headless_sms_composition_has_no_console_infrastructure(self):
+        _, args, _ = parse_launch_arguments(["--mode", "run", "--sms"])
+        application = mock.Mock()
+        application.run = AsyncMock(return_value=None)
+        environment = {
+            "TWILIO_ACCOUNT_SID": "AC00000000000000000000000000000000",
+            "TWILIO_AUTH_TOKEN": "secret",
+            "TWILIO_PHONE_NUMBER": "+15550000001",
+            "MIRA_SMS_OPERATOR_NUMBER": "+15550000002",
+            "TWILIO_WEBHOOK_URL": "https://example.invalid/sms",
+        }
+        with patch.dict("os.environ", environment, clear=True), patch(
+            "embodied_runtime.cli.RobotApplication", return_value=application,
+        ) as constructor, patch(
+            "embodied_runtime.cli.AsyncLineTerminal"
+        ) as terminal, patch("embodied_runtime.cli.RuntimeConsole") as console:
+            result = await _run_application(
+                args, RobotProfile("test", "Test Robot"),
+            )
+        self.assertEqual(result, 0)
+        application.run.assert_awaited_once()
+        terminal.assert_not_called()
+        console.assert_not_called()
+        routes = constructor.call_args.kwargs["operator_delivery_routes"]
+        self.assertEqual(
+            [(item.name, item.channel.value) for item in routes.destinations],
+            [("sms", "remote_text")],
+        )
+
+
 class CliTests(unittest.TestCase):
     def setUp(self) -> None:
         # Individual history integration tests supply a temporary root. The
@@ -359,6 +508,14 @@ class CliTests(unittest.TestCase):
             "[PROCESS] asyncio_cleanup status=completed"
         ), logs.index("[PROCESS] main status=returning exit_code=130"))
 
+    def test_run_mode_keyboard_interrupt_remains_exit_130(self) -> None:
+        with patch(
+            "embodied_runtime.cli._run_application", new=AsyncMock(
+                side_effect=KeyboardInterrupt
+            ),
+        ):
+            self.assertEqual(main(["--mode", "run"]), 130)
+
     def test_non_daemon_thread_report_filters_and_sorts(self) -> None:
         class FakeThread:
             def __init__(self, name: str, *, alive: bool, daemon: bool):
@@ -428,6 +585,20 @@ class CliTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
                 main(argv)
+
+    def test_headless_initiative_messages_accept_configured_sms_route(self) -> None:
+        argv = ["--mode", "run", "--sms", "--cognition", "openai-responses",
+                "--initiative", "--initiative-messages"]
+        with patch(
+            "embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)
+        ):
+            self.assertEqual(main(argv), 0)
+
+    def test_headless_initiative_messages_reject_missing_route(self) -> None:
+        argv = ["--mode", "run", "--cognition", "openai-responses",
+                "--initiative", "--initiative-messages"]
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            main(argv)
 
     def test_initiative_goal_closure_requires_only_initiative(self) -> None:
         with patch("sys.stderr"), self.assertRaises(SystemExit):

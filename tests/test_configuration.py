@@ -212,6 +212,29 @@ class ConfigurationTests(unittest.TestCase):
         effective = self.effective("[runtime]\nmode='console'\n", ("--diagnostics",))
         self.assertEqual(effective.mode, "diagnostics")
 
+    def test_explicit_mode_overrides_file_and_aliases_remain_compatible(self):
+        cases = (
+            ("console", ("--mode", "run"), "run"),
+            ("run", ("--mode", "console"), "console"),
+            ("run", ("--mode", "diagnostics"), "diagnostics"),
+            ("run", ("--console",), "console"),
+            ("console", ("--diagnostics",), "diagnostics"),
+        )
+        for configured, argv, expected in cases:
+            with self.subTest(configured=configured, argv=argv):
+                effective = self.effective(
+                    f"[runtime]\nmode='{configured}'\n", argv,
+                )
+                self.assertEqual(effective.mode, expected)
+
+    def test_conflicting_mode_selectors_fail_explicitly(self):
+        for argv in (
+            ("--mode", "run", "--console"),
+            ("--mode", "console", "--diagnostics"),
+        ):
+            with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
+                parse_launch_arguments(argv)
+
     def test_vision_defaults_toml_and_cli_precedence(self):
         self.assertEqual(HISTORICAL_DEFAULTS.vision, "none")
         configured = self.effective(
