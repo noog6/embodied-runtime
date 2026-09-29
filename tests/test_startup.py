@@ -14,8 +14,10 @@ from unittest.mock import patch
 from embodied_runtime.startup import (
     Deployment, InstallResult, StartupError, SystemPaths, TWILIO_ENVIRONMENT,
     build_deployment, check_deployment, discover_repository, environment_presence, install,
-    render_unit, required_environment, select_config, serialize_environment, uninstall,
-    validate_managed_environment_file, wizard_main,
+    local_sms_upstream, render_ngrok_config, render_ngrok_unit, render_unit,
+    render_ngrok_state, required_environment, select_config, serialize_environment,
+    serialize_ngrok_environment, uninstall, validate_managed_environment_file,
+    validate_ngrok_domain, validate_ngrok_config, wizard_main,
 )
 
 
@@ -32,6 +34,7 @@ class FakeRunner:
             Path(plain[-1]).mkdir(parents=True, exist_ok=True)
         if plain and plain[0] == "install" and "-d" not in plain:
             shutil.copyfile(plain[-2], plain[-1])
+            Path(plain[-1]).chmod(int(plain[plain.index("-m") + 1], 8))
         if plain[:2] == ["rm", "-f"]:
             Path(plain[-1]).unlink(missing_ok=True)
         if plain[:2] == ["systemctl", "is-active"]:
@@ -68,7 +71,8 @@ class StartupTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def config(self, *, cognition="none", vision="none", tts="espeak", sms=False) -> Path:
+    def config(self, *, cognition="none", vision="none", tts="espeak", sms=False,
+               sms_port=8080, webhook_path="/sms") -> Path:
         path = self.root / "config/runtime config.toml"
         path.write_text(
             f'''[runtime]
@@ -86,6 +90,8 @@ elevenlabs_tts_voice_id = "voice"
 
 [sms]
 enabled = {str(sms).lower()}
+bind_port = {sms_port}
+webhook_path = "{webhook_path}"
 '''
         )
         return path
@@ -99,6 +105,245 @@ enabled = {str(sms).lower()}
             account_lookup=lambda _: SimpleNamespace(pw_uid=1000), paths=self.paths,
             **kwargs,
         )
+
+    def ngrok_deployment(self, **kwargs) -> Deployment:
+        binary = self.root / "tools with spaces/ngrok"
+        binary.parent.mkdir(exist_ok=True)
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        runner = lambda command, check=True: SimpleNamespace(
+            returncode=0, stdout="ngrok version 3.20.0\n", stderr="",
+        )
+        config = kwargs.pop("config", None) or self.config(sms=True)
+        return self.deployment(
+            config=config, with_ngrok=True, ngrok=binary,
+            ngrok_domain=kwargs.pop("ngrok_domain", "mira-example.ngrok-free.app"),
+            runner=runner, **kwargs,
+        )
+
+    def test_ngrok_domain_and_local_upstream_validation(self) -> None:
+        self.assertEqual(validate_ngrok_domain("Mira-Example.Ngrok-Free.App."),
+                         "mira-example.ngrok-free.app")
+        for invalid in ("https://host/something", "host:1234", "user@host", "host?x=1"):
+            with self.subTest(invalid=invalid), self.assertRaises(StartupError):
+                validate_ngrok_domain(invalid)
+        self.assertEqual(local_sms_upstream("0.0.0.0", 8080), "http://127.0.0.1:8080")
+        self.assertEqual(local_sms_upstream("::1", 8080), "http://[::1]:8080")
+        with self.assertRaisesRegex(StartupError, "local"):
+            local_sms_upstream("example.com", 8080)
+
+    def test_ngrok_rendering_is_stable_secret_free_and_independent(self) -> None:
+        deployment = self.ngrok_deployment(capture_env=True)
+        config = render_ngrok_config(deployment)
+        unit = render_ngrok_unit(deployment)
+        self.assertIn("version: 3", config)
+        self.assertIn("authtoken: $NGROK_AUTHTOKEN", config)
+        self.assertIn('url: "https://mira-example.ngrok-free.app"', config)
+        self.assertIn('url: "http://127.0.0.1:8080"', config)
+        self.assertEqual(deployment.public_webhook_url,
+                         "https://mira-example.ngrok-free.app/sms")
+        for expected in ("Type=simple", "User=robot", "Restart=on-failure",
+                         "StandardOutput=journal", "WantedBy=multi-user.target",
+                         str(deployment.ngrok_environment_path)):
+            self.assertIn(expected, unit)
+        self.assertIn('"' + str(deployment.ngrok) + '"', unit)
+        for forbidden in ("Requires=mira.service", "ExecStartPre", "service install",
+                          "actual-token", "TWILIO_AUTH_TOKEN", "OPENAI_API_KEY"):
+            self.assertNotIn(forbidden, config + unit)
+        self.assertNotIn("Requires=mira-ngrok.service", render_unit(deployment))
+        self.assertEqual(
+            config.splitlines()[2:4],
+            ["agent:", "  authtoken: $NGROK_AUTHTOKEN"],
+        )
+        self.assertIn(
+            f'"start" "{deployment.service_name}-sms" "--config"', unit,
+        )
+
+    def test_ngrok_config_check_uses_temporary_config_without_starting(self) -> None:
+        deployment = self.ngrok_deployment(capture_env=True)
+        commands = []
+        temporary_path = None
+
+        def runner(command, *, check=True):
+            nonlocal temporary_path
+            commands.append(list(command))
+            temporary_path = Path(command[-1])
+            self.assertEqual(temporary_path.read_text(), render_ngrok_config(deployment))
+            return SimpleNamespace(returncode=0, stdout="Valid configuration file", stderr="")
+
+        self.assertIsNone(validate_ngrok_config(
+            deployment, environ={"NGROK_AUTHTOKEN": "opaque"}, runner=runner,
+        ))
+        self.assertEqual(commands[0][1:4], ["config", "check", "--config"])
+        self.assertNotIn("opaque", commands[0])
+        self.assertFalse(temporary_path.exists())
+        self.assertIn("skipped", validate_ngrok_config(
+            deployment, environ={}, runner=runner,
+        ))
+
+    @patch("embodied_runtime.startup.shutil.which", return_value=None)
+    def test_public_webhook_state_detects_domain_and_path_not_upstream(self, _which) -> None:
+        environment = {
+            "TWILIO_ACCOUNT_SID": "sid", "TWILIO_AUTH_TOKEN": "token",
+            "TWILIO_PHONE_NUMBER": "phone", "MIRA_SMS_OPERATOR_NUMBER": "operator",
+            "NGROK_AUTHTOKEN": "ngrok-token",
+        }
+        original = self.ngrok_deployment(
+            capture_env=True, ngrok_domain="one.ngrok-free.app",
+        )
+        install(original, environ=environment, runner=FakeRunner(), euid=1000)
+        self.assertEqual(
+            original.ngrok_state_path.read_text(),
+            "public_webhook_url=https://one.ngrok-free.app/sms\n",
+        )
+
+        same = self.ngrok_deployment(ngrok_domain="one.ngrok-free.app")
+        self.assertEqual(install(same, runner=FakeRunner(), euid=1000).unit_status,
+                         "already current")
+
+        changed_domain = self.ngrok_deployment(ngrok_domain="two.ngrok-free.app")
+        with self.assertRaisesRegex(StartupError, "--capture-env"):
+            install(changed_domain, runner=FakeRunner(), euid=1000, force=True)
+
+        path_config = self.config(sms=True, webhook_path="/twilio")
+        changed_path = self.ngrok_deployment(
+            config=path_config, capture_env=True, ngrok_domain="one.ngrok-free.app",
+        )
+        existing_ngrok_environment = changed_path.ngrok_environment_path.read_bytes()
+        runtime_only_environment = {
+            name: value for name, value in environment.items()
+            if name != "NGROK_AUTHTOKEN"
+        }
+        result = install(
+            changed_path, environ=runtime_only_environment,
+            runner=FakeRunner(active=True),
+            euid=1000, force=True,
+        )
+        self.assertTrue(result.restart_required)
+        self.assertFalse(result.ngrok_restart_required)
+        self.assertEqual(changed_path.ngrok_environment_path.read_bytes(),
+                         existing_ngrok_environment)
+        self.assertEqual(
+            changed_path.ngrok_state_path.read_text(),
+            "public_webhook_url=https://one.ngrok-free.app/twilio\n",
+        )
+
+        # Restore the public path, then change only the private upstream port.
+        install(original, environ=environment, runner=FakeRunner(), euid=1000, force=True)
+        port_config = self.config(sms=True, sms_port=8081)
+        changed_port = self.ngrok_deployment(
+            config=port_config, ngrok_domain="one.ngrok-free.app",
+        )
+        result = install(
+            changed_port, runner=FakeRunner(active=True), euid=1000, force=True,
+        )
+        self.assertFalse(result.restart_required)
+        self.assertTrue(result.ngrok_restart_required)
+
+    @patch("embodied_runtime.startup.shutil.which", return_value=None)
+    def test_webhook_capture_also_captures_an_explicit_token_rotation(self, _which) -> None:
+        environment = {
+            "TWILIO_ACCOUNT_SID": "sid", "TWILIO_AUTH_TOKEN": "token",
+            "TWILIO_PHONE_NUMBER": "phone", "MIRA_SMS_OPERATOR_NUMBER": "operator",
+            "NGROK_AUTHTOKEN": "old-token",
+        }
+        original = self.ngrok_deployment(
+            capture_env=True, ngrok_domain="one.ngrok-free.app",
+        )
+        install(original, environ=environment, runner=FakeRunner(), euid=1000)
+        path_config = self.config(sms=True, webhook_path="/twilio")
+        changed = self.ngrok_deployment(
+            config=path_config, capture_env=True, ngrok_domain="one.ngrok-free.app",
+        )
+        rotated = {**environment, "NGROK_AUTHTOKEN": "new-token"}
+        result = install(
+            changed, environ=rotated, runner=FakeRunner(active=True),
+            euid=1000, force=True,
+        )
+        self.assertTrue(result.restart_required)
+        self.assertTrue(result.ngrok_restart_required)
+        self.assertEqual(changed.ngrok_environment_path.read_text(),
+                         'NGROK_AUTHTOKEN="new-token"\n')
+
+    @patch("embodied_runtime.startup.shutil.which", return_value=None)
+    def test_token_only_rotation_does_not_rewrite_runtime_environment(self, _which) -> None:
+        environment = {
+            "TWILIO_ACCOUNT_SID": "sid", "TWILIO_AUTH_TOKEN": "token",
+            "TWILIO_PHONE_NUMBER": "phone", "MIRA_SMS_OPERATOR_NUMBER": "operator",
+            "NGROK_AUTHTOKEN": "old-token",
+        }
+        original = self.ngrok_deployment(capture_env=True)
+        install(original, environ=environment, runner=FakeRunner(), euid=1000)
+        runtime_before = original.environment_path.read_bytes()
+        rotation = self.ngrok_deployment(capture_env=True)
+        result = install(
+            rotation, environ={"NGROK_AUTHTOKEN": "new-token"},
+            runner=FakeRunner(active=True), euid=1000,
+        )
+        self.assertFalse(result.restart_required)
+        self.assertTrue(result.ngrok_restart_required)
+        self.assertEqual(rotation.environment_path.read_bytes(), runtime_before)
+        self.assertEqual(rotation.ngrok_environment_path.read_text(),
+                         'NGROK_AUTHTOKEN="new-token"\n')
+
+    @patch("embodied_runtime.startup.shutil.which", return_value=None)
+    def test_check_enforces_webhook_state_and_reuses_managed_ngrok_token(self, _which) -> None:
+        environment = {
+            "TWILIO_ACCOUNT_SID": "sid", "TWILIO_AUTH_TOKEN": "token",
+            "TWILIO_PHONE_NUMBER": "phone", "MIRA_SMS_OPERATOR_NUMBER": "operator",
+            "NGROK_AUTHTOKEN": "managed-token",
+        }
+        original = self.ngrok_deployment(capture_env=True)
+        install(original, environ=environment, runner=FakeRunner(), euid=1000)
+        changed_config = self.config(sms=True, webhook_path="/twilio")
+        uncaptured = self.ngrok_deployment(config=changed_config)
+        runner = FakeRunner()
+        with self.assertRaisesRegex(StartupError, "changed public webhook.*--capture-env"):
+            check_deployment(uncaptured, environ={}, runner=runner)
+        self.assertEqual(runner.commands, [])
+
+        captured = self.ngrok_deployment(config=changed_config, capture_env=True)
+        runtime_environment = {
+            name: value for name, value in environment.items()
+            if name != "NGROK_AUTHTOKEN"
+        }
+        warning = check_deployment(
+            captured, environ=runtime_environment, runner=FakeRunner(),
+        )
+        self.assertIn("NGROK_AUTHTOKEN is not loaded", warning)
+        self.assertEqual(captured.ngrok_environment_path.read_text(),
+                         'NGROK_AUTHTOKEN="managed-token"\n')
+
+    def test_ngrok_capture_has_least_privilege_and_derives_webhook(self) -> None:
+        deployment = self.ngrok_deployment(capture_env=True)
+        environment = {
+            "TWILIO_ACCOUNT_SID": "sid", "TWILIO_AUTH_TOKEN": "twilio-secret",
+            "TWILIO_PHONE_NUMBER": "+15550001", "MIRA_SMS_OPERATOR_NUMBER": "+15550002",
+            "NGROK_AUTHTOKEN": "ngrok-secret", "OPENAI_API_KEY": "not-required",
+        }
+        runtime = serialize_environment(deployment, environment).decode()
+        ingress = serialize_ngrok_environment(deployment, environment).decode()
+        self.assertIn('TWILIO_WEBHOOK_URL="https://mira-example.ngrok-free.app/sms"', runtime)
+        self.assertNotIn("NGROK_AUTHTOKEN", runtime)
+        self.assertEqual(ingress, 'NGROK_AUTHTOKEN="ngrok-secret"\n')
+        self.assertNotIn("twilio-secret", ingress)
+
+    @patch("embodied_runtime.startup.shutil.which", return_value=None)
+    def test_ngrok_install_enables_both_and_starts_in_order(self, _which) -> None:
+        deployment = self.ngrok_deployment(capture_env=True)
+        environment = {
+            "TWILIO_ACCOUNT_SID": "sid", "TWILIO_AUTH_TOKEN": "token",
+            "TWILIO_PHONE_NUMBER": "phone", "MIRA_SMS_OPERATOR_NUMBER": "operator",
+            "NGROK_AUTHTOKEN": "ngrok-token",
+        }
+        runner = FakeRunner()
+        install(deployment, environ=environment, runner=runner, euid=1000, start=True)
+        flattened = [c[1:] if c[0] == "sudo" else c for c in runner.commands]
+        self.assertIn(["systemctl", "enable", "mira.service"], flattened)
+        self.assertIn(["systemctl", "enable", "mira-ngrok.service"], flattened)
+        runtime_start = flattened.index(["systemctl", "start", "mira.service"])
+        ingress_start = flattened.index(["systemctl", "start", "mira-ngrok.service"])
+        self.assertLess(runtime_start, ingress_start)
 
     def test_discovers_checkout_from_script_not_working_directory(self) -> None:
         script = self.root / "scripts/startup_wizard.py"
@@ -352,7 +597,7 @@ enabled = {str(sms).lower()}
 
         self.assertEqual(prompt.call_count, 1)
         self.assertNotIn("Start Mira now?", output.getvalue())
-        self.assertIn("Restart explicitly", output.getvalue())
+        self.assertIn("Restart required", output.getvalue())
         self.assertIn("sudo systemctl restart mira.service", output.getvalue())
         command.assert_not_called()
 
@@ -372,9 +617,84 @@ enabled = {str(sms).lower()}
             self.assertEqual(wizard_main([], script_path=self.root / "wizard.py"), 0)
 
         self.assertEqual(prompt.call_count, 2)
-        self.assertIn("Start Mira now?", prompt.call_args_list[1].args[0])
+        self.assertIn("Start Mira services now?", prompt.call_args_list[1].args[0])
         self.assertIn("sudo systemctl start mira.service", output.getvalue())
         command.assert_not_called()
+
+    def test_interactive_can_enable_ngrok_and_show_public_webhook(self) -> None:
+        sms = self.deployment(config=self.config(sms=True))
+        ingress = self.ngrok_deployment(capture_env=False)
+        output = io.StringIO()
+        with patch(
+            "embodied_runtime.startup.build_deployment", side_effect=[sms, ingress],
+        ), patch(
+            "embodied_runtime.startup.shutil.which", return_value=str(ingress.ngrok),
+        ), patch(
+            "builtins.input",
+            side_effect=["y", "", "mira-example.ngrok-free.app", "n"],
+        ), redirect_stdout(output):
+            self.assertEqual(wizard_main([], script_path=self.root / "wizard.py"), 0)
+        rendered = output.getvalue()
+        self.assertIn("ngrok ingress\n  enabled", rendered)
+        self.assertIn("ngrok version 3.20.0", rendered)
+        self.assertIn("https://mira-example.ngrok-free.app/sms", rendered)
+
+    def test_interactive_ngrok_start_uses_two_service_order(self) -> None:
+        sms = self.deployment(config=self.config(sms=True))
+        ingress = self.ngrok_deployment(capture_env=False)
+        result = InstallResult("installed", ngrok_unit_status="installed")
+        output = io.StringIO()
+        with patch(
+            "embodied_runtime.startup.build_deployment", side_effect=[sms, ingress],
+        ), patch(
+            "embodied_runtime.startup.shutil.which", return_value=str(ingress.ngrok),
+        ), patch(
+            "embodied_runtime.startup.install", return_value=result,
+        ), patch(
+            "embodied_runtime.startup.start_inactive_services",
+        ) as start, patch(
+            "builtins.input",
+            side_effect=["y", "", "mira-example.ngrok-free.app", "y", "y", "y"],
+        ), redirect_stdout(output):
+            self.assertEqual(wizard_main([], script_path=self.root / "wizard.py"), 0)
+        start.assert_called_once()
+        self.assertTrue(start.call_args.args[0].capture_env)
+
+        runner = FakeRunner()
+        from embodied_runtime.startup import start_inactive_services
+        start_inactive_services(ingress, runner=runner, euid=1000)
+        starts = [command for command in runner.commands if "start" in command]
+        self.assertEqual(starts, [
+            ["sudo", "systemctl", "start", "mira.service"],
+            ["sudo", "systemctl", "start", "mira-ngrok.service"],
+        ])
+
+    def test_interactive_reports_both_restarts_without_start_prompt(self) -> None:
+        sms = self.deployment(config=self.config(sms=True))
+        ingress = self.ngrok_deployment(capture_env=False)
+        result = InstallResult(
+            "installed", restart_required=True, ngrok_unit_status="installed",
+            ngrok_restart_required=True,
+        )
+        output = io.StringIO()
+        with patch(
+            "embodied_runtime.startup.build_deployment", side_effect=[sms, ingress],
+        ), patch(
+            "embodied_runtime.startup.shutil.which", return_value=str(ingress.ngrok),
+        ), patch(
+            "embodied_runtime.startup.install", return_value=result,
+        ), patch(
+            "embodied_runtime.startup.start_inactive_services",
+        ) as start, patch(
+            "builtins.input",
+            side_effect=["y", "", "mira-example.ngrok-free.app", "y", "y"],
+        ) as prompt, redirect_stdout(output):
+            self.assertEqual(wizard_main([], script_path=self.root / "wizard.py"), 0)
+        self.assertEqual(prompt.call_count, 5)
+        self.assertIn("sudo systemctl restart mira.service", output.getvalue())
+        self.assertIn("sudo systemctl restart mira-ngrok.service", output.getvalue())
+        self.assertNotIn("Start Mira services now?", output.getvalue())
+        start.assert_not_called()
 
     @patch("embodied_runtime.startup.shutil.which", return_value=None)
     def test_changed_install_requires_force(self, _which) -> None:

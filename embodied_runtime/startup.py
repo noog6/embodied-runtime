@@ -62,6 +62,10 @@ class Deployment:
     with_sms: bool
     capture_env: bool
     paths: SystemPaths = SystemPaths()
+    with_ngrok: bool = False
+    ngrok: Path | None = None
+    ngrok_domain: str | None = None
+    ngrok_version: str | None = None
 
     @property
     def unit_name(self) -> str:
@@ -76,6 +80,32 @@ class Deployment:
         return self.paths.environment_directory / f"{self.service_name}.env"
 
     @property
+    def ngrok_unit_name(self) -> str:
+        return f"{self.service_name}-ngrok.service"
+
+    @property
+    def ngrok_unit_path(self) -> Path:
+        return self.paths.unit_directory / self.ngrok_unit_name
+
+    @property
+    def ngrok_environment_path(self) -> Path:
+        return self.paths.environment_directory / f"{self.service_name}-ngrok.env"
+
+    @property
+    def ngrok_config_path(self) -> Path:
+        return self.paths.environment_directory / f"{self.service_name}-ngrok.yml"
+
+    @property
+    def ngrok_state_path(self) -> Path:
+        return self.paths.environment_directory / f"{self.service_name}-ngrok.state"
+
+    @property
+    def public_webhook_url(self) -> str | None:
+        if not self.with_ngrok or self.ngrok_domain is None:
+            return None
+        return f"https://{self.ngrok_domain}{self.launch.sms_webhook_path}"
+
+    @property
     def uses_environment_file(self) -> bool:
         if not required_environment(self):
             return False
@@ -88,6 +118,8 @@ class Deployment:
 class InstallResult:
     unit_status: str
     restart_required: bool = False
+    ngrok_unit_status: str | None = None
+    ngrok_restart_required: bool = False
 
 
 _SERVICE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
@@ -95,6 +127,10 @@ _ENVIRONMENT_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
 TWILIO_ENVIRONMENT = (
     "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
     "MIRA_SMS_OPERATOR_NUMBER", "TWILIO_WEBHOOK_URL",
+)
+_HOSTNAME = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
 )
 
 
@@ -187,6 +223,35 @@ def validate_service_name(name: str) -> str:
     return name
 
 
+def validate_ngrok_domain(value: str) -> str:
+    """Validate a stable hostname (not a URL) and return its canonical form."""
+    domain = value.strip().lower().rstrip(".")
+    if not _HOSTNAME.fullmatch(domain):
+        raise StartupError(
+            "ngrok domain must be a hostname without scheme, credentials, port, path, query, or fragment"
+        )
+    return domain
+
+
+def discover_ngrok(
+    override: Path | None = None, *, runner: CommandRunner = run_command,
+) -> tuple[Path, str]:
+    candidate = str(override.expanduser()) if override else shutil.which("ngrok")
+    if not candidate:
+        raise StartupError("ngrok agent is missing; install ngrok v3 first or pass --ngrok PATH")
+    path = Path(os.path.abspath(candidate))
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise StartupError(f"ngrok agent is missing or not executable: {path}")
+    result = runner([str(path), "version"])
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    match = re.search(r"(?:ngrok(?: version)?\s+)?v?(\d+)(?:\.\d+){1,2}", output, re.I)
+    if not match:
+        raise StartupError("could not determine ngrok agent version")
+    if int(match.group(1)) != 3:
+        raise StartupError(f"unsupported ngrok major version {match.group(1)}; ngrok v3 is required")
+    return path, output.splitlines()[0]
+
+
 def build_deployment(
     *, repo: Path, python: Path | None = None, config: Path | None = None,
     service_name: str | None = None, user: str | None = None,
@@ -194,6 +259,8 @@ def build_deployment(
     interactive: bool = False, environ: Mapping[str, str] = os.environ,
     euid: int | None = None, account_lookup: Callable[[str], object] = pwd.getpwnam,
     paths: SystemPaths = SystemPaths(),
+    with_ngrok: bool = False, ngrok: Path | None = None,
+    ngrok_domain: str | None = None, runner: CommandRunner = run_command,
 ) -> Deployment:
     repo = repo.resolve()
     if not repo.is_dir() or not (repo / "main.py").is_file():
@@ -215,9 +282,21 @@ def build_deployment(
     selected_user = resolve_service_user(
         user, environ=environ, euid=euid, lookup=account_lookup,
     )
+    ngrok_path = None
+    ngrok_version = None
+    domain = None
+    if with_ngrok:
+        if not launch.sms_enabled:
+            raise StartupError("--with-ngrok requires effective SMS transport; enable SMS or pass --with-sms")
+        if not ngrok_domain:
+            raise StartupError("--with-ngrok requires --ngrok-domain HOST")
+        domain = validate_ngrok_domain(ngrok_domain)
+        ngrok_path, ngrok_version = discover_ngrok(ngrok, runner=runner)
+        local_sms_upstream(launch.sms_bind_host, launch.sms_bind_port)
     return Deployment(
         repo, python_path, config_path, profile, launch, selected_name,
-        selected_user, with_sms, capture_env, paths,
+        selected_user, with_sms, capture_env, paths, with_ngrok, ngrok_path,
+        domain, ngrok_version,
     )
 
 
@@ -237,12 +316,19 @@ def required_environment(deployment: Deployment) -> tuple[str, ...]:
 def environment_presence(
     deployment: Deployment, environ: Mapping[str, str] = os.environ,
 ) -> dict[str, bool]:
-    return {name: bool(environ.get(name)) for name in required_environment(deployment)}
+    result = {name: bool(environ.get(name)) for name in required_environment(deployment)}
+    if deployment.with_ngrok:
+        result["TWILIO_WEBHOOK_URL"] = True  # deterministically derived
+        result["NGROK_AUTHTOKEN"] = bool(environ.get("NGROK_AUTHTOKEN"))
+    return result
 
 
 def validate_managed_environment_file(deployment: Deployment) -> bool:
     """Return whether the exact managed path is a securely protected regular file."""
-    path = deployment.environment_path
+    return validate_secure_file(deployment.environment_path)
+
+
+def validate_secure_file(path: Path) -> bool:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -263,7 +349,9 @@ def serialize_environment(
     for name in required_environment(deployment):
         if not _ENVIRONMENT_NAME.fullmatch(name):
             raise StartupError(f"unsafe environment variable name: {name!r}")
-        value = environ.get(name)
+        value = (deployment.public_webhook_url
+                 if name == "TWILIO_WEBHOOK_URL" and deployment.with_ngrok
+                 else environ.get(name))
         if not value:
             raise StartupError(f"required environment variable is missing: {name}")
         if any(character in value for character in ("\x00", "\n", "\r")):
@@ -271,6 +359,140 @@ def serialize_environment(
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'{name}="{escaped}"\n')
     return "".join(lines).encode()
+
+
+def serialize_ngrok_environment(
+    deployment: Deployment, environ: Mapping[str, str] = os.environ,
+) -> bytes:
+    value = environ.get("NGROK_AUTHTOKEN")
+    if not value:
+        raise StartupError("required environment variable is missing: NGROK_AUTHTOKEN")
+    if any(character in value for character in ("\x00", "\n", "\r")):
+        raise StartupError("environment value cannot be safely stored: NGROK_AUTHTOKEN")
+    return f'NGROK_AUTHTOKEN="{value.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}"\n'.encode()
+
+
+def local_sms_upstream(host: str, port: int) -> str:
+    normalized = host.strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return f"http://127.0.0.1:{port}"
+    if normalized in {"::1", "::", "[::1]", "[::]"}:
+        return f"http://[::1]:{port}"
+    raise StartupError(f"sms.bind_host cannot be safely mapped to a local ngrok upstream: {host}")
+
+
+def render_ngrok_config(deployment: Deployment) -> str:
+    if not deployment.with_ngrok or not deployment.ngrok_domain:
+        raise StartupError("ngrok ingress is not configured")
+    upstream = local_sms_upstream(deployment.launch.sms_bind_host, deployment.launch.sms_bind_port)
+    return (
+        "version: 3\n\nagent:\n  authtoken: $NGROK_AUTHTOKEN\n\nendpoints:\n"
+        f"  - name: {deployment.service_name}-sms\n"
+        f'    url: "https://{deployment.ngrok_domain}"\n'
+        "    upstream:\n"
+        f'      url: "{upstream}"\n'
+    )
+
+
+def render_ngrok_state(deployment: Deployment) -> str:
+    """Render non-secret state used to detect changes to the public webhook."""
+    if deployment.public_webhook_url is None:
+        raise StartupError("ngrok ingress is not configured")
+    return f"public_webhook_url={deployment.public_webhook_url}\n"
+
+
+def public_webhook_changed(deployment: Deployment) -> bool:
+    """Compare configured public webhook state without inspecting secret files."""
+    if not deployment.with_ngrok:
+        return False
+    installed = (deployment.ngrok_state_path.read_text()
+                 if deployment.ngrok_state_path.exists() else None)
+    return installed != render_ngrok_state(deployment)
+
+
+def ngrok_environment_capture(
+    deployment: Deployment, environ: Mapping[str, str] = os.environ,
+) -> bytes | None:
+    """Select a supplied token or a secure existing managed credential source."""
+    managed = validate_secure_file(deployment.ngrok_environment_path)
+    supplied = bool(environ.get("NGROK_AUTHTOKEN"))
+    if not managed or (deployment.capture_env and supplied):
+        return serialize_ngrok_environment(deployment, environ)
+    return None
+
+
+def _runtime_environment_capture(
+    deployment: Deployment, *, webhook_changed: bool,
+    environ: Mapping[str, str] = os.environ,
+) -> bytes | None:
+    """Allow token-only capture to reuse an existing runtime secret file."""
+    required = required_environment(deployment)
+    if not required:
+        return None
+    managed = validate_managed_environment_file(deployment)
+    supplied_runtime_value = any(
+        environ.get(name) for name in required if name != "TWILIO_WEBHOOK_URL"
+    )
+    if deployment.capture_env:
+        token_only_capture = (
+            deployment.with_ngrok and bool(environ.get("NGROK_AUTHTOKEN"))
+            and managed and not webhook_changed and not supplied_runtime_value
+        )
+        if not token_only_capture:
+            return serialize_environment(deployment, environ)
+    if not managed:
+        raise StartupError(
+            "this launch requires service secrets; use --capture-env or install the "
+            f"protected file {deployment.environment_path} first"
+        )
+    return None
+
+
+def validate_ngrok_config(
+    deployment: Deployment, *, environ: Mapping[str, str] = os.environ,
+    runner: CommandRunner = run_command,
+) -> str | None:
+    """Ask ngrok v3 to parse its generated config without starting a tunnel."""
+    if not environ.get("NGROK_AUTHTOKEN"):
+        return "ngrok config validation skipped; NGROK_AUTHTOKEN is not loaded"
+    if deployment.ngrok is None:
+        raise StartupError("ngrok ingress is not configured")
+    with tempfile.NamedTemporaryFile("w", suffix=".yml") as temporary:
+        temporary.write(render_ngrok_config(deployment))
+        temporary.flush()
+        runner([str(deployment.ngrok), "config", "check", "--config", temporary.name])
+    return None
+
+
+def render_ngrok_unit(deployment: Deployment) -> str:
+    if not deployment.with_ngrok or deployment.ngrok is None:
+        raise StartupError("ngrok ingress is not configured")
+    command = " ".join(_unit_quote(arg) for arg in (
+        str(deployment.ngrok), "start", f"{deployment.service_name}-sms",
+        "--config", str(deployment.ngrok_config_path),
+    ))
+    return f"""[Unit]
+Description={_unit_plain(deployment.profile.name)} ngrok SMS Ingress
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User={deployment.user}
+EnvironmentFile={_unit_path(str(deployment.ngrok_environment_path))}
+ExecStart={command}
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=20s
+SyslogIdentifier={deployment.service_name}-ngrok
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
 
 
 def _unit_quote(value: str) -> str:
@@ -343,15 +565,22 @@ def check_deployment(
     runner: CommandRunner = run_command,
 ) -> str | None:
     """Validate a deployment without performing any machine mutation."""
-    required = required_environment(deployment)
-    if required and deployment.capture_env:
-        serialize_environment(deployment, environ)
-    elif required and not validate_managed_environment_file(deployment):
+    webhook_changed = public_webhook_changed(deployment)
+    if webhook_changed and not deployment.capture_env:
         raise StartupError(
-            "required service secrets need --capture-env or a secure managed "
-            f"environment file at {deployment.environment_path}"
+            "first ngrok setup or a changed public webhook requires --capture-env"
         )
-    return verify_unit(render_unit(deployment), runner)
+    _runtime_environment_capture(
+        deployment, webhook_changed=webhook_changed, environ=environ,
+    )
+    warnings = [verify_unit(render_unit(deployment), runner)]
+    if deployment.with_ngrok:
+        ngrok_environment_capture(deployment, environ)
+        render_ngrok_config(deployment)
+        warnings.append(verify_unit(render_ngrok_unit(deployment), runner))
+        warnings.append(validate_ngrok_config(deployment, environ=environ, runner=runner))
+    reported = [warning for warning in warnings if warning]
+    return "; ".join(reported) if reported else None
 
 
 def _privileged(command: Sequence[str], *, euid: int | None = None) -> list[str]:
@@ -377,43 +606,92 @@ def install(
     force: bool = False, start: bool = False, runner: CommandRunner = run_command,
     euid: int | None = None,
 ) -> InstallResult:
-    required = required_environment(deployment)
-    environment_content: bytes | None = None
-    if required and deployment.capture_env:
-        environment_content = serialize_environment(deployment, environ)
-    elif required and not validate_managed_environment_file(deployment):
+    expected_state = render_ngrok_state(deployment) if deployment.with_ngrok else None
+    installed_state = (deployment.ngrok_state_path.read_text()
+                       if deployment.with_ngrok and deployment.ngrok_state_path.exists()
+                       else None)
+    webhook_changed = public_webhook_changed(deployment)
+    if (deployment.with_ngrok and not deployment.capture_env
+            and webhook_changed):
         raise StartupError(
-            "this launch requires service secrets; use --capture-env or install the "
-            f"protected file {deployment.environment_path} first"
+            "first ngrok setup or a changed public webhook requires --capture-env"
         )
+    environment_content = _runtime_environment_capture(
+        deployment, webhook_changed=webhook_changed, environ=environ,
+    )
+    ngrok_environment_content = (
+        ngrok_environment_capture(deployment, environ)
+        if deployment.with_ngrok else None
+    )
     unit = render_unit(deployment)
     verify_unit(unit, runner)
+    ngrok_unit = render_ngrok_unit(deployment) if deployment.with_ngrok else None
+    ngrok_config = render_ngrok_config(deployment) if deployment.with_ngrok else None
+    if ngrok_unit:
+        verify_unit(ngrok_unit, runner)
     existing = deployment.unit_path.read_bytes() if deployment.unit_path.exists() else None
     encoded = unit.encode()
     unit_changed = existing != encoded
     environment_updated = environment_content is not None
+    ngrok_existing = (deployment.ngrok_unit_path.read_bytes()
+                      if deployment.with_ngrok and deployment.ngrok_unit_path.exists() else None)
+    ngrok_config_existing = (deployment.ngrok_config_path.read_bytes()
+                             if deployment.with_ngrok and deployment.ngrok_config_path.exists() else None)
+    ngrok_encoded = ngrok_unit.encode() if ngrok_unit else None
+    ngrok_config_encoded = ngrok_config.encode() if ngrok_config else None
+    ngrok_state_encoded = expected_state.encode() if expected_state else None
+    ngrok_changed = deployment.with_ngrok and (
+        ngrok_existing != ngrok_encoded or ngrok_config_existing != ngrok_config_encoded
+    )
     if existing is not None and unit_changed and not force:
         raise StartupError("installed unit differs; review it and pass --force to replace")
+    if deployment.with_ngrok and ngrok_existing is not None and ngrok_changed and not force:
+        raise StartupError("installed ngrok artifacts differ; review them and pass --force to replace")
     status = "already current" if not unit_changed else "installed"
     active_before = (
         runner(["systemctl", "is-active", deployment.unit_name], check=False).returncode == 0
     )
+    ngrok_active_before = bool(deployment.with_ngrok and
+        runner(["systemctl", "is-active", deployment.ngrok_unit_name], check=False).returncode == 0)
     if environment_content is not None:
         runner(_privileged(["install", "-d", "-m", "0755", str(deployment.paths.environment_directory)], euid=euid))
         _install_file(
             environment_content, deployment.environment_path,
             "0600", runner=runner, euid=euid,
         )
+    if ngrok_environment_content is not None:
+        runner(_privileged(["install", "-d", "-m", "0755", str(deployment.paths.environment_directory)], euid=euid))
+        _install_file(ngrok_environment_content, deployment.ngrok_environment_path,
+                      "0600", runner=runner, euid=euid)
     if unit_changed:
         runner(_privileged(["install", "-d", "-m", "0755", str(deployment.paths.unit_directory)], euid=euid))
         _install_file(encoded, deployment.unit_path, "0644", runner=runner, euid=euid)
+    if deployment.with_ngrok and ngrok_changed:
+        runner(_privileged(["install", "-d", "-m", "0755", str(deployment.paths.unit_directory)], euid=euid))
+        runner(_privileged(["install", "-d", "-m", "0755", str(deployment.paths.environment_directory)], euid=euid))
+        if ngrok_existing != ngrok_encoded:
+            _install_file(ngrok_encoded, deployment.ngrok_unit_path, "0644", runner=runner, euid=euid)
+        if ngrok_config_existing != ngrok_config_encoded:
+            _install_file(ngrok_config_encoded, deployment.ngrok_config_path, "0644", runner=runner, euid=euid)
+    if deployment.with_ngrok and installed_state != expected_state:
+        runner(_privileged(["install", "-d", "-m", "0755", str(deployment.paths.environment_directory)], euid=euid))
+        _install_file(ngrok_state_encoded, deployment.ngrok_state_path,
+                      "0644", runner=runner, euid=euid)
     runner(_privileged(["systemctl", "daemon-reload"], euid=euid))
     runner(_privileged(["systemctl", "enable", deployment.unit_name], euid=euid))
+    if deployment.with_ngrok:
+        runner(_privileged(["systemctl", "enable", deployment.ngrok_unit_name], euid=euid))
     if start and not active_before:
         runner(_privileged(["systemctl", "start", deployment.unit_name], euid=euid))
+    if start and deployment.with_ngrok and not ngrok_active_before:
+        runner(_privileged(["systemctl", "start", deployment.ngrok_unit_name], euid=euid))
     return InstallResult(
         status,
         restart_required=active_before and (unit_changed or environment_updated),
+        ngrok_unit_status=("already current" if not ngrok_changed else "installed")
+        if deployment.with_ngrok else None,
+        ngrok_restart_required=ngrok_active_before and bool(
+            ngrok_changed or ngrok_environment_content is not None),
     )
 
 
@@ -421,6 +699,14 @@ def uninstall(
     deployment: Deployment, *, purge_env: bool = False,
     runner: CommandRunner = run_command, euid: int | None = None,
 ) -> None:
+    if deployment.with_ngrok:
+        runner(_privileged(["systemctl", "stop", deployment.ngrok_unit_name], euid=euid), check=False)
+        runner(_privileged(["systemctl", "disable", deployment.ngrok_unit_name], euid=euid), check=False)
+        runner(_privileged(["rm", "-f", str(deployment.ngrok_unit_path),
+                            str(deployment.ngrok_config_path),
+                            str(deployment.ngrok_state_path)], euid=euid))
+        if purge_env:
+            runner(_privileged(["rm", "-f", str(deployment.ngrok_environment_path)], euid=euid))
     runner(_privileged(["systemctl", "stop", deployment.unit_name], euid=euid), check=False)
     runner(_privileged(["systemctl", "disable", deployment.unit_name], euid=euid), check=False)
     runner(_privileged(["rm", "-f", str(deployment.unit_path)], euid=euid))
@@ -446,6 +732,39 @@ def service_status(
     }
 
 
+def ingress_status(deployment: Deployment, runner: CommandRunner = run_command) -> dict[str, str]:
+    if not deployment.with_ngrok:
+        return {}
+    def state(command: list[str]) -> str:
+        result = runner(command, check=False)
+        return result.stdout.strip() or "unknown"
+    return {
+        "service": deployment.ngrok_unit_name,
+        "unit": str(deployment.ngrok_unit_path),
+        "installed": "yes" if deployment.ngrok_unit_path.is_file() else "no",
+        "enabled": state(["systemctl", "is-enabled", deployment.ngrok_unit_name]),
+        "active": state(["systemctl", "is-active", deployment.ngrok_unit_name]),
+    }
+
+
+def start_inactive_services(
+    deployment: Deployment, *, runner: CommandRunner = run_command,
+    euid: int | None = None,
+) -> None:
+    """Start sibling services in convenience order without coupling them."""
+    runtime_active = runner(
+        ["systemctl", "is-active", deployment.unit_name], check=False,
+    ).returncode == 0
+    if not runtime_active:
+        runner(_privileged(["systemctl", "start", deployment.unit_name], euid=euid))
+    if deployment.with_ngrok:
+        ingress_active = runner(
+            ["systemctl", "is-active", deployment.ngrok_unit_name], check=False,
+        ).returncode == 0
+        if not ingress_active:
+            runner(_privileged(["systemctl", "start", deployment.ngrok_unit_name], euid=euid))
+
+
 def build_wizard_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Embodied Runtime Startup Wizard")
     subparsers = parser.add_subparsers(dest="command")
@@ -457,6 +776,11 @@ def build_wizard_parser() -> argparse.ArgumentParser:
         child.add_argument("--user")
         child.add_argument("--with-sms", action="store_true")
         child.add_argument("--capture-env", action="store_true")
+        child.add_argument("--with-ngrok", action="store_true")
+        child.add_argument("--ngrok", type=Path)
+        child.add_argument("--ngrok-domain")
+        if command == "render":
+            child.add_argument("--component", choices=("runtime", "ngrok", "all"), default="runtime")
         if command == "install":
             child.add_argument("--force", action="store_true")
             child.add_argument("--start", action="store_true")
@@ -473,9 +797,18 @@ def _print_summary(deployment: Deployment, environ: Mapping[str, str]) -> None:
     print(f"\nService\n  {deployment.unit_name}\n\nService user\n  {deployment.user}")
     print("\nRuntime mode\n  run")
     print(f"\nSMS\n  {'enabled for service' if deployment.launch.sms_enabled else 'disabled'}")
+    if deployment.with_ngrok:
+        upstream = local_sms_upstream(deployment.launch.sms_bind_host, deployment.launch.sms_bind_port)
+        print(f"\nngrok ingress\n  enabled\n\nngrok executable\n  {deployment.ngrok}")
+        print(f"\nngrok version\n  {deployment.ngrok_version}")
+        print(f"\nngrok domain\n  {deployment.ngrok_domain}")
+        print(f"\nLocal SMS endpoint\n  {upstream}{deployment.launch.sms_webhook_path}")
+        print(f"\nPublic SMS webhook\n  {deployment.public_webhook_url}")
     print("\nRequired environment")
     for name, present in environment_presence(deployment, environ).items():
-        print(f"  {name:<28} {'set' if present else 'missing'}")
+        state = ("derived" if deployment.with_ngrok and name == "TWILIO_WEBHOOK_URL"
+                 else "set" if present else "missing")
+        print(f"  {name:<28} {state}")
     print(f"\nUnit\n  {deployment.unit_path}")
 
 
@@ -490,7 +823,8 @@ def wizard_main(
         print("Embodied Runtime Startup Wizard\n")
         args = argparse.Namespace(
             command=None, python=None, config=None, service_name=None, user=None,
-            with_sms=False, capture_env=False,
+            with_sms=False, capture_env=False, with_ngrok=False, ngrok=None,
+            ngrok_domain=None,
         )
     try:
         repo = discover_repository(script_path or Path(__file__))
@@ -499,6 +833,8 @@ def wizard_main(
                 repo=repo, python=args.python, config=args.config,
                 service_name=args.service_name, user=args.user,
                 with_sms=args.with_sms, capture_env=args.capture_env,
+                with_ngrok=args.with_ngrok, ngrok=args.ngrok,
+                ngrok_domain=args.ngrok_domain,
                 interactive=interactive, environ=environ,
             )
         except StartupError as error:
@@ -511,14 +847,47 @@ def wizard_main(
                 repo=repo, python=args.python, config=args.config,
                 service_name=args.service_name, user=args.user, with_sms=True,
                 capture_env=args.capture_env, interactive=True, environ=environ,
+                with_ngrok=args.with_ngrok, ngrok=args.ngrok,
+                ngrok_domain=args.ngrok_domain,
             )
         if interactive:
+            if (deployment.launch.sms_enabled and input(
+                    "Configure stable ngrok SMS ingress? [y/N] "
+            ).strip().lower().startswith("y")):
+                discovered = shutil.which("ngrok")
+                prompt = (f"ngrok executable [{discovered}]: " if discovered
+                          else "ngrok executable path: ")
+                entered_path = input(prompt).strip()
+                ngrok_path = Path(entered_path) if entered_path else (
+                    Path(discovered) if discovered else None)
+                if ngrok_path is None:
+                    raise StartupError("ngrok executable path is required")
+                domain = input("Stable ngrok hostname: ").strip()
+                deployment = build_deployment(
+                    repo=repo, python=args.python, config=deployment.config,
+                    service_name=args.service_name, user=args.user,
+                    with_sms=deployment.with_sms, capture_env=False,
+                    with_ngrok=True, ngrok=ngrok_path, ngrok_domain=domain,
+                    interactive=True, environ=environ,
+                )
             _print_summary(deployment, environ)
             if not input("\nInstall service? [y/N] ").strip().lower().startswith("y"):
                 print("No changes made.")
                 return 0
+            if deployment.with_ngrok:
+                capture_prompt = (
+                    "Install separately scoped environment values into\n"
+                    f"  {deployment.environment_path}\n"
+                    f"  {deployment.ngrok_environment_path}\n"
+                    "? [y/N] "
+                )
+            else:
+                capture_prompt = (
+                    "Install required currently-loaded environment values into "
+                    f"{deployment.environment_path}? [y/N] "
+                )
             capture = bool(required_environment(deployment)) and input(
-                f"Install required currently-loaded environment values into {deployment.environment_path}? [y/N] "
+                capture_prompt
             ).strip().lower().startswith("y")
             deployment = Deployment(**{**deployment.__dict__, "capture_env": capture})
             force = deployment.unit_path.exists() and input(
@@ -526,21 +895,36 @@ def wizard_main(
             ).strip().lower().startswith("y")
             result = install(deployment, environ=environ, force=force)
             print(f"Service {result.unit_status} and enabled.")
+            restart_commands = []
             if result.restart_required:
-                print("Service is already active.")
-                print(
-                    "Restart explicitly to apply updated service "
-                    "configuration/environment."
-                )
-                print(f"sudo systemctl restart {deployment.unit_name}")
+                restart_commands.append(f"sudo systemctl restart {deployment.unit_name}")
+            if result.ngrok_restart_required:
+                restart_commands.append(f"sudo systemctl restart {deployment.ngrok_unit_name}")
+            if restart_commands:
+                print("Restart required:")
+                for command in restart_commands:
+                    print(f"  {command}")
                 return 0
-            if input(f"Start {deployment.profile.name} now? [y/N] ").strip().lower().startswith("y"):
-                run_command(_privileged(["systemctl", "start", deployment.unit_name]))
+            if input(f"Start {deployment.profile.name} services now? [y/N] ").strip().lower().startswith("y"):
+                start_inactive_services(deployment)
             else:
                 print(f"Start later with: sudo systemctl start {deployment.unit_name}")
+                if deployment.with_ngrok:
+                    print(f"Start later with: sudo systemctl start {deployment.ngrok_unit_name}")
             return 0
         if args.command == "render":
-            print(render_unit(deployment), end="")
+            component = args.component
+            if component in ("runtime", "all"):
+                if component == "all":
+                    print(f"--- {deployment.unit_path} ---")
+                print(render_unit(deployment), end="")
+            if component in ("ngrok", "all"):
+                if not deployment.with_ngrok:
+                    raise StartupError("ngrok rendering requires --with-ngrok")
+                print(f"--- {deployment.ngrok_unit_path} ---")
+                print(render_ngrok_unit(deployment), end="")
+                print(f"--- {deployment.ngrok_config_path} ---")
+                print(render_ngrok_config(deployment), end="")
         elif args.command == "check":
             _print_summary(deployment, environ)
             print("\nHost capabilities")
@@ -565,13 +949,26 @@ def wizard_main(
                     "The service is active; restart explicitly to apply updated "
                     "service configuration/environment."
                 )
+                print(f"sudo systemctl restart {deployment.unit_name}")
+            if result.ngrok_restart_required:
+                print("The ngrok service is active; restart it explicitly to apply updates.")
+                print(f"sudo systemctl restart {deployment.ngrok_unit_name}")
         elif args.command == "status":
+            print("runtime")
             for name, value in service_status(deployment).items():
-                print(f"{name}: {value}")
+                print(f"  {name}: {value}")
+            if deployment.with_ngrok:
+                print("\ningress")
+                for name, value in ingress_status(deployment).items():
+                    print(f"  {name}: {value}")
+                print(f"\nconfigured public webhook\n  {deployment.public_webhook_url}")
             print(f"sudo systemctl start {deployment.unit_name}")
             print(f"sudo systemctl restart {deployment.unit_name}")
             print(f"sudo systemctl stop {deployment.unit_name}")
             print(f"journalctl -u {deployment.unit_name} -f")
+            if deployment.with_ngrok:
+                print(f"sudo systemctl restart {deployment.ngrok_unit_name}")
+                print(f"journalctl -u {deployment.ngrok_unit_name} -f")
         elif args.command == "uninstall":
             if not args.yes:
                 raise StartupError("uninstall requires --yes")

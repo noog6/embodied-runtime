@@ -178,9 +178,26 @@ service uninstall preserves it; deletion requires the separate `--purge-env`
 choice. See [Startup Wizard and systemd](startup.md).
 
 The application's stable interface remains environment variables. systemd
-credentials and encrypted-at-rest provisioning remain possible later
-hardening improvements, but Phase 2 deliberately does not add `LoadCredential`
-or provider-specific key-file APIs.
+credentials could provide later hardening without changing that interface.
+
+## ngrok ingress credential separation
+
+An SMS deployment using Startup Wizard ngrok ingress requires
+`NGROK_AUTHTOKEN`. Load it into the shell before an explicit `--capture-env`
+install. The wizard reports only whether it is set and writes only that variable
+to `/etc/embodied-runtime/<name>-ngrok.env` at mode 0600. The ngrok unit does
+not receive OpenAI, ElevenLabs, or Twilio credentials, and the runtime unit does
+not receive the ngrok token. The generated v3 YAML contains the environment
+reference `$NGROK_AUTHTOKEN`, never the token value.
+
+The public `TWILIO_WEBHOOK_URL` is derived from the validated stable domain and
+effective SMS webhook path when managed ngrok ingress is captured. Other Twilio
+values remain operator supplied. Reused runtime and ngrok environment files
+must each be regular, non-symlink files protected from group/world read and
+write. Uninstall preserves both by default; use `--purge-env` only for deliberate
+deletion. systemd credentials and encrypted-at-rest provisioning remain
+possible later hardening improvements; this phase does not add provider-specific
+key-file APIs.
 
 ## Twilio SMS
 
