@@ -112,9 +112,75 @@ The application-facing interface remains environment variables. systemd
 credentials could provide later hardening, but Phase 2 does not add
 `LoadCredential` or provider-specific file APIs.
 
-SMS deployment starts Mira's HTTP/Twilio transport only. Inbound SMS still
-needs an externally available webhook or tunnel. ngrok installation and
-supervision remain Phase 3.
+### Stable ngrok SMS ingress
+
+`--with-ngrok --ngrok-domain <stable-hostname>` adds a sibling, profile-scoped
+service; it never launches ngrok from the runtime. For `mira`, the wizard owns:
+
+```text
+/etc/systemd/system/mira.service
+/etc/systemd/system/mira-ngrok.service
+/etc/embodied-runtime/mira.env
+/etc/embodied-runtime/mira-ngrok.env
+/etc/embodied-runtime/mira-ngrok.yml
+/etc/embodied-runtime/mira-ngrok.state
+```
+
+The operator must install a v3 ngrok agent and reserve a stable development or
+static domain first. The wizard neither installs ngrok nor changes its global
+configuration. It rejects URLs, ports, credentials, paths, queries, and
+fragments in `--ngrok-domain`. `--ngrok PATH` selects an executable explicitly.
+The effective SMS bind address must be local or wildcard; wildcard listeners
+are forwarded through loopback.
+
+With `--capture-env`, `TWILIO_WEBHOOK_URL` is derived as
+`https://<stable-domain><sms.webhook_path>` and written to the runtime's managed
+environment. `NGROK_AUTHTOKEN` alone is written to the separate mode-0600 ngrok
+environment. A first setup or changed endpoint requires capture, preventing a
+stale managed Twilio URL. Render the non-secret artifacts with
+`render --component ngrok` or all units/config with `render --component all`.
+The mode-0644 state file contains only the exact configured public webhook URL.
+It is compared independently from the YAML, so changing only `sms.webhook_path`
+still requires runtime environment capture, while changing only the local
+upstream does not. No provider credential is read to make this decision.
+
+The interactive wizard offers stable ngrok ingress after SMS is enabled, asks
+for the executable and stable hostname, and displays the local and public SMS
+URLs before installation. Its capture confirmation names both separately
+scoped environment files. If explicitly asked to start an inactive deployment,
+it starts Mira and then ngrok.
+
+Both services are enabled independently and have no `Requires=`, `PartOf=`, or
+`BindsTo=` relationship. ngrok uses bounded `Restart=on-failure`; its outage
+does not stop Mira. `install --start` starts Mira first and ngrok second, but an
+ngrok start failure is reported without rolling back Mira. Changed active
+services are never restarted automatically; restart only the service reported
+by the wizard.
+
+During `check`, the wizard runs `ngrok config check --config <temporary-file>`
+when `NGROK_AUTHTOKEN` is loaded. This only parses the generated configuration;
+it does not start a tunnel. When a secure managed token file is being reused
+without a token in the current shell, agent-level validation is skipped with a
+warning rather than reading the protected file.
+
+Credential selection is deterministic. If the protected ngrok environment file
+does not exist, `NGROK_AUTHTOKEN` must be loaded and is installed. If it exists
+and no token is loaded, it is reused—even when runtime capture is required for a
+changed webhook. If a token is loaded with `--capture-env`, explicit capture
+rewrites the ngrok environment and an active ngrok service requires restart.
+The wizard never reads or compares the existing token. `check` applies the same
+public-webhook and credential-source rules as `install` without writing files.
+
+Configure Twilio once in the Console, under **A MESSAGE COMES IN**:
+
+```text
+Webhook
+POST
+https://<stable-ngrok-domain>/<sms-path>
+```
+
+The wizard prints this exact configured URL but does not mutate or probe the
+Twilio account and does not claim that the endpoint is reachable.
 
 ## Operation and logs
 
@@ -127,7 +193,24 @@ sudo systemctl stop mira.service
 systemctl status mira.service
 journalctl -u mira.service
 journalctl -u mira.service -f
+systemctl status mira-ngrok.service
+journalctl -u mira-ngrok.service -f
+sudo systemctl restart mira-ngrok.service
 ```
 
 systemd owns supervisor output in journald. The runtime continues to own its
 per-run records under `data/runs/Rxx/`; no additional daemon log is created.
+
+Uninstalling an ngrok-enabled deployment stops/disables only its profile-scoped
+units and removes the managed unit, YAML, and non-secret state. Both environment files are
+preserved unless `--purge-env` is explicit. It never removes the ngrok binary,
+domain/account, unrelated `ngrok.service`, global configuration, or Twilio
+resources.
+
+## Raspberry Pi acceptance plan
+
+On the target Pi: install and confirm both units enabled; start both; confirm
+Mira reports SMS ready and ngrok is active; send one inbound SMS and confirm
+exactly one response. Stop ngrok and confirm Mira stays active, restart ngrok
+and retest SMS, then reboot and confirm both return. Finally stop Mira and
+confirm its graceful SIGTERM shutdown remains intact.
