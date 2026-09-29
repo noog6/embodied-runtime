@@ -159,7 +159,14 @@ by the wizard.
 
 During `check`, the wizard runs `ngrok config check --config <temporary-file>`
 when `NGROK_AUTHTOKEN` is loaded. This only parses the generated configuration;
-it does not start a tunnel. When a secure managed token file is being reused
+it does not start a tunnel. The temporary YAML contains only the endpoint,
+domain, and upstream configuration; authentication remains independently
+available to ngrok through the current process environment. The installed
+`mira-ngrok.service` similarly loads `NGROK_AUTHTOKEN` exclusively from
+`EnvironmentFile=/etc/embodied-runtime/mira-ngrok.env`, while
+`mira-ngrok.yml` contains no authentication material. This environment-only
+authentication contract was verified with ngrok v3.39.11 on the target
+Raspberry Pi. When a secure managed token file is being reused
 without a token in the current shell, agent-level validation is skipped with a
 warning rather than reading the protected file.
 

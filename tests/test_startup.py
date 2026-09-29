@@ -136,8 +136,13 @@ webhook_path = "{webhook_path}"
         deployment = self.ngrok_deployment(capture_env=True)
         config = render_ngrok_config(deployment)
         unit = render_ngrok_unit(deployment)
+        ingress = serialize_ngrok_environment(
+            deployment, {"NGROK_AUTHTOKEN": "actual-token"},
+        ).decode()
         self.assertIn("version: 3", config)
-        self.assertIn("authtoken: $NGROK_AUTHTOKEN", config)
+        self.assertNotIn("authtoken:", config)
+        self.assertNotIn("$NGROK_AUTHTOKEN", config)
+        self.assertNotIn("actual-token", config)
         self.assertIn('url: "https://mira-example.ngrok-free.app"', config)
         self.assertIn('url: "http://127.0.0.1:8080"', config)
         self.assertEqual(deployment.public_webhook_url,
@@ -151,10 +156,11 @@ webhook_path = "{webhook_path}"
                           "actual-token", "TWILIO_AUTH_TOKEN", "OPENAI_API_KEY"):
             self.assertNotIn(forbidden, config + unit)
         self.assertNotIn("Requires=mira-ngrok.service", render_unit(deployment))
-        self.assertEqual(
-            config.splitlines()[2:4],
-            ["agent:", "  authtoken: $NGROK_AUTHTOKEN"],
+        self.assertEqual(config.splitlines()[2], "endpoints:")
+        self.assertIn(
+            f"EnvironmentFile={deployment.ngrok_environment_path}", unit,
         )
+        self.assertEqual(ingress, 'NGROK_AUTHTOKEN="actual-token"\n')
         self.assertIn(
             f'"start" "{deployment.service_name}-sms" "--config"', unit,
         )
@@ -176,6 +182,7 @@ webhook_path = "{webhook_path}"
         ))
         self.assertEqual(commands[0][1:4], ["config", "check", "--config"])
         self.assertNotIn("opaque", commands[0])
+        self.assertFalse(any("start" in command for command in commands))
         self.assertFalse(temporary_path.exists())
         self.assertIn("skipped", validate_ngrok_config(
             deployment, environ={}, runner=runner,
