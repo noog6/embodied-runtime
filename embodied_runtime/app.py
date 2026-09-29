@@ -3308,11 +3308,12 @@ class RobotApplication:
         self.job_workspaces.close()
 
     async def run(self) -> None:
-        await self.start()
         try:
+            await self.start()
             await self._stop_requested.wait()
         except asyncio.CancelledError:
-            LOGGER.info("[APP] interrupted")
+            if not self._stop_requested.is_set():
+                LOGGER.info("[APP] interrupted")
             raise
         except KeyboardInterrupt:
             LOGGER.info("[APP] interrupted")

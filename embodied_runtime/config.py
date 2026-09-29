@@ -427,9 +427,11 @@ def resolve_launch_configuration(
             configured if configured is not None else historical
         )
 
-    cli_mode = "console" if getattr(cli_values, "console", None) else (
-        "diagnostics" if getattr(cli_values, "diagnostics", None) else None
-    )
+    cli_mode = getattr(cli_values, "mode", None)
+    if cli_mode is None:
+        cli_mode = "console" if getattr(cli_values, "console", None) else (
+            "diagnostics" if getattr(cli_values, "diagnostics", None) else None
+        )
     mode = cli_mode or runtime.mode or HISTORICAL_DEFAULTS.mode
 
     def opt_in(name: str, configured: bool | None, historical: bool) -> bool:

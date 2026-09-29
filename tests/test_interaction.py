@@ -656,7 +656,10 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         for channel, projection in projections.items():
             with self.subTest(channel=channel):
                 self.assertEqual(projection, baseline)
-        self.assertIsNone(resolve_notification_route(InteractionChannel.REMOTE_TEXT))
+        self.assertEqual(
+            resolve_notification_route(InteractionChannel.REMOTE_TEXT),
+            runtime_notification(InteractionChannel.REMOTE_TEXT),
+        )
         self.assertEqual(
             [parameters["properties"]["destination"]["enum"]
              for name, _description, parameters in baseline
@@ -690,7 +693,10 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             names = {tool.name for tool in projected}
             self.assertNotIn("deliver_message", names)
             self.assertNotIn("deliver_report", names)
-        self.assertIsNone(resolve_notification_route(InteractionChannel.REMOTE_TEXT))
+        self.assertEqual(
+            resolve_notification_route(InteractionChannel.REMOTE_TEXT),
+            runtime_notification(InteractionChannel.REMOTE_TEXT),
+        )
         self.assertEqual(with_sms._operator_delivery_routes.destinations, ())
 
     async def test_application_owns_sms_lifecycle_inside_runtime_boundaries(self):
