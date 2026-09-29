@@ -386,7 +386,7 @@ def render_ngrok_config(deployment: Deployment) -> str:
         raise StartupError("ngrok ingress is not configured")
     upstream = local_sms_upstream(deployment.launch.sms_bind_host, deployment.launch.sms_bind_port)
     return (
-        "version: 3\n\nagent:\n  authtoken: $NGROK_AUTHTOKEN\n\nendpoints:\n"
+        "version: 3\n\nendpoints:\n"
         f"  - name: {deployment.service_name}-sms\n"
         f'    url: "https://{deployment.ngrok_domain}"\n'
         "    upstream:\n"
@@ -452,7 +452,11 @@ def validate_ngrok_config(
     deployment: Deployment, *, environ: Mapping[str, str] = os.environ,
     runner: CommandRunner = run_command,
 ) -> str | None:
-    """Ask ngrok v3 to parse its generated config without starting a tunnel."""
+    """Ask ngrok v3 to parse endpoint configuration without starting a tunnel.
+
+    Authentication is supplied independently through the process environment;
+    it is never rendered into the temporary YAML or added to argv.
+    """
     if not environ.get("NGROK_AUTHTOKEN"):
         return "ngrok config validation skipped; NGROK_AUTHTOKEN is not loaded"
     if deployment.ngrok is None:
