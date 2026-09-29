@@ -8,15 +8,17 @@ from dataclasses import dataclass
 import importlib
 import io
 import logging
-import math
 import os
 from pathlib import Path
-import struct
 import subprocess
 import threading
 import time
 from typing import Protocol, TypeVar
 import wave
+
+from embodied_runtime.earcons import (
+    Earcon, EarconPlayer, FusionHatEarconOutput, earcon_wav,
+)
 
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.resources import (
@@ -69,11 +71,10 @@ class ElevenLabsTTSUnavailableError(RuntimeError):
 
 
 class VoiceProvider(Protocol):
-    """Transient speech input and wake acknowledgement for a voice session."""
+    """Transient speech input for a voice session."""
 
     async def listen(self) -> str | None: ...
     async def stop_listening(self) -> None: ...
-    async def play_engagement_cue(self) -> None: ...
     async def close(self) -> None: ...
 
 
@@ -107,6 +108,7 @@ class VoiceInteraction:
         wake_words: list[str] | None = None,
         resources: ResourceArbiter | None = None,
         observability: RunObservability | None = None,
+        earcons: EarconPlayer | None = None,
     ) -> None:
         self._provider = provider
         self._text_to_speech_provider = text_to_speech_provider
@@ -123,6 +125,7 @@ class VoiceInteraction:
         self._microphone_lock = asyncio.Lock()
         self._resources = resources if resources is not None else ResourceArbiter()
         self._observability = observability
+        self._earcons = earcons
         self._stopping = False
         self._session_pending = False
 
@@ -334,15 +337,20 @@ class VoiceInteraction:
         assert self._text_to_speech_provider is not None
         reason = "initial_timeout"
         if source == "wake_word":
-            try:
-                await self._provider.play_engagement_cue()
-            except Exception as error:
-                LOGGER.warning(
-                    "[VOICE] engagement_cue status=failed error=%s",
-                    type(error).__name__,
-                )
+            if self._earcons is not None:
+                await self._earcons.play(Earcon.ENGAGEMENT)
             else:
-                LOGGER.info("[VOICE] engagement_cue status=played")
+                # Compatibility for independently constructed voice sessions;
+                # RobotApplication always supplies the runtime earcon facility.
+                try:
+                    await self._provider.play_engagement_cue()  # type: ignore[attr-defined]
+                except Exception as error:
+                    LOGGER.warning(
+                        "[VOICE] engagement_cue status=failed error=%s",
+                        type(error).__name__,
+                    )
+                else:
+                    LOGGER.info("[VOICE] engagement_cue status=played")
         LOGGER.info("[VOICE] session_started source=%s", source)
         try:
             for turn, timeout in (
@@ -426,7 +434,7 @@ class VoiceInteraction:
 
 
 class FusionHatVoiceProvider:
-    """Lazy adapter over SunFounder's Vosk and local wake acknowledgement."""
+    """Lazy adapter over SunFounder's Vosk speech input."""
 
     def __init__(self, *, language: str = "en-us") -> None:
         self._language = language
@@ -494,23 +502,8 @@ class FusionHatVoiceProvider:
             await _await_owned_blocking_operation(stt.stop_listening)
 
     async def play_engagement_cue(self) -> None:
-        """Play the fixed local wake acknowledgement through the HAT speaker."""
-        await _await_owned_blocking_operation(self._play_engagement_cue_sync)
-
-    def _play_engagement_cue_sync(self) -> None:
-        try:
-            from fusion_hat.device import disable_speaker, enable_speaker
-        except ImportError as error:
-            raise RuntimeError("Fusion HAT speaker control is unavailable") from error
-        enable_speaker()
-        try:
-            subprocess.run(
-                ["aplay", "--quiet"],
-                input=_engagement_cue_wav(),
-                check=True,
-            )
-        finally:
-            disable_speaker()
+        """Compatibility shim; runtime wake handling now uses ``EarconPlayer``."""
+        await FusionHatEarconOutput().play_wav(earcon_wav(Earcon.ENGAGEMENT))
 
     async def close(self) -> None:
         """Release voice-input resources (Vosk has no separate close operation)."""
@@ -773,32 +766,3 @@ def _log_synthesis_completed(synthesis_ms: int, wav_bytes: bytes) -> None:
             synthesis_ms,
             audio_ms,
         )
-
-
-def _engagement_cue_wav() -> bytes:
-    """Return a 220 ms, two-note PCM WAV acknowledgement (880 then 1,175 Hz)."""
-    sample_rate = 16_000
-    amplitude = 7_000
-    note_seconds = 0.1
-    gap_seconds = 0.02
-    ramp_samples = int(sample_rate * 0.01)
-    samples: list[int] = []
-    for index, frequency in enumerate((880.0, 1_175.0)):
-        note_samples = int(sample_rate * note_seconds)
-        for position in range(note_samples):
-            edge = min(position + 1, note_samples - position, ramp_samples)
-            envelope = edge / ramp_samples
-            sample = amplitude * envelope * math.sin(
-                2.0 * math.pi * frequency * position / sample_rate
-            )
-            samples.append(round(sample))
-        if index == 0:
-            samples.extend([0] * int(sample_rate * gap_seconds))
-
-    output = io.BytesIO()
-    with wave.open(output, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(struct.pack(f"<{len(samples)}h", *samples))
-    return output.getvalue()

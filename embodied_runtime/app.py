@@ -52,6 +52,7 @@ from embodied_runtime.events import (
     ThermalWarningCleared,
     ThermalWarningRaised,
 )
+from embodied_runtime.earcons import Earcon, EarconPlayer, SPEAKER_RESOURCE
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, InteractionCadence, InteractionChannel,
@@ -133,7 +134,6 @@ CAMERA_CAPTURE_OWNER = ResourceOwner("runtime", "camera_capture")
 # No current Job-work effect changes a tended power, thermal, or memory condition.
 _TIME_DEPENDENT_STATE_TENDING_EFFECTS: frozenset[str] = frozenset()
 VISUAL_PERCEPTION_OWNER = ResourceOwner("runtime", "visual_perception")
-SPEAKER_RESOURCE = ResourceKey("audio.speaker")
 VOICE_SPEAKER_OWNER = ResourceOwner("runtime", "voice")
 MAX_DIAGNOSTIC_EVENTS = 25
 MAX_DIAGNOSTIC_LOOKBACK_SECONDS = 3600
@@ -147,7 +147,7 @@ _SENSITIVE_EVENT_KEY_PARTS = (
 
 
 class SpeakerAuthorizedVoiceProvider:
-    """Apply speaker authority to a voice provider's engagement cue only."""
+    """Backward-compatible adapter; new wake signaling uses ``EarconPlayer``."""
 
     def __init__(self, provider: VoiceProvider, resources: ResourceArbiter) -> None:
         self._provider = provider
@@ -162,7 +162,7 @@ class SpeakerAuthorizedVoiceProvider:
     async def play_engagement_cue(self) -> None:
         lease = self._resources.acquire(SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER)
         try:
-            await self._provider.play_engagement_cue()
+            await self._provider.play_engagement_cue()  # type: ignore[attr-defined]
         finally:
             self._resources.release(lease)
 
@@ -964,6 +964,7 @@ class RobotApplication:
         observability: RunObservability | None = None,
         interaction_environment: InteractionEnvironment = InteractionEnvironment.WORKSTATION,
         sms_service: object | None = None,
+        earcon_player: EarconPlayer | None = None,
     ) -> None:
         self.profile = profile
         self.observability = observability or RunObservability()
@@ -982,6 +983,9 @@ class RobotApplication:
         self.resources = (
             resource_arbiter if resource_arbiter is not None else ResourceArbiter()
         )
+        self.earcons = earcon_player or EarconPlayer(self.resources, None)
+        self._earcon_tasks: set[asyncio.Task[bool]] = set()
+        self._job_earcons_emitted: set[tuple[int, Earcon]] = set()
         self.body_backend = body_backend
         self.camera_backend = camera_backend
         self._cognition_backend = cognition_backend
@@ -1030,10 +1034,6 @@ class RobotApplication:
         self._persistent_memory_closed = False
         self._job_store_closed = False
         self._job_workspace_store_closed = False
-        authorized_voice_provider = (
-            SpeakerAuthorizedVoiceProvider(voice_provider, self.resources)
-            if voice_provider is not None else None
-        )
         authorized_tts_provider = (
             SpeakerAuthorizedTextToSpeechProvider(
                 text_to_speech_provider, self.resources, self.observability
@@ -1041,7 +1041,7 @@ class RobotApplication:
             if text_to_speech_provider is not None else None
         )
         self.voice = VoiceInteraction(
-            authorized_voice_provider,
+            voice_provider,
             authorized_tts_provider,
             lambda text: self.handle_operator_utterance(
                 text, interaction=VOICE_DIALOGUE
@@ -1050,6 +1050,7 @@ class RobotApplication:
             wake_words=voice_wake_words,
             resources=self.resources,
             observability=self.observability,
+            earcons=self.earcons,
         )
         self._voice_wake_words = tuple(voice_wake_words or ())
         self._active_goal: ActiveGoal | None = None
@@ -1467,6 +1468,7 @@ class RobotApplication:
         self.observability.event("jobs", "job_run", "started",
             identifiers={"job_id": job.id, "job_run_id": running_run.id,
                          "task_id": running_task.id})
+        self._signal_job_earcon_once(running_run.id, Earcon.WORK_STARTED)
         return binding
 
     async def _offer_scheduled_job(self) -> None:
@@ -1644,7 +1646,37 @@ class RobotApplication:
         self.observability.event("jobs", "job_run", status.value,
             identifiers={"job_id": binding.job.id, "job_run_id": run.id,
                          "task_id": task.id})
+        if status is JobRunStatus.COMPLETED:
+            self._signal_job_earcon_once(run.id, Earcon.WORK_COMPLETED)
         return finished
+
+    def _queue_earcon(self, cue: Earcon) -> None:
+        """Schedule best-effort signaling without delaying synchronous authorities."""
+        task = asyncio.create_task(
+            self._play_earcon_safely(cue), name=f"earcon-{cue.value}"
+        )
+        self._earcon_tasks.add(task)
+        task.add_done_callback(self._earcon_tasks.discard)
+
+    async def _play_earcon_safely(self, cue: Earcon) -> bool:
+        try:
+            return await self.earcons.play(cue)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Keep transition correctness independent even for an injected player.
+            LOGGER.warning(
+                "[EARCON] cue=%s status=failed error=%s",
+                cue.value, type(error).__name__,
+            )
+            return False
+
+    def _signal_job_earcon_once(self, run_id: int, cue: Earcon) -> None:
+        key = (run_id, cue)
+        if key in self._job_earcons_emitted:
+            return
+        self._job_earcons_emitted.add(key)
+        self._queue_earcon(cue)
 
     async def work_current_job_once(self) -> JobWorkOutcome:
         """Perform one explicitly requested, finite episode for the current JobRun."""
@@ -1866,6 +1898,8 @@ class RobotApplication:
             outcome.summary, outcome.readiness, eligible_at, event_type,
             event_armed_after_ns,
         )
+        if outcome.readiness is JobContinuationReadiness.WAIT_FOR_OPERATOR:
+            self._signal_job_earcon_once(outcome.run_id, Earcon.NEEDS_OPERATOR)
         self._log_job_continuation_armed(
             outcome.job_id, outcome.run_id, outcome.readiness,
             outcome.delay_seconds, event_type, self.options.jobs_max_auto_steps, source,
@@ -1909,6 +1943,7 @@ class RobotApplication:
             JobContinuationState.AWAITING_OPERATOR, remaining, last_summary,
             JobContinuationReadiness.WAIT_FOR_OPERATOR,
         )
+        self._signal_job_earcon_once(outcome.run_id, Earcon.NEEDS_OPERATOR)
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator "
             "reason=invalid_outcome",
@@ -2202,6 +2237,7 @@ class RobotApplication:
                     "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator reason=work_error",
                     current.job_id, current.run_id,
                 )
+                self._signal_job_earcon_once(current.run_id, Earcon.NEEDS_OPERATOR)
             return
         if outcome.disposition is not JobWorkDisposition.CONTINUE:
             return
@@ -2239,6 +2275,7 @@ class RobotApplication:
                 "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator reason=budget_exhausted",
                 current.job_id, current.run_id,
             )
+            self._signal_job_earcon_once(current.run_id, Earcon.NEEDS_OPERATOR)
         else:
             self._job_continuation = updated
             if outcome.readiness is JobContinuationReadiness.WAIT_FOR_OPERATOR:
@@ -2246,6 +2283,7 @@ class RobotApplication:
                     "[JOBS] job=JOB%s run=RUN%s continuation=awaiting_operator reason=model_readiness",
                     current.job_id, current.run_id,
                 )
+                self._signal_job_earcon_once(current.run_id, Earcon.NEEDS_OPERATOR)
         if outcome.readiness in (
             JobContinuationReadiness.AFTER_DELAY,
             JobContinuationReadiness.WAIT_FOR_OPERATOR,
@@ -3117,6 +3155,7 @@ class RobotApplication:
             self._scheduled_job_controller.start()
             LOGGER.info("[JOBS] scheduler=ready poll_s=%s",
                         self.options.jobs_scheduler_poll_seconds)
+        await self._play_earcon_safely(Earcon.READY)
         LOGGER.info(
             "[PULSE] monitor=platform interval_s=%s heartbeat_s=%s status=ready",
             str(self._platform_monitor.policy.interval_seconds),
@@ -3130,6 +3169,8 @@ class RobotApplication:
         self._set_lifecycle(LifecycleState.STOPPING)
         self._pending_job_triggers.clear()
         LOGGER.info("[APP] stopping")
+        if self._earcon_tasks:
+            await asyncio.gather(*tuple(self._earcon_tasks), return_exceptions=True)
         failure: BaseException | None = None
         if self._sms_service is not None:
             try:

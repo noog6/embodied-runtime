@@ -1,5 +1,34 @@
 # Architecture
 
+## Semantic earcons
+
+> **Earcons communicate operator-relevant semantic state transitions. They are
+> not runtime activity telemetry.**
+
+The runtime owns a bounded `EarconPlayer`, which maps five names to small,
+deterministically generated local tones: `engagement` means a wake word was
+heard and speech may begin; `ready` means application startup reached the
+operational state; `work_started` and `work_completed` bracket one durable
+autonomous JobRun; and `needs_operator` means that JobRun entered the explicit
+`wait_for_operator` state. `wait_for_event`, delayed continuations, and startup
+reconciliation are intentionally silent.
+
+The application lifecycle and Job coordination authorities select these cues;
+they are deterministic harness behavior and are not exposed as cognition tools
+or model-selected actions. Cognition requests, tool calls, acquisitions,
+continuation steps, scheduler polls, heartbeats, and observations are likewise
+intentionally silent. `EarconPlayer` only performs safe named playback: it
+acquires the canonical `audio.speaker` lease without waiting or retrying, holds
+that exact lease through local playback, and releases it in `finally`. A busy
+speaker or playback failure is logged and never changes the underlying semantic
+transition.
+
+Earcons are deliberately lossy, immediate representations of state—not a
+guaranteed notification channel. Playback never waits behind TTS, retries, or
+enters a durable/in-memory backlog. If `audio.speaker` is occupied at the
+transition, that cue is skipped; it is not played stale after the speaker
+becomes free. This keeps fast autonomous work from accumulating delayed chimes.
+
 ## Runtime observability
 
 `RunObservability` is the session-local authority for operational measurements. It

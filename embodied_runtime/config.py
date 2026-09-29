@@ -49,6 +49,11 @@ class VoiceFileConfig:
 
 
 @dataclass(frozen=True)
+class EarconsFileConfig:
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class MemoryFileConfig:
     enabled: bool = False
     database_path: Path | None = None
@@ -90,6 +95,7 @@ class RuntimeFileConfiguration:
     runtime: RuntimeFileConfig = RuntimeFileConfig()
     initiative: InitiativeFileConfig = InitiativeFileConfig()
     voice: VoiceFileConfig = VoiceFileConfig()
+    earcons: EarconsFileConfig = EarconsFileConfig()
     memory: MemoryFileConfig = MemoryFileConfig()
     jobs: JobsFileConfig = JobsFileConfig()
     interaction: InteractionFileConfig = InteractionFileConfig()
@@ -127,6 +133,7 @@ class LaunchConfiguration:
     voice_elevenlabs_tts_speed: float
     voice_initial_timeout_seconds: float
     voice_followup_timeout_seconds: float
+    earcons_enabled: bool
     memory_enabled: bool
     memory_database_path: Path | None
     jobs_enabled: bool
@@ -159,6 +166,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     voice_elevenlabs_tts_speed=1.0,
     voice_initial_timeout_seconds=18.0,
     voice_followup_timeout_seconds=10.0,
+    earcons_enabled=True,
     memory_enabled=False, memory_database_path=None,
     jobs_enabled=False, jobs_database_path=None, jobs_auto_continue=False,
     jobs_heartbeat_seconds=30.0, jobs_max_auto_steps=3,
@@ -182,6 +190,7 @@ _VOICE_KEYS = {
     "openai_tts_voice",
     "elevenlabs_tts_model", "elevenlabs_tts_voice_id", "elevenlabs_tts_speed",
 }
+_EARCONS_KEYS = {"enabled"}
 _MEMORY_KEYS = {"enabled", "database_path"}
 _JOBS_KEYS = {
     "enabled", "database_path", "auto_continue", "heartbeat_seconds",
@@ -215,10 +224,11 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "initiative", "voice", "memory", "jobs", "interaction", "sms", "power"})
+    _reject_unknown(data, {"runtime", "initiative", "voice", "earcons", "memory", "jobs", "interaction", "sms", "power"})
     runtime = _table(data, "runtime")
     initiative = _table(data, "initiative")
     voice = _table(data, "voice")
+    earcons = _table(data, "earcons")
     memory = _table(data, "memory")
     jobs = _table(data, "jobs")
     interaction = _table(data, "interaction")
@@ -227,6 +237,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
+    _reject_unknown(earcons, _EARCONS_KEYS, "earcons")
     _reject_unknown(memory, _MEMORY_KEYS, "memory")
     _reject_unknown(jobs, _JOBS_KEYS, "jobs")
     _reject_unknown(interaction, _INTERACTION_KEYS, "interaction")
@@ -347,6 +358,8 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
             raise ConfigurationError(f"initiative.{key} must be boolean")
     if "enabled" in voice and not isinstance(voice["enabled"], bool):
         raise ConfigurationError("voice.enabled must be boolean")
+    if "enabled" in earcons and not isinstance(earcons["enabled"], bool):
+        raise ConfigurationError("earcons.enabled must be boolean")
     if "wake_word_enabled" in voice and not isinstance(
         voice["wake_word_enabled"], bool
     ):
@@ -395,7 +408,8 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     return RuntimeFileConfiguration(
         RuntimeFileConfig(**runtime), InitiativeFileConfig(**initiative),
-        VoiceFileConfig(**voice), MemoryFileConfig(memory_enabled, database_path),
+        VoiceFileConfig(**voice), EarconsFileConfig(earcons.get("enabled", True)),
+        MemoryFileConfig(memory_enabled, database_path),
         JobsFileConfig(
             jobs_enabled, jobs_database_path, jobs.get("auto_continue", False),
             float(heartbeat_seconds), max_auto_steps,
@@ -415,6 +429,7 @@ def resolve_launch_configuration(
     runtime = file_config.runtime
     initiative = file_config.initiative
     voice = file_config.voice
+    earcons = file_config.earcons
     memory = file_config.memory
     jobs = file_config.jobs
     interaction = file_config.interaction
@@ -485,6 +500,10 @@ def resolve_launch_configuration(
         ),
         voice_initial_timeout_seconds=(voice.initial_timeout_seconds if voice.initial_timeout_seconds is not None else 18.0),
         voice_followup_timeout_seconds=(voice.followup_timeout_seconds if voice.followup_timeout_seconds is not None else 10.0),
+        earcons_enabled=(
+            False if getattr(cli_values, "no_earcons", False) is True
+            else earcons.enabled
+        ),
         memory_enabled=memory.enabled,
         memory_database_path=memory.database_path if memory.enabled else None,
         jobs_enabled=jobs.enabled,
