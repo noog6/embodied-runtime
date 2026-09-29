@@ -687,54 +687,10 @@ def main(
     history_root: Path = DEFAULT_HISTORY_ROOT,
 ) -> int:
     parser, args, _ = parse_launch_arguments(argv)
-    if args.initiative_platform_attention and not args.initiative:
-        parser.error("--initiative-platform-attention requires --initiative")
-    if args.initiative_goal_closure and not args.initiative:
-        parser.error("--initiative-goal-closure requires --initiative")
-    if args.initiative_actions and not args.initiative:
-        parser.error("--initiative-actions requires --initiative")
-    if args.initiative_messages and not args.initiative:
-        parser.error("--initiative-messages requires --initiative")
-    if args.initiative_messages and not (args.console or args.sms_enabled):
-        parser.error(
-            "--initiative-messages requires a configured operator delivery route "
-            "(--console or enabled SMS)"
-        )
-    if args.initiative_continuation and not args.initiative:
-        parser.error("--initiative-continuation requires --initiative")
-    if (args.initiative_continuation and
-            not (args.initiative_actions or args.initiative_messages)):
-        parser.error(
-            "--initiative-continuation requires --initiative-actions or "
-            "--initiative-messages"
-        )
-    if args.initiative and args.cognition == "none":
-        parser.error("--initiative requires a cognition backend")
-    if args.vision != "none" and args.camera == "none":
-        parser.error("--vision requires a camera backend")
-    if args.vision != "none" and args.cognition == "none":
-        parser.error("--vision requires a cognition backend")
-    if args.tts == "piper" and not args.piper_model:
-        parser.error("Piper TTS requires voice.piper_model or --piper-model")
-    if args.tts == "elevenlabs" and not (
-        args.elevenlabs_tts_voice_id and args.elevenlabs_tts_voice_id.strip()
-    ):
-        parser.error(
-            "ElevenLabs TTS requires voice.elevenlabs_tts_voice_id or "
-            "--elevenlabs-tts-voice-id"
-        )
-    if args.fusion_servo_test is not None and not args.diagnostics:
-        parser.error("--fusion-servo-test requires --diagnostics")
-    if args.fusion_servo_test is not None and args.hardware != "fusion-hat":
-        parser.error("--fusion-servo-test requires --hardware fusion-hat")
-    if args.fusion_battery_test and not args.diagnostics:
-        parser.error("--fusion-battery-test requires --diagnostics")
-    if args.fusion_battery_test and args.hardware != "fusion-hat":
-        parser.error("--fusion-battery-test requires --hardware fusion-hat")
-    if args.camera_test is not None and not args.diagnostics:
-        parser.error("--camera-test requires --diagnostics")
-    if args.camera_test is not None and args.camera == "none":
-        parser.error("--camera-test requires a selected camera")
+    try:
+        validate_launch_dependencies(args)
+    except ConfigurationError as error:
+        parser.error(str(error))
     try:
         profile = load_profile(args.profile)
     except ProfileLoadError as error:
@@ -839,3 +795,55 @@ def main(
     LOGGER.info("\n%s", observability.banner(summary))
     LOGGER.info("[PROCESS] main status=returning exit_code=%s", result)
     return result
+
+
+def validate_launch_dependencies(args: argparse.Namespace) -> None:
+    """Validate pure cross-field launch rules without constructing runtime adapters."""
+    if args.initiative_platform_attention and not args.initiative:
+        raise ConfigurationError("--initiative-platform-attention requires --initiative")
+    if args.initiative_goal_closure and not args.initiative:
+        raise ConfigurationError("--initiative-goal-closure requires --initiative")
+    if args.initiative_actions and not args.initiative:
+        raise ConfigurationError("--initiative-actions requires --initiative")
+    if args.initiative_messages and not args.initiative:
+        raise ConfigurationError("--initiative-messages requires --initiative")
+    if args.initiative_messages and not (args.console or args.sms_enabled):
+        raise ConfigurationError(
+            "--initiative-messages requires a configured operator delivery route "
+            "(--console or enabled SMS)"
+        )
+    if args.initiative_continuation and not args.initiative:
+        raise ConfigurationError("--initiative-continuation requires --initiative")
+    if (args.initiative_continuation and
+            not (args.initiative_actions or args.initiative_messages)):
+        raise ConfigurationError(
+            "--initiative-continuation requires --initiative-actions or "
+            "--initiative-messages"
+        )
+    if args.initiative and args.cognition == "none":
+        raise ConfigurationError("--initiative requires a cognition backend")
+    if args.vision != "none" and args.camera == "none":
+        raise ConfigurationError("--vision requires a camera backend")
+    if args.vision != "none" and args.cognition == "none":
+        raise ConfigurationError("--vision requires a cognition backend")
+    if args.tts == "piper" and not args.piper_model:
+        raise ConfigurationError("Piper TTS requires voice.piper_model or --piper-model")
+    if args.tts == "elevenlabs" and not (
+        args.elevenlabs_tts_voice_id and args.elevenlabs_tts_voice_id.strip()
+    ):
+        raise ConfigurationError(
+            "ElevenLabs TTS requires voice.elevenlabs_tts_voice_id or "
+            "--elevenlabs-tts-voice-id"
+        )
+    if args.fusion_servo_test is not None and not args.diagnostics:
+        raise ConfigurationError("--fusion-servo-test requires --diagnostics")
+    if args.fusion_servo_test is not None and args.hardware != "fusion-hat":
+        raise ConfigurationError("--fusion-servo-test requires --hardware fusion-hat")
+    if args.fusion_battery_test and not args.diagnostics:
+        raise ConfigurationError("--fusion-battery-test requires --diagnostics")
+    if args.fusion_battery_test and args.hardware != "fusion-hat":
+        raise ConfigurationError("--fusion-battery-test requires --hardware fusion-hat")
+    if args.camera_test is not None and not args.diagnostics:
+        raise ConfigurationError("--camera-test requires --diagnostics")
+    if args.camera_test is not None and args.camera == "none":
+        raise ConfigurationError("--camera-test requires a selected camera")

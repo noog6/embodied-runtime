@@ -167,19 +167,20 @@ Then launch:
 python main.py --cognition openai-responses --console
 ```
 
-## Future service deployment
+## systemd service delivery
 
-When embodied-runtime eventually runs as a persistent systemd service, prefer
-systemd's credential facilities or another operating-system/service secret
-mechanism over broadly exporting secrets through login-shell configuration.
-systemd credentials can scope delivery to the service, and encrypted-at-rest
-credentials may eventually be appropriate.
+The Startup Wizard can explicitly capture only the provider variables required
+by the effective launch into a protected, service-specific file such as
+`/etc/embodied-runtime/mira.env`. The generated unit references that file with
+`EnvironmentFile=`. Capture is opt-in (`--capture-env`), the file is mode 0600,
+and the wizard never prints or passes secret values on a command line. Routine
+service uninstall preserves it; deletion requires the separate `--purge-env`
+choice. See [Startup Wizard and systemd](startup.md).
 
-This is future guidance, not a service implementation. The application can
-continue treating `OPENAI_API_KEY` as its stable public configuration interface
-unless a concrete requirement later justifies an API-key-file interface. The
-storage and controlled delivery mechanism can improve independently of that
-application-facing interface.
+The application's stable interface remains environment variables. systemd
+credentials and encrypted-at-rest provisioning remain possible later
+hardening improvements, but Phase 2 deliberately does not add `LoadCredential`
+or provider-specific key-file APIs.
 
 ## Twilio SMS
 
