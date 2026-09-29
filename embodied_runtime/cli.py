@@ -15,6 +15,7 @@ from typing import Any, Coroutine
 from embodied_runtime.app import (
     ApplicationOptions, LifecycleState, RobotApplication, RuntimeSummary,
 )
+from embodied_runtime.earcons import EarconPlayer, FusionHatEarconOutput
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import TextCognitionBackend
 from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
@@ -50,6 +51,7 @@ from embodied_runtime.interaction import (
     OperatorDeliveryRouteCatalog,
 )
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
+from embodied_runtime.resources import ResourceArbiter
 from embodied_runtime.reflexes import PresenceCenteringReflex
 from embodied_runtime.platform import PlatformMonitorPolicy, PlatformSnapshot
 from embodied_runtime.power import PowerMonitorPolicy
@@ -135,6 +137,10 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
                         default=configurable_default("none"))
     parser.add_argument("--no-color", action="store_true",
                         help="disable ANSI colour in console and runtime logs")
+    parser.add_argument(
+        "--no-earcons", action="store_true",
+        help="disable semantic earcon chimes without disabling voice or TTS",
+    )
     parser.add_argument(
         "--cognition", choices=("none", "openai-responses"),
         default=configurable_default("none")
@@ -266,6 +272,7 @@ def parse_launch_arguments(
     args.elevenlabs_tts_speed = effective.voice_elevenlabs_tts_speed
     args.voice_initial_timeout_seconds = effective.voice_initial_timeout_seconds
     args.voice_followup_timeout_seconds = effective.voice_followup_timeout_seconds
+    args.earcons_enabled = effective.earcons_enabled
     args.memory_enabled = effective.memory_enabled
     args.memory_database_path = effective.memory_database_path
     args.jobs_enabled = effective.jobs_enabled
@@ -529,6 +536,7 @@ async def _run_application(
         if persistent_memory is not None:
             persistent_memory.close()
         raise
+    resources = ResourceArbiter()
     application = RobotApplication(
         profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
                                               initiative_enabled=args.initiative,
@@ -575,6 +583,12 @@ async def _run_application(
         observability=observability,
         interaction_environment=InteractionEnvironment(args.interaction_environment),
         sms_service=sms_service,
+        resource_arbiter=resources,
+        earcon_player=EarconPlayer(
+            resources,
+            FusionHatEarconOutput()
+            if args.earcons_enabled and args.hardware == "fusion-hat" else None,
+        ),
     )
     if args.diagnostics:
         try:

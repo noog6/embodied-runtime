@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.cli import (
-    build_job_store, build_persistent_memory_store, main, parse_launch_arguments,
+    build_job_store, build_persistent_memory_store, build_text_to_speech_provider,
+    main, parse_launch_arguments,
 )
 from embodied_runtime.jobs import SQLiteJobStore
 from embodied_runtime.memory import SQLiteMemoryStore
@@ -77,6 +78,26 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(parse_launch_arguments([])[2], HISTORICAL_DEFAULTS)
         self.assertEqual(HISTORICAL_DEFAULTS.interaction_environment, "workstation")
         self.assertFalse(HISTORICAL_DEFAULTS.sms_enabled)
+        self.assertTrue(HISTORICAL_DEFAULTS.earcons_enabled)
+
+    def test_earcons_config_and_cli_disable_are_strict_and_independent_of_tts(self):
+        self.assertTrue(self.effective("[earcons]\nenabled=true\n").earcons_enabled)
+        self.assertFalse(self.effective("[earcons]\nenabled=false\n").earcons_enabled)
+        overridden = self.effective(
+            "[runtime]\nhardware='fusion-hat'\n"
+            "[earcons]\nenabled=true\n"
+            "[voice]\nenabled=true\ntts='espeak'\n",
+            ("--no-earcons",),
+        )
+        self.assertFalse(overridden.earcons_enabled)
+        self.assertTrue(overridden.voice_enabled)
+        self.assertEqual(overridden.voice_tts, "espeak")
+        args = parse_launch_arguments([
+            "--hardware", "fusion-hat", "--voice", "--no-earcons",
+        ])[1]
+        self.assertIsNotNone(build_text_to_speech_provider(args))
+        with self.assertRaisesRegex(ConfigurationError, "earcons.enabled"):
+            load_runtime_config(self.write("[earcons]\nenabled='yes'\n"))
 
     def test_sms_configuration_is_strict_and_cli_can_opt_in(self):
         effective = self.effective(

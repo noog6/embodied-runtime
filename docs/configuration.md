@@ -66,6 +66,9 @@ tts = "espeak"
 initial_timeout_seconds = 18
 followup_timeout_seconds = 10
 
+[earcons]
+enabled = true
+
 [memory]
 enabled = true
 database_path = "../data/mira-memory.sqlite3"
@@ -132,6 +135,21 @@ key is environment-provided, not TOML.
 Unknown tables, unknown keys, wrong types, unsupported values, and malformed
 TOML fail before a profile or backend is constructed.
 
+`earcons.enabled` is one global boolean for the five semantic chimes and
+defaults to `true`. A deployment can persistently silence them with:
+
+```toml
+[earcons]
+enabled = false
+```
+
+The explicit `--no-earcons` launch flag overrides either configured value. It
+silences semantic chimes only: wake-word recognition, microphone input, voice
+conversation, and TTS responses remain available. It is intentionally not a
+general audio mute. Earcons are immediate, lossy state signals rather than
+guaranteed notifications: speaker contention skips a cue without queuing,
+retrying, or playing it later.
+
 `jobs.scheduler_poll_seconds` is the positive interval for the lightweight
 daily-schedule timer. It defaults to 30 seconds. It only determines when the
 runtime next checks eligibility; due schedules use same-day catch-up rather
@@ -149,6 +167,7 @@ The file may be partial. Omitted values retain the historical defaults:
 | `runtime.mode` | `"run"` |
 | `runtime.timezone` | `"UTC"` |
 | every `[initiative]` value | `false` |
+| `earcons.enabled` | `true` |
 | `voice.enabled` | `false` |
 | `voice.wake_word_enabled` | `false` |
 | `voice.wake_words` | `["mira"]` |

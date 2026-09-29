@@ -23,6 +23,9 @@ elevenlabs_tts_speed = 1.1
 initial_timeout_seconds = 18
 followup_timeout_seconds = 12
 
+[earcons]
+enabled = true
+
 [initiative]
 enabled = true
 platform_attention = true
