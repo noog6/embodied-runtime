@@ -11,7 +11,7 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _JOB_RUNS_SCHEMA = """CREATE TABLE job_runs (
        id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
        status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','stopped','interrupted')),
@@ -35,7 +35,7 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS job_triggers (
        job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
        event_type TEXT NOT NULL CHECK(event_type IN ('power_attention_required',
-           'thermal_warning_raised','memory_pressure_raised')),
+           'thermal_warning_raised','memory_pressure_raised','runtime_ready')),
        enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
        PRIMARY KEY(job_id,event_type))""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_job_triggers_enabled_event
@@ -63,17 +63,18 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
-        if version == 5:
+        if version in (5, 6):
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                self._connection.execute("ALTER TABLE job_triggers RENAME TO job_triggers_v5")
+                self._connection.execute("DROP INDEX IF EXISTS idx_job_triggers_enabled_event")
+                self._connection.execute("ALTER TABLE job_triggers RENAME TO job_triggers_previous")
                 self._connection.execute(_SCHEMA[-2])
                 self._connection.execute(
                     """INSERT INTO job_triggers(job_id,event_type,enabled)
-                       SELECT job_id,event_type,enabled FROM job_triggers_v5""")
-                self._connection.execute("DROP TABLE job_triggers_v5")
+                       SELECT job_id,event_type,enabled FROM job_triggers_previous""")
+                self._connection.execute("DROP TABLE job_triggers_previous")
                 self._connection.execute(_SCHEMA[-1])
-                self._connection.execute("PRAGMA user_version = 6")
+                self._connection.execute("PRAGMA user_version = 7")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -84,7 +85,7 @@ class SQLiteJobStore:
             try:
                 self._connection.execute(_SCHEMA[-2])
                 self._connection.execute(_SCHEMA[-1])
-                self._connection.execute("PRAGMA user_version = 6")
+                self._connection.execute("PRAGMA user_version = 7")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -111,7 +112,7 @@ class SQLiteJobStore:
                 self._connection.execute("CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)")
                 self._connection.execute(_SCHEMA[-2])
                 self._connection.execute(_SCHEMA[-1])
-                self._connection.execute("PRAGMA user_version = 6")
+                self._connection.execute("PRAGMA user_version = 7")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()

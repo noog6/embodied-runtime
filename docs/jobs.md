@@ -585,10 +585,20 @@ from all volatile coordination state. See [Job Workspaces](job-workspaces.md).
 
 A `JobTrigger` is durable configuration from a bounded runtime-owned catalog,
 separate from the unchanged daily `JobSchedule`. Supported triggers are
-`power_attention_required`, `thermal_warning_raised`, and
-`memory_pressure_raised`; operators configure one with `job trigger JOB<n>
-<event_type>` and remove it with `job untrigger`. A matching event
-starts the ordinary JobRun → Task → attention lifecycle only for an enabled Job.
+`power_attention_required`, `thermal_warning_raised`,
+`memory_pressure_raised`, and the lifecycle occurrence `runtime_ready`;
+operators configure one with `job trigger JOB<n> <event_type>` and remove it
+with `job untrigger`. A matching event starts the ordinary JobRun → Task →
+attention lifecycle only for an enabled Job.
+
+For example, `job trigger JOB13 runtime_ready` durably binds that Job to the
+readiness of a future runtime instance. `runtime_ready` occurs once after a
+successful application startup has completed its configured service attempts
+and normal controllers are usable. It describes the current composed runtime
+and embodiment, not an OS boot, recurring schedule, or state-tending condition.
+It uses the same trigger admission, attention arbitration, bounded work, and
+result persistence as every other Job occurrence. A process restart creates a
+new runtime instance and therefore may legitimately create another occurrence.
 
 For this phase, each activation event type has at most one enabled trigger binding;
 creating or enabling a second binding fails closed until explicit multi-Job
@@ -597,7 +607,9 @@ another Job cannot claim the event type until that enabled binding is disabled o
 removed.
 Multiple trigger types may point to the same durable responsibility. Only one active
 occurrence of that Job is admitted regardless of which configured trigger fires.
-Further matching events coalesce rather than forming a queue. If coordination is
+Further matching events coalesce rather than forming a queue. Runtime readiness
+also has an application-lifetime observation guard, so accidental duplicate
+delivery cannot create another startup occurrence. If coordination is
 busy, the application retains one volatile pending bit for that exact trigger and
 retries it at the next lightweight Job activation opportunity. It is discarded on
 shutdown, trigger removal, or authority disablement, and never stores event history

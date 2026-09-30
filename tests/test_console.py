@@ -16,7 +16,7 @@ from embodied_runtime.cognition import CognitionError
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.jobs import (
-    FilesystemJobWorkspaceStore, JobRunStatus, SQLiteJobStore,
+    FilesystemJobWorkspaceStore, JobRunStatus, JobTriggerType, SQLiteJobStore,
 )
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.profile import RobotProfile
@@ -179,6 +179,25 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("job:           JOB1", artifact)
             self.assertIn("content_version:", artifact)
             self.assertTrue(artifact.endswith("ello 😀"))
+            await app.stop()
+
+    async def test_job_runtime_ready_trigger_command_and_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3")
+            app = RobotApplication(
+                RobotProfile("jobs", "Jobs Robot"), VirtualHardwareBackend(),
+                platform_provider=CountingProvider([self.first, self.first]), job_store=store,
+            )
+            await app.start()
+            job = store.create_job("Inspect capabilities")
+            console = RuntimeConsole(app)
+            self.assertEqual(
+                console.execute(f"job trigger JOB{job.id} runtime_ready")[0],
+                f"Configured JOB{job.id} trigger runtime_ready.",
+            )
+            self.assertIn("runtime_ready: enabled=true",
+                          console.execute(f"job trigger JOB{job.id}")[0])
+            self.assertIsNotNone(store.get_trigger(job.id, JobTriggerType.RUNTIME_READY))
             await app.stop()
 
     async def test_job_description_update_preserves_owned_state_and_guards_current_run(self):

@@ -95,6 +95,19 @@ A runtime session is one invocation of `embodied-runtime`. Its application
 lifecycle owns and coordinates runtime machinery such as the event bus, hardware
 adapters, attention, cognition infrastructure, and platform monitoring.
 
+`ApplicationStarted` remains the established lifecycle announcement after the
+operational platform/power handoff. A distinct runtime-ready activation point
+runs later, after platform and power monitors, voice wake listening, Job
+continuation/scheduling, and the ready cue have all had their configured startup
+attempts. Earlier startup already resolves hardware, body, camera, cognition,
+attention, interaction transports, and durable stores. This later boundary is
+therefore the narrow authority for the durable `runtime_ready` Job trigger.
+An application-local guard observes it at most once; activation still passes
+through ordinary Job trigger and attention authority rather than invoking
+cognition from lifecycle code. It is runtime-instance readiness—not OS boot,
+a schedule, or a persistent state condition—so a process restart creates a new
+valid occurrence opportunity.
+
 A `Task` is instead one bounded semantic unit of meaningful work. Its immutable
 lifecycle snapshots move explicitly through `pending`, `running`, `paused`, and a
 terminal result. That lifecycle is independent of the application lifecycle: a
