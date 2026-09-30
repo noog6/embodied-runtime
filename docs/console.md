@@ -74,6 +74,9 @@ The supported commands are exactly:
   responsibility description for future occurrences; it preserves the Job's
   identity, history, schedule, and Workspace, and is rejected while that same
   Job is currently executing;
+- `job trigger JOB<n> runtime_ready` to durably activate an enabled Job once
+  when each future runtime instance becomes ready; `job trigger JOB<n>` reports
+  configured triggers and `job untrigger JOB<n> runtime_ready` removes it;
 - `memory clear` to synchronously forget all retained session turns without
   changing runtime state or configured backends;
 - `memory persistent`, `memory entity add`, `memory entity find`, `memory alias

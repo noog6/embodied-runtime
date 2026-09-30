@@ -22,6 +22,16 @@ class JobTriggerStoreTests(unittest.TestCase):
             self.assertEqual(reopened.list_triggers(), (trigger,))
             reopened.close()
 
+    def test_runtime_ready_trigger_round_trips_in_new_database(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3")
+            job = store.create_job("Inspect capabilities")
+            trigger = store.set_trigger(job.id, JobTriggerType.RUNTIME_READY)
+            self.assertEqual(store.get_trigger(job.id, JobTriggerType.RUNTIME_READY), trigger)
+            self.assertEqual(store._connection.execute(
+                "PRAGMA user_version").fetchone()[0], 7)
+            store.close()
+
     def test_unsupported_trigger_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3")
@@ -88,7 +98,7 @@ class JobTriggerStoreTests(unittest.TestCase):
             self.assertEqual(store.get_job(1).description, "preserved")
             self.assertEqual(store.get_schedule(1).local_time, "02:00")
             self.assertEqual(store._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 6)
+                "PRAGMA user_version").fetchone()[0], 7)
             store.close()
             reopened = SQLiteJobStore(path)
             self.assertEqual(reopened.list_triggers(), ())
@@ -132,7 +142,7 @@ class JobTriggerStoreTests(unittest.TestCase):
             self.assertTrue(expected.enabled)
             self.assertEqual(expected.job_id, 12)
             self.assertEqual(store._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 6)
+                "PRAGMA user_version").fetchone()[0], 7)
             other = store.create_job("Other")
             with self.assertRaises(ValueError):
                 store.set_trigger(other.id, JobTriggerType.POWER_ATTENTION_REQUIRED)
@@ -144,3 +154,34 @@ class JobTriggerStoreTests(unittest.TestCase):
                 12, JobTriggerType.POWER_ATTENTION_REQUIRED), expected)
             self.assertEqual(len(reopened.list_triggers()), 3)
             reopened.close()
+
+    def test_v6_migration_preserves_existing_trigger_and_accepts_runtime_ready(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "jobs.sqlite3"
+            seed = SQLiteJobStore(path)
+            job = seed.create_job("Runtime health")
+            existing = seed.set_trigger(job.id, JobTriggerType.THERMAL_WARNING_RAISED)
+            seed._connection.execute("PRAGMA user_version=6")
+            # Recreate the former v6 constraint, because the current seed schema is v7.
+            seed._connection.execute("DROP INDEX idx_job_triggers_enabled_event")
+            seed._connection.execute("ALTER TABLE job_triggers RENAME TO triggers_v7")
+            seed._connection.execute("""CREATE TABLE job_triggers (
+                job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+                event_type TEXT NOT NULL CHECK(event_type IN ('power_attention_required',
+                    'thermal_warning_raised','memory_pressure_raised')),
+                enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+                PRIMARY KEY(job_id,event_type))""")
+            seed._connection.execute("INSERT INTO job_triggers SELECT * FROM triggers_v7")
+            seed._connection.execute("DROP TABLE triggers_v7")
+            seed._connection.execute("""CREATE UNIQUE INDEX idx_job_triggers_enabled_event
+                ON job_triggers(event_type) WHERE enabled=1""")
+            seed.close()
+
+            migrated = SQLiteJobStore(path)
+            self.assertEqual(migrated.list_triggers(), (existing,))
+            second = migrated.create_job("Capabilities")
+            migrated.set_trigger(second.id, JobTriggerType.RUNTIME_READY)
+            self.assertEqual(migrated._connection.execute(
+                "PRAGMA user_version").fetchone()[0], 7)
+            self.assertEqual(len(migrated.list_triggers()), 2)
+            migrated.close()

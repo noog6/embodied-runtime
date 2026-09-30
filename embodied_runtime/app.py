@@ -995,6 +995,9 @@ class RobotApplication:
         self._parked_job_run: _ParkedJobRun | None = None
         # One lossy, volatile activation bit per bounded trigger type; not an event queue.
         self._pending_job_triggers: set[JobTriggerType] = set()
+        # Runtime lifecycle occurrence guard. It is deliberately volatile so a
+        # new process/application instance gets a new readiness opportunity.
+        self._runtime_ready_observed = False
         # One application-lifetime listener; readiness changes never add workers.
         self._job_event_subscriptions = (
             (self.events.subscribe(PresenceChanged, self._on_job_presence_changed),
@@ -1200,6 +1203,17 @@ class RobotApplication:
             JobReadinessEventType.PRESENCE_CHANGED, event.timestamp_ns,
             JobWakeEvent(JobReadinessEventType.PRESENCE_CHANGED, present=event.present))
 
+    async def _signal_runtime_ready(self) -> None:
+        """Offer one lifecycle occurrence through ordinary Job authority."""
+        if self._runtime_ready_observed:
+            return
+        self._runtime_ready_observed = True
+        if self.jobs is None:
+            return
+        LOGGER.info("[JOBS] trigger=%s status=observed",
+                    JobTriggerType.RUNTIME_READY.value)
+        await self._activate_triggered_jobs(JobTriggerType.RUNTIME_READY)
+
     async def _on_power_recovered(self, event: PowerRecovered) -> None:
         trigger_type = JobTriggerType.POWER_ATTENTION_REQUIRED
         if trigger_type in self._pending_job_triggers:
@@ -1376,7 +1390,7 @@ class RobotApplication:
         return True
 
     async def _offer_job_activations(self) -> None:
-        """Retry volatile state-tending activations before ordinary daily schedules."""
+        """Retry volatile trigger activations before ordinary daily schedules."""
         for trigger_type in tuple(self._pending_job_triggers):
             if await self._activate_triggered_jobs(trigger_type):
                 return
@@ -3162,6 +3176,9 @@ class RobotApplication:
             "off" if self._platform_monitor.policy.heartbeat_interval_seconds is None
             else str(self._platform_monitor.policy.heartbeat_interval_seconds),
         )
+        # This is intentionally later than ApplicationStarted: all configured
+        # service startup attempts and normal runtime controllers are now ready.
+        await self._signal_runtime_ready()
 
     async def stop(self) -> None:
         if self.state is LifecycleState.STOPPED:
