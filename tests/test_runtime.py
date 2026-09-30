@@ -18,9 +18,11 @@ from embodied_runtime.hardware.fusion_hat import (
     FusionHatHardwareBackend,
     FusionHatUnavailableError,
 )
+from embodied_runtime.hardware.host import HostHardwareBackend
 from embodied_runtime.events import ApplicationStarted, Event, EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.sensing.camera.picamera2 import Picamera2DeviceUnavailableError
 from tests.test_platform import snapshot
 
 
@@ -418,6 +420,112 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
             [("sms", "remote_text")],
         )
 
+    async def test_body_and_fusion_audio_composition_follow_resolved_backend(self):
+        profile = RobotProfile("mira", "Mira")
+        cases = (
+            ("host", HostHardwareBackend, False, False),
+            ("virtual", VirtualHardwareBackend, True, False),
+            ("fusion-hat", FusionHatHardwareBackend, False, True),
+        )
+        for selection, backend_type, has_body, has_fusion_audio in cases:
+            with self.subTest(selection=selection):
+                _, args, _ = parse_launch_arguments([
+                    "--mode", "run", "--hardware", selection, "--voice",
+                ])
+                application = mock.Mock()
+                application.run = AsyncMock(return_value=None)
+                with patch(
+                    "embodied_runtime.cli.RobotApplication", return_value=application,
+                ) as constructor:
+                    self.assertEqual(await _run_application(args, profile), 0)
+                positional = constructor.call_args.args
+                composed = constructor.call_args.kwargs
+                self.assertIsInstance(positional[1], backend_type)
+                self.assertEqual(composed["body_backend"] is not None, has_body)
+                self.assertEqual(composed["voice_provider"] is not None, has_fusion_audio)
+                self.assertEqual(
+                    composed["text_to_speech_provider"] is not None,
+                    has_fusion_audio,
+                )
+                self.assertEqual(
+                    composed["earcon_player"]._output is not None,
+                    has_fusion_audio,
+                )
+
+    async def test_checked_in_mira_config_composes_on_bare_host_without_camera(self):
+        _, args, _ = parse_launch_arguments([
+            "--config", "config/mira-agentic.toml", "--mode", "run",
+        ])
+        application = mock.Mock()
+        application.run = AsyncMock(return_value=None)
+        with (
+            patch(
+                "embodied_runtime.hardware.fusion_hat.FusionHatSysfs.is_ready",
+                new_callable=mock.PropertyMock,
+                return_value=False,
+            ),
+            patch(
+                "embodied_runtime.cli.Picamera2CameraBackend.start",
+                side_effect=Picamera2DeviceUnavailableError("no camera"),
+            ),
+            patch("embodied_runtime.cli.build_persistent_memory_store", return_value=None),
+            patch("embodied_runtime.cli.build_job_store", return_value=None),
+            patch("embodied_runtime.cli.build_job_workspace_store", return_value=None),
+            patch("embodied_runtime.cli.RobotApplication", return_value=application) as constructor,
+        ):
+            self.assertEqual(await _run_application(args, RobotProfile("mira", "Mira")), 0)
+
+        hardware = constructor.call_args.args[1]
+        composed = constructor.call_args.kwargs
+        self.assertIsInstance(hardware, HostHardwareBackend)
+        self.assertIsNone(composed["camera_backend"])
+        self.assertIsNone(composed["body_backend"])
+        self.assertIsNone(composed["voice_provider"])
+        self.assertIsNone(composed["text_to_speech_provider"])
+        self.assertIsNone(composed["earcon_player"]._output)
+        self.assertIsNotNone(composed["cognition_backend"])
+        self.assertTrue(constructor.call_args.args[2].jobs_auto_continue)
+
+    async def test_fusion_and_available_auto_camera_compose_together(self):
+        _, args, _ = parse_launch_arguments([
+            "--mode", "run", "--hardware", "fusion-hat", "--camera", "auto",
+        ])
+        camera = mock.Mock()
+        camera.identifier = "picamera2"
+        camera.is_physical = True
+        camera.is_running = False
+        application = mock.Mock()
+        application.run = AsyncMock(return_value=None)
+        with patch(
+            "embodied_runtime.cli.Picamera2CameraBackend", return_value=camera,
+        ), patch(
+            "embodied_runtime.cli.RobotApplication", return_value=application,
+        ) as constructor:
+            self.assertEqual(await _run_application(args, RobotProfile("mira", "Mira")), 0)
+        self.assertIsInstance(
+            constructor.call_args.args[1], FusionHatHardwareBackend,
+        )
+        self.assertIs(constructor.call_args.kwargs["camera_backend"], camera)
+        camera.start.assert_called_once_with()
+        camera.stop.assert_not_called()
+
+    async def test_auto_camera_is_stopped_if_later_composition_fails(self):
+        _, args, _ = parse_launch_arguments([
+            "--mode", "run", "--camera", "auto",
+        ])
+        camera = mock.Mock()
+        camera.identifier = "picamera2"
+        with patch(
+            "embodied_runtime.cli.Picamera2CameraBackend", return_value=camera,
+        ), patch(
+            "embodied_runtime.cli.build_cognition_backend",
+            side_effect=RuntimeError("composition failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "composition failed"):
+                await _run_application(args, RobotProfile("mira", "Mira"))
+        camera.start.assert_called_once_with()
+        camera.stop.assert_called_once_with()
+
 
 class CliTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -646,6 +754,37 @@ class CliTests(unittest.TestCase):
     def test_explicit_fusion_hat_builds_physical_backend(self) -> None:
         args = build_parser().parse_args(["--hardware", "fusion-hat"])
         self.assertIsInstance(build_hardware_backend(args), FusionHatHardwareBackend)
+
+    def test_explicit_host_and_virtual_force_requested_backend(self) -> None:
+        self.assertIsInstance(
+            build_hardware_backend(build_parser().parse_args(["--hardware", "host"])),
+            HostHardwareBackend,
+        )
+        self.assertIsInstance(
+            build_hardware_backend(build_parser().parse_args(["--hardware", "virtual"])),
+            VirtualHardwareBackend,
+        )
+
+    def test_auto_resolves_fusion_when_driver_is_ready(self) -> None:
+        args = build_parser().parse_args(["--hardware", "auto"])
+        with patch(
+            "embodied_runtime.hardware.fusion_hat.FusionHatSysfs.is_ready",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ):
+            self.assertIsInstance(build_hardware_backend(args), FusionHatHardwareBackend)
+
+    def test_auto_falls_back_to_physical_host_without_driver(self) -> None:
+        args = build_parser().parse_args(["--hardware", "auto"])
+        with patch(
+            "embodied_runtime.hardware.fusion_hat.FusionHatSysfs.is_ready",
+            new_callable=mock.PropertyMock,
+            return_value=False,
+        ):
+            backend = build_hardware_backend(args)
+        self.assertIsInstance(backend, HostHardwareBackend)
+        backend.start()
+        self.assertTrue(backend.is_running)
 
     def test_servo_test_requires_diagnostics_and_physical_hardware(self) -> None:
         for argv in (["--fusion-servo-test", "P0"],

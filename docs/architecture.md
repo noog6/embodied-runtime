@@ -53,14 +53,25 @@ owns validation, capability projection, and autonomous request bounds. See
 
 The runtime should keep these concerns distinct:
 
-- **Platform and hardware:** host computer/operating-system observations are
-  distinct from robot hardware adapters and their device capabilities.
+- **Profile:** `RobotProfile` supplies identity, personality, and runtime-facing
+  configuration. Mira remains the same `mira` profile across embodiments and
+  does not perform hardware discovery.
+- **Platform and hardware:** the host is the physical computer running the
+  runtime. Host computer/operating-system observations are distinct from the
+  selected `HardwareBackend` and the specialized device capabilities that
+  backend actually advertises.
 - **Embodiment:** a `BodyBackend` accepts semantic body capabilities. It is
   separate from the low-level `HardwareBackend`; a future physical body may
-  use a hardware backend underneath it.
+  use a hardware backend underneath it. No body backend is composed for a
+  physical host merely to simulate capabilities it does not have.
 - **Sensing and perception:** sensor inputs and their interpretation.
 - **Behaviour:** actions, coordination, and task-level control.
 - **Cognition:** decision-making, memory, and higher-level reasoning.
+
+This supports one profile along a deployment ladder: virtual runtime →
+physical host-only Mira → Fusion HAT Mira → richer future embodiments.
+Capabilities describe what the particular running instance can actually do;
+the ladder is not represented by separate robot profiles.
 
 ### Job-owned Workspace authority
 

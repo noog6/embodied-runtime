@@ -7,10 +7,11 @@ from embodied_runtime.hardware.fusion_hat import (
     FusionHatUnavailableError,
 )
 from embodied_runtime.hardware.base import HardwareBackend
+from embodied_runtime.hardware.host import HostHardwareBackend
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 
 __all__ = [
     "FusionHatHardwareBackend", "FusionHatPwmChannel", "FusionHatSysfs",
     "FusionHatUnavailableError",
-    "HardwareBackend", "VirtualHardwareBackend",
+    "HardwareBackend", "HostHardwareBackend", "VirtualHardwareBackend",
 ]

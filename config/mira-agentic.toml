@@ -1,7 +1,7 @@
 [runtime]
 profile = "mira"
-hardware = "fusion-hat"
-camera = "picamera2"
+hardware = "auto"
+camera = "auto"
 cognition = "openai-responses"
 vision = "openai-responses"
 mode = "console"
