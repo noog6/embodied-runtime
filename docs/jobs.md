@@ -195,9 +195,12 @@ and bounded TaskGoal are supplied as explicit authoritative cognition context.
 No synthetic operator utterance or WorkingMemory conversation turn is created.
 The full Job description remains separate from the short TaskGoal.
 
-The episode uses the shared attention single-flight coordinator and the existing
-bounded initiative machinery, including its acquisition, effect, continuation,
-resource, and Task-owned camera authority. Job work cannot use generic
+The episode occupies the single autonomous semantic-execution lane and uses the
+existing bounded initiative machinery, including its acquisition, effect,
+continuation, resource, and Task-owned camera authority. One already-running Job
+episode may coexist with one operator episode; operator activity does not preempt
+the Job merely because it arrives. `ResourceArbiter` remains authoritative for
+genuinely exclusive physical resources. Job work cannot use generic
 `complete_goal`; its final decision instead passes through a separate
 `report_job_outcome` tool and an exact Job/JobRun/Task/ActiveGoal binding check.
 Only an accepted `completed` or `failed` report delegates to the authoritative
@@ -226,17 +229,24 @@ JobRun/Task. A manual `continue` arms a volatile grant of `max_auto_steps`.
 Each accepted heartbeat consumes one step and schedules one separately owned,
 finite invocation of the same Job executor. A further `continue` yields fully
 before the next heartbeat; there is no cognition-owned or recursive loop.
-The automatic step is accepted, and its budget charged, only after the shared
-attention coordinator grants the Job episode. Losing that claim to an operator
-or another episode is a deferral and leaves the grant unchanged.
+The automatic step is accepted, and its budget charged, only after the attention
+coordinator grants the autonomous lane to the Job episode. Operator activity or
+an operator waiter prevents admission of new autonomous Job work and leaves the
+grant unchanged. An autonomous Job episode that has already started is not
+preempted when an operator arrives.
 
 The volatile record binds Job ID, JobRun ID, and Task UUID, and records
 `armed` or `awaiting_operator`, the remaining step count, and last summary. It
 does not bind the ActiveGoal, so a paused Task retains the grant and a resumed
 Task can proceed using its fresh, exact Task-owned ActiveGoal. Paused Tasks,
-operator waiters, and another active attention episode defer without consuming
-a step. Operator attention wins before automatic work starts; an already-started
-finite episode is not preempted.
+operator activity or waiters, and another active autonomous episode defer without
+consuming a step. Operator attention wins before automatic work starts; an
+already-started finite Job episode may continue beside it.
+
+Jobs themselves remain single-flight in Phase 1. The current JobRun, Task,
+TaskGoal, Job-bound ActiveGoal, continuation, Workspace binding, and
+`_active_job_work_task` remain singular. Per-JobRun execution contexts and
+Job-vs-Job concurrency are deferred to a later phase.
 
 Budget exhaustion leaves the Task and JobRun running in `awaiting_operator`;
 an explicit `job work` can grant a fresh burst. An automatic provider failure
@@ -303,7 +313,7 @@ the exact occurrence binding, lifecycle, Task state, authority and budget,
 operator priority, attention, and active-work ownership. A waiting occurrence stays
 durably `RUNNING`, but its exact volatile Job/Run/Task continuation is parked and its
 Task is paused, so it does not own the single execution slot. An unrelated due Job
-may use that slot; cognition remains single-flight. Event satisfaction
+may use that slot; Job cognition remains single-flight. Event satisfaction
 does not itself run cognition or consume budget. The periodic heartbeat remains
 the fallback for reconciliation and retry after temporary contention. The
 projected `present` boolean is a bounded runtime-authored fact; it establishes
@@ -466,9 +476,10 @@ At each lightweight scheduler opportunity the application orders due schedules
 by scheduled instant and Job ID. Schedule-local ineligibility (a disabled
 schedule, missing Job, or disabled Job) is skipped so it cannot starve a later
 eligible schedule. A runtime-wide blocker (current work, unavailable cognition,
-operator waiting, or occupied attention) ends that opportunity. The first
-eligible schedule starts, so at most one occurrence is activated. A time is due at its
-exact minute or any later time on that same local date, so restart at 08:00
+operator activity or waiting, or an occupied autonomous lane) ends that
+opportunity. The first eligible schedule starts, so at most one occurrence is
+activated. A time is due at its exact minute or any later time on that same local
+date, so restart at 08:00
 catches up a missed 02:00 occurrence but never backfills older dates. Disabled
 Jobs and busy Task, goal, Job, operator, attention, or Job-work state defer
 without consuming the date. The store atomically updates
@@ -476,8 +487,8 @@ without consuming the date. The store atomically updates
 repeated checks and ordinary restart therefore cannot create another occurrence
 for that Job/date.
 
-After Task binding, scheduled activation claims the shared attention
-coordinator and starts exactly one invocation of the existing bounded Job work
+After Task binding, scheduled activation claims the autonomous attention lane
+and starts exactly one invocation of the existing bounded Job work
 executor. A `continue` result arms the existing Phase 4 heartbeat grant. There
 is no scheduling-specific cognition loop. Shutdown stops the schedule timer
 before cancelling work and dropping volatile Task coordination. A durable

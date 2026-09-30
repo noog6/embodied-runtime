@@ -19,6 +19,7 @@ from embodied_runtime.cognition import (
     CognitionError,
     CognitionUnavailableError,
     CognitionToolCall,
+    CognitionToolDefinition,
     CognitionToolResult,
     TextCognitionBackend,
     compose_cognition_instructions,
@@ -1087,6 +1088,69 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
         finally:
             if previous is not None:
                 sys.modules["openai"] = previous
+
+
+    async def test_shared_backend_keeps_concurrent_response_chains_independent(self):
+        class ConcurrentResponses:
+            def __init__(self):
+                self.initial_started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.initial_count = 0
+                self.calls = []
+
+            async def create(inner_self, **arguments):
+                inner_self.calls.append(arguments)
+                if "previous_response_id" not in arguments:
+                    inner_self.initial_count += 1
+                    if inner_self.initial_count == 2:
+                        inner_self.initial_started.set()
+                    await inner_self.release.wait()
+                    message = arguments["input"]
+                    call = SimpleNamespace(
+                        type="function_call", name="inspect", arguments="{}",
+                        call_id=f"call-{message}",
+                    )
+                    return SimpleNamespace(
+                        output_text="", output=[call], id=f"response-{message}"
+                    )
+                return SimpleNamespace(
+                    output_text=f"final-{arguments['previous_response_id']}",
+                    output=[], id=f"final-{arguments['previous_response_id']}",
+                )
+
+        responses = ConcurrentResponses()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+
+        async def execute(call):
+            return CognitionToolResult(f'{{"call_id":"{call.arguments}"}}')
+
+        arguments = dict(
+            instructions="initial", tools=(CognitionToolDefinition(
+                "inspect", "inspect", {
+                    "type": "object", "properties": {}, "required": [],
+                    "additionalProperties": False,
+                }),), tool_executor=execute,
+            refreshed_instructions=lambda: "refreshed",
+        )
+        with self.assertLogs("embodied_runtime.cognition.openai_responses", "INFO") as logs:
+            first = asyncio.create_task(backend.respond("one", **arguments))
+            second = asyncio.create_task(backend.respond("two", **arguments))
+            await responses.initial_started.wait()
+            self.assertEqual(responses.initial_count, 2)
+            self.assertNotIn("previous_response_id", responses.calls[0])
+            self.assertNotIn("previous_response_id", responses.calls[1])
+            responses.release.set()
+            results = await asyncio.gather(first, second)
+
+        self.assertCountEqual(results, ["final-response-one", "final-response-two"])
+        continuations = [call for call in responses.calls if "previous_response_id" in call]
+        self.assertCountEqual(
+            [call["previous_response_id"] for call in continuations],
+            ["response-one", "response-two"],
+        )
+        rendered = "\n".join(logs.output)
+        for ordinal in range(1, 5):
+            self.assertIn(f"ordinal={ordinal}", rendered)
 
 
 class CognitionContextTests(unittest.TestCase):

@@ -155,7 +155,7 @@ class PlatformAttentionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(received, list(events))
         self.assertEqual(backend.requests, [])
-        self.assertIsNone(app.attention.coordinator.current)
+        self.assertIsNone(app.attention.coordinator.current_autonomous)
         self.assertIsNone(app.attention.coordinator.last)
         for subscription in subscriptions:
             await subscription.close()

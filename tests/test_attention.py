@@ -146,7 +146,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.attention.status().last_action)
         self.assertIsNone(app.attention.status().last_action_status)
         status = app.attention.status()
-        self.assertIsNone(status.current_episode_id)
+        self.assertIsNone(status.autonomous_episode_id)
         self.assertEqual(status.last_episode_id, 1)
         self.assertEqual(status.last_episode_state, "closed")
         self.assertEqual(status.last_episode_goal_id, goal.id)
@@ -187,19 +187,19 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
                                        source="reflex:first")
         await backend.started.wait()
         status = app.attention.status()
-        self.assertEqual((status.current_episode_id, status.current_episode_state,
-                          status.current_episode_goal_id), (1, "active", goal.id))
+        self.assertEqual((status.autonomous_episode_id, status.autonomous_episode_state,
+                          status.autonomous_episode_goal_id), (1, "active", goal.id))
         await app.set_body_orientation(yaw_degrees=2, pitch_degrees=0,
                                        source="reflex:suppressed")
-        self.assertEqual(app.attention.status().current_episode_id, 1)
+        self.assertEqual(app.attention.status().autonomous_episode_id, 1)
         backend.release.set()
-        while app.attention.status().current_episode_id is not None:
+        while app.attention.status().autonomous_episode_id is not None:
             await asyncio.sleep(0)
         backend.started.clear()
         await app.set_body_orientation(yaw_degrees=3, pitch_degrees=0,
                                        source="reflex:second")
         await backend.started.wait()
-        while app.attention.status().current_episode_id is not None:
+        while app.attention.status().autonomous_episode_id is not None:
             await asyncio.sleep(0)
         self.assertEqual(app.attention.status().last_episode_id, 2)
         await app.stop()
@@ -217,7 +217,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
         app.clear_goal()
         second = app.set_goal("second")
         backend.release.set()
-        while app.attention.status().current_episode_id is not None:
+        while app.attention.status().autonomous_episode_id is not None:
             await asyncio.sleep(0)
         status = app.attention.status()
         self.assertEqual(status.last_episode_goal_id, first.id)
@@ -249,7 +249,7 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
                                        source="reflex:test")
         while not backend.requests:
             await asyncio.sleep(0)
-        while app.attention.status().current_episode_id is not None:
+        while app.attention.status().autonomous_episode_id is not None:
             await asyncio.sleep(0)
         status = app.attention.status()
         self.assertIsNone(app.active_goal)

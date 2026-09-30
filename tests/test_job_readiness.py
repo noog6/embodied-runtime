@@ -123,7 +123,7 @@ class JobReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.job_continuation)
         self.assertEqual(malformed.automatic_steps_remaining, 3)
         self.assertEqual(len(backend.requests), 2)
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_autonomous)
         await app.stop()
 
     async def test_delay_diagnostic_rounds_up_clamps_and_is_delay_only(self):

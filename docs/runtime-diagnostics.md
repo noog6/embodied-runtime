@@ -8,6 +8,11 @@ The library-level `RobotApplication` default disables diagnostics. Normal Mira C
 composition explicitly enables them; when disabled they are neither projected nor
 directly executable.
 
+The `attention` console status reports separate current **Operator lane** and
+**Autonomous lane** sections, allowing both active episode IDs, sources, concerns,
+and goal bindings to be inspected without choosing a misleading singleton
+"current" episode. The last-completed episode remains a runtime-wide diagnostic.
+
 ## Tools and bounds
 
 * `inspect_runtime_health({})` returns current lifecycle/run identity, elapsed time,

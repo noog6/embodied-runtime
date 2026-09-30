@@ -1306,7 +1306,7 @@ class RobotApplication:
         self._job_continuation = replace(
             continuation, event_satisfied=True, wake_event=wake_event)
         busy = self._current_job_run is not None or self._active_job_work_task is not None \
-            or self.episode_coordinator.current is not None
+            or self.episode_coordinator.any_active
         LOGGER.info("[JOBS] event=%s run=RUN%s action=%s", event_type.value,
                     continuation.run_id, "retained_busy" if busy else "matched")
         self._offer_job_continuation(trigger="event")
@@ -1345,7 +1345,7 @@ class RobotApplication:
         if (self._current_job_run is not None or self._current_task_binding is not None
                 or self._active_goal is not None or self._active_job_work_task is not None
                 or self._cognition_backend is None or self.episode_coordinator.operator_waiting
-                or self.episode_coordinator.current is not None):
+                or self.episode_coordinator.any_active):
             already_pending = trigger_type in self._pending_job_triggers
             self._pending_job_triggers.add(trigger_type)
             LOGGER.info("[JOBS] trigger=%s job=JOB%s action=%s reason=busy",
@@ -1512,7 +1512,7 @@ class RobotApplication:
             global_reason = "cognition_unavailable"
         elif self.episode_coordinator.operator_waiting:
             global_reason = "operator_waiting"
-        elif self.episode_coordinator.current is not None:
+        elif self.episode_coordinator.any_active:
             global_reason = "attention_busy"
         if global_reason is not None:
             if due:
@@ -2159,7 +2159,7 @@ class RobotApplication:
         if self.episode_coordinator.operator_waiting:
             self._log_job_continuation_deferred(continuation, "operator_waiting")
             return
-        if self.episode_coordinator.current is not None:
+        if self.episode_coordinator.any_active:
             self._log_job_continuation_deferred(continuation, "attention_busy")
             return
         if continuation.automatic_steps_remaining <= 0:
@@ -3989,7 +3989,7 @@ class RobotApplication:
         if episode is None and expected_goal is not None:
             episode = AttentionEpisode(
                 0, stimulus.kind, stimulus.source, concern_for_stimulus(stimulus),
-                expected_goal.id, state="active",
+                expected_goal.id, "autonomous", state="active",
             )
         if episode is None:
             raise RuntimeError("attention initiative requires an active goal")

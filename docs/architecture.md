@@ -431,7 +431,7 @@ error, or cancelled. Current and last-completed diagnostics are retained, not an
 episode history. A scheduled follow-up closes its scheduling episode and creates a
 new episode when due; it neither reopens the old episode nor reserves authority.
 The runtime still permits one active goal and one autonomous episode in flight.
-Ordinary voice and operator turns are not episodes yet. Continuity requires no
+An operator episode may coexist in its separate lane. Continuity requires no
 persistent provider conversation, and there is no model-controlled deliberation loop.
 
 Semantic attention makes an initial decision. It either stops, applies semantic
@@ -476,16 +476,19 @@ CONTINUOUS RUNTIME (sensors, monitors, one active goal, timers, reflexes)
              -> close
 ```
 
-A shared coordinator owns the monotonically increasing `E<n>` namespace, current
-and last lifecycle records, and the one-episode-at-a-time fence. Trigger policy
-remains separate. Operator requests wait for this fence; ordinary autonomous
-semantic events are suppressed rather than queued while it is occupied. Reflex
-execution is outside the fence. Due temporal work remains pending and is offered
-again after attention becomes idle.
+A shared coordinator owns the monotonically increasing, globally unique `E<n>`
+namespace, explicit `operator` and `autonomous` current-lane records, and the last
+completed record. Each lane is independently single-flight. An explicit operator
+request waits only for another operator request, so its asyncio cognition task may
+overlap an already-running autonomous task. New autonomous admission is suppressed
+while either lane is occupied or an operator waiter exists; already-running
+autonomous work is not cancelled when an operator arrives. Reflex execution is
+outside these lanes. Due temporal work remains pending until autonomous admission
+is available.
 
-The application owns only the currently active operator cognition task. Shutdown
-cancels and joins it before body and hardware teardown; waiting operator requests
-remain waiters and fail the post-wait lifecycle fence without starting cognition.
+The application retains one operator cognition task and one Job work task. Shutdown
+cancels and joins both before body and hardware teardown and their lane closures
+are independent.
 
 Operator episodes need no goal and normally have `goal_id: none`; an existing
 ActiveGoal is nevertheless included as current intention in every fresh grounding.
@@ -494,6 +497,13 @@ produce one final response and one WorkingMemory turn, and have no autonomous
 continuation or outcome pass. Autonomous episodes remain exactly goal-bound with
 the Phase 16.2 limits: two acquisitions, two effects (the second through one
 continuation), one outcome evaluation, and no WorkingMemory write.
+
+This is asyncio concurrency, not an OS thread per semantic activity. The
+`ResourceArbiter` remains authoritative for exclusive microphones, speakers,
+camera/body effects, and Task-derived resources. Jobs themselves remain
+single-flight in Phase 1: there is still one current JobRun, Task binding,
+Job-bound ActiveGoal, continuation, and `_active_job_work_task`. Per-JobRun
+execution contexts and multi-Job concurrency are deferred to a later phase.
 
 ## Authoritative temporal grounding
 

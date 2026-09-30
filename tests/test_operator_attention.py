@@ -89,7 +89,7 @@ class ContinuityBackend(TextCognitionBackend):
 
     async def respond(self, message, *, instructions=None, **kwargs):
         self.requests.append((message, instructions))
-        self.current_episode_ids.append(self.app.episode_coordinator.current.id)
+        self.current_episode_ids.append(self.app.episode_coordinator.current_operator.id)
         self.started.set()
         if self.mode == "failure":
             raise RuntimeError("provider failed")
@@ -201,7 +201,7 @@ class VoiceBackend(TextCognitionBackend):
         self.instructions = []
 
     async def respond(self, message, *, instructions=None, **kwargs):
-        episode = self.app.episode_coordinator.current
+        episode = self.app.episode_coordinator.current_operator
         self.episodes.append((episode.id, episode.trigger_source))
         self.instructions.append(instructions)
         return f"answer {len(self.episodes)}"
@@ -232,7 +232,7 @@ class CheckingTTS:
         self.spoken = []
 
     async def speak(self, text):
-        if self.app.episode_coordinator.current is not None:
+        if self.app.episode_coordinator.current_operator is not None:
             raise AssertionError("attention episode remained active during TTS")
         self.spoken.append(text)
 
@@ -506,10 +506,10 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
                 "inspect then answer", interaction=CONSOLE_DIALOGUE
             )
         rendered_logs = "\n".join(captured.output)
-        self.assertIn("episode=E1 status=started", rendered_logs)
+        self.assertIn("episode=E1 lane=operator status=started", rendered_logs)
         self.assertIn("episode=E1 stage=initial source=console", rendered_logs)
         self.assertIn("episode=E1 stage=post_acquisition_1 source=console", rendered_logs)
-        self.assertIn("episode=E1 status=closed reason=handled", rendered_logs)
+        self.assertIn("episode=E1 lane=operator status=closed reason=handled", rendered_logs)
         self.assertEqual(len(backend.requests), 2)
         first, second = backend.requests
         for instructions in (first[0], second[0]):
@@ -720,7 +720,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         second = asyncio.create_task(app.request_cognition("two"))
         await asyncio.sleep(0)
         self.assertEqual(backend.maximum, 1)
-        self.assertEqual(app.episode_coordinator.current.id, 1)
+        self.assertEqual(app.episode_coordinator.current_operator.id, 1)
         backend.release.set()
         self.assertEqual(await first, "one")
         self.assertEqual(await second, "two")
@@ -728,16 +728,27 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.episode_coordinator.last.id, 2)
         await app.stop()
 
-    async def test_autonomous_start_yields_to_operator_waiter(self):
+    async def test_coordinator_owns_two_single_flight_lanes(self):
         coordinator = AttentionEpisodeCoordinator()
         autonomous = coordinator.try_start("event", "test", "concern", 1)
-        waiter = asyncio.create_task(coordinator.start_operator("voice", "respond"))
-        await asyncio.sleep(0)
-        coordinator.close(autonomous, "handled")
+        operator = await coordinator.start_operator("voice", "respond")
+        self.assertEqual((autonomous.id, autonomous.lane), (1, "autonomous"))
+        self.assertEqual((operator.id, operator.lane), (2, "operator"))
+        self.assertIs(coordinator.current_autonomous, autonomous)
+        self.assertIs(coordinator.current_operator, operator)
         self.assertIsNone(coordinator.try_start("event", "test", "concern", 1))
-        operator = await waiter
-        self.assertEqual((operator.id, operator.trigger_source), (2, "voice"))
+
+        waiter = asyncio.create_task(coordinator.start_operator("sms", "second"))
+        await asyncio.sleep(0)
+        self.assertTrue(coordinator.operator_waiting)
         coordinator.close(operator, "handled")
+        self.assertIs(coordinator.current_autonomous, autonomous)
+        second = await waiter
+        self.assertEqual(second.id, 3)
+        coordinator.close(autonomous, "handled")
+        self.assertIs(coordinator.current_operator, second)
+        coordinator.close(second, "handled")
+        self.assertFalse(coordinator.any_active)
 
     async def test_operator_active_suppresses_ordinary_autonomous_event(self):
         backend = BlockingBackend()
@@ -754,39 +765,42 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend.maximum, 1)
         await app.stop()
 
-    async def test_autonomous_active_blocks_operator_and_new_events(self):
+    async def test_autonomous_and_operator_cognition_overlap(self):
         backend = BlockingBackend()
         app = self.app(backend, initiative=True)
         await app.start(); app.set_goal("goal")
         await app.attention._consider(SemanticObservation("first", "test", ()))
         await backend.entered.wait()
         operator = asyncio.create_task(app.request_cognition("operator"))
-        await asyncio.sleep(0)
+        while backend.maximum < 2:
+            await asyncio.sleep(0)
         await app.attention._consider(SemanticObservation("second", "test", ()))
-        self.assertTrue(app.episode_coordinator.operator_waiting)
-        self.assertEqual(app.episode_coordinator.current.id, 1)
+        self.assertFalse(app.episode_coordinator.operator_waiting)
+        self.assertEqual(app.episode_coordinator.current_autonomous.id, 1)
+        self.assertEqual(app.episode_coordinator.current_operator.id, 2)
         backend.release.set(); await operator
-        self.assertEqual(backend.maximum, 1)
+        self.assertEqual(backend.maximum, 2)
         self.assertEqual(app.episode_coordinator.last.id, 2)
         self.assertEqual(app.episode_coordinator.last.trigger_kind,
                          "operator_utterance")
         await app.stop()
 
-    async def test_shutdown_cancels_operator_after_coordinator_wait(self):
+    async def test_shutdown_cancels_concurrent_operator_and_autonomous(self):
         backend = BlockingBackend()
         app = self.app(backend, initiative=True)
         await app.start(); app.set_goal("goal")
         await app.attention._consider(SemanticObservation("first", "test", ()))
         await backend.entered.wait()
         operator = asyncio.create_task(app.request_cognition("operator"))
-        await asyncio.sleep(0)
-        self.assertTrue(app.episode_coordinator.operator_waiting)
+        while backend.maximum < 2:
+            await asyncio.sleep(0)
         await app.stop()
-        with self.assertRaisesRegex(RuntimeError, "running application"):
+        with self.assertRaises(asyncio.CancelledError):
             await operator
-        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(len(backend.requests), 2)
         self.assertEqual(app.working_memory.snapshot(), ())
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_operator)
+        self.assertIsNone(app.episode_coordinator.current_autonomous)
         self.assertFalse(app.episode_coordinator.operator_waiting)
 
     async def test_shutdown_cancels_and_joins_active_operator_cognition(self):
@@ -795,7 +809,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         operator = asyncio.create_task(app.request_cognition("operator"))
         await backend.entered.wait()
-        episode = app.episode_coordinator.current
+        episode = app.episode_coordinator.current_operator
         self.assertEqual((episode.id, episode.trigger_kind),
                          (1, "operator_utterance"))
         self.assertIs(app._active_operator_cognition_task, operator)
@@ -807,7 +821,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend.active, 0)
         self.assertEqual(backend.completed, 0)
         self.assertEqual(app.state.value, "stopped")
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_operator)
         self.assertEqual(app.episode_coordinator.last.id, 1)
         self.assertEqual(app.episode_coordinator.last.completion_reason, "cancelled")
         self.assertEqual(app.working_memory.snapshot(), ())
@@ -840,7 +854,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.runtime_state.body, before)
         self.assertEqual(closed, [(1, "cancelled")])
         self.assertEqual(app.episode_coordinator.last.completion_reason, "cancelled")
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_operator)
         self.assertEqual(app.working_memory.snapshot(), ())
         self.assertIsNone(app._active_operator_cognition_task)
 
@@ -883,7 +897,7 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Working memory\n  state: empty", backend.instructions[0])
         self.assertIn('operator: "first"', backend.instructions[1])
         self.assertEqual(len(app.working_memory.snapshot()), 2)
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_operator)
         await app.stop()
 
     async def test_dialogue_channel_does_not_change_operator_tool_authority(self):

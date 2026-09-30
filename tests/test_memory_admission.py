@@ -487,7 +487,7 @@ class AdmissionBackend(TextCognitionBackend):
         refreshed_instructions = kwargs.get("refreshed_instructions")
         self.requests.append((instructions, tuple(tool.name for tool in tools)))
         if self.sequence:
-            self.episode_ids.append(self.app.episode_coordinator.current.id)
+            self.episode_ids.append(self.app.episode_coordinator.current_operator.id)
             name = self.sequence.pop(0)
             args = ({"query": "Gordon"} if name == "recall_memory"
                     else asdict(proposal()))

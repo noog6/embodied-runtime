@@ -453,7 +453,7 @@ class OperatorDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sink.messages[0].source, "voice")
         self.assertEqual(sink.messages[0].interaction, CONSOLE_DELIVERY)
         self.assertEqual(len(app.working_memory), before + 1)
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_operator)
         await app.stop()
 
     async def test_console_to_console_and_no_implicit_delivery(self):
@@ -791,7 +791,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replacement.messages, [])
         self.assertIs(app.runtime_state, state)
         self.assertEqual(app.working_memory.snapshot(), memory)
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_operator)
         await app.stop()
 
     async def test_delivery_uses_current_same_channel_replacement(self):
@@ -838,7 +838,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(interaction=interaction), self.assertRaises(ValueError):
                 await app.request_cognition("hello", interaction=interaction)
         self.assertEqual(backend.requests, [])
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_operator)
         self.assertIsNone(app.episode_coordinator.last)
         self.assertEqual(app.working_memory.snapshot(), before)
         await app.stop()
@@ -860,7 +860,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         calls_before = len(backend.requests)
         memory_before = app.working_memory.snapshot()
         results_before = tuple(backend.results)
-        current_before = app.episode_coordinator.current
+        current_before = app.episode_coordinator.current_operator
         last_before = app.episode_coordinator.last
         completed_before = app.episode_coordinator.last_completed_monotonic
         for interaction, message in (
@@ -880,7 +880,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(backend.requests), calls_before)
             self.assertEqual(app.working_memory.snapshot(), memory_before)
             self.assertEqual(tuple(backend.results), results_before)
-            self.assertIs(app.episode_coordinator.current, current_before)
+            self.assertIs(app.episode_coordinator.current_operator, current_before)
             self.assertIs(app.episode_coordinator.last, last_before)
             self.assertEqual(
                 app.episode_coordinator.last_completed_monotonic,
