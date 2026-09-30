@@ -12,6 +12,7 @@ import secrets
 import unicodedata
 from time import monotonic, monotonic_ns
 from datetime import UTC, datetime
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from embodied_runtime.body.base import BodyBackend
@@ -904,9 +905,57 @@ class CurrentJobRun:
     task: Task
 
 
+@dataclass(slots=True)
+class JobExecutionContext:
+    """Volatile execution authority owned by one exact JobRun occurrence.
+
+    Shared application services (including WorkingMemory, persistent memory, and
+    cognition) intentionally do not belong here.  The three-part identity is
+    immutable by policy: updates may replace domain snapshots, but never their
+    Job, JobRun, or Task identities.
+    """
+
+    binding: CurrentJobRun
+    task_binding: _CurrentTaskBinding | None
+    continuation: JobContinuation | None = None
+    active_work_task: asyncio.Task[object] | None = None
+    progress: JobProgress | None = None
+    execution_state: str = "runnable"
+
+    def __post_init__(self) -> None:
+        if (self.task_binding is not None
+                and self.task_binding.task.id != self.binding.task.id):
+            raise ValueError(
+                "JobExecutionContext Task binding must match its JobRun Task"
+            )
+
+    @property
+    def job_id(self) -> int:
+        return self.binding.job.id
+
+    @property
+    def run_id(self) -> int:
+        return self.binding.run.id
+
+    @property
+    def task_id(self) -> UUID:
+        return self.binding.task.id
+
+    @property
+    def resource_owner(self) -> ResourceOwner:
+        return ResourceOwner("task", str(self.task_id))
+
+    def replace_binding(self, binding: CurrentJobRun) -> None:
+        if (binding.job.id, binding.run.id, binding.task.id) != (
+            self.job_id, self.run_id, self.task_id
+        ):
+            raise RuntimeError("JobExecutionContext identity cannot change")
+        self.binding = binding
+
+
 @dataclass(frozen=True, slots=True)
 class _ParkedJobRun:
-    """One exact dormant occurrence that does not own execution authority."""
+    """Compatibility projection of one parked JobExecutionContext."""
 
     binding: CurrentJobRun
     task_binding: _CurrentTaskBinding
@@ -990,9 +1039,10 @@ class RobotApplication:
         self.camera_backend = camera_backend
         self._cognition_backend = cognition_backend
         self._active_operator_cognition_task: asyncio.Task[object] | None = None
-        self._active_job_work_task: asyncio.Task[object] | None = None
-        self._job_continuation: JobContinuation | None = None
-        self._parked_job_run: _ParkedJobRun | None = None
+        self._job_execution_contexts: dict[int, JobExecutionContext] = {}
+        self._foreground_job_run_id: int | None = None
+        self._parked_job_run_id: int | None = None
+        self._unbound_task_binding: _CurrentTaskBinding | None = None
         # One lossy, volatile activation bit per bounded trigger type; not an event queue.
         self._pending_job_triggers: set[JobTriggerType] = set()
         # Runtime lifecycle occurrence guard. It is deliberately volatile so a
@@ -1057,9 +1107,6 @@ class RobotApplication:
         )
         self._voice_wake_words = tuple(voice_wake_words or ())
         self._active_goal: ActiveGoal | None = None
-        self._current_task_binding: _CurrentTaskBinding | None = None
-        self._current_job_run: CurrentJobRun | None = None
-        self._job_progress: JobProgress | None = None
         self._monotonic = monotonic_clock or monotonic
         self._active_goal_started_monotonic: tuple[ActiveGoal, float] | None = None
         self._last_operator_turn_completed_monotonic: float | None = None
@@ -1133,6 +1180,165 @@ class RobotApplication:
     def interaction_environment(self) -> InteractionEnvironment:
         """Return the application-lifetime, runtime-owned interaction posture."""
         return self._interaction_environment
+
+    @property
+    def job_execution_contexts(self) -> tuple[JobExecutionContext, ...]:
+        """Return a bounded, read-only view of live session Job contexts."""
+        return tuple(self._job_execution_contexts.values())
+
+    @property
+    def current_job_execution_context(self) -> JobExecutionContext | None:
+        run_id = self._foreground_job_run_id
+        return None if run_id is None else self._job_execution_contexts.get(run_id)
+
+    @property
+    def _parked_job_execution_context(self) -> JobExecutionContext | None:
+        run_id = self._parked_job_run_id
+        return None if run_id is None else self._job_execution_contexts.get(run_id)
+
+    def _context_for_run(self, run_id: int) -> JobExecutionContext | None:
+        return self._job_execution_contexts.get(run_id)
+
+    def _remove_job_execution_context(self, run_id: int) -> None:
+        context = self._job_execution_contexts.get(run_id)
+        if context is None:
+            return
+        if context.active_work_task is not None:
+            context.execution_state = "terminal"
+            return
+        self._job_execution_contexts.pop(run_id, None)
+        if self._foreground_job_run_id == run_id:
+            self._foreground_job_run_id = None
+        if self._parked_job_run_id == run_id:
+            self._parked_job_run_id = None
+
+    def _clear_context_work_task(
+        self, context: JobExecutionContext, task: asyncio.Task[object],
+    ) -> None:
+        """Clear only the exact context/task pair captured by its episode."""
+        if context.active_work_task is task:
+            context.active_work_task = None
+            if context.execution_state == "terminal":
+                self._remove_job_execution_context(context.run_id)
+
+    @property
+    def _current_job_run(self) -> CurrentJobRun | None:
+        context = self.current_job_execution_context
+        return None if context is None else context.binding
+
+    @_current_job_run.setter
+    def _current_job_run(self, binding: CurrentJobRun | None) -> None:
+        if binding is None:
+            self._foreground_job_run_id = None
+            return
+        context = self._context_for_run(binding.run.id)
+        if context is None:
+            task_binding = self._unbound_task_binding
+            if task_binding is None or task_binding.task.id != binding.task.id:
+                raise RuntimeError("JobExecutionContext requires its exact Task binding")
+            context = JobExecutionContext(binding, task_binding)
+            self._job_execution_contexts[binding.run.id] = context
+            self._unbound_task_binding = None
+        else:
+            context.replace_binding(binding)
+            context.execution_state = "runnable"
+        self._foreground_job_run_id = binding.run.id
+
+    @property
+    def _current_task_binding(self) -> _CurrentTaskBinding | None:
+        context = self.current_job_execution_context
+        return self._unbound_task_binding if context is None else context.task_binding
+
+    @_current_task_binding.setter
+    def _current_task_binding(self, binding: _CurrentTaskBinding | None) -> None:
+        context = self.current_job_execution_context
+        if context is None:
+            self._unbound_task_binding = binding
+        elif binding is not None:
+            if binding.task.id != context.task_id:
+                raise RuntimeError("JobExecutionContext Task identity cannot change")
+            context.task_binding = binding
+        else:
+            # Task terminalization happens before JobRun persistence.  Retain the
+            # terminal snapshot in the context while removing foreground Task view.
+            context.task_binding = None
+
+    @property
+    def _job_continuation(self) -> JobContinuation | None:
+        context = self._parked_job_execution_context or self.current_job_execution_context
+        return None if context is None else context.continuation
+
+    @_job_continuation.setter
+    def _job_continuation(self, continuation: JobContinuation | None) -> None:
+        context = self._parked_job_execution_context or self.current_job_execution_context
+        if context is None:
+            if continuation is not None:
+                raise RuntimeError("Job continuation requires an exact execution context")
+            return
+        context.continuation = continuation
+
+    @property
+    def _job_progress(self) -> JobProgress | None:
+        context = self.current_job_execution_context or self._parked_job_execution_context
+        return None if context is None else context.progress
+
+    @_job_progress.setter
+    def _job_progress(self, progress: JobProgress | None) -> None:
+        context = self.current_job_execution_context or self._parked_job_execution_context
+        if context is None:
+            if progress is not None:
+                raise RuntimeError("Job progress requires an exact execution context")
+            return
+        context.progress = progress
+
+    @property
+    def _parked_job_run(self) -> _ParkedJobRun | None:
+        context = self._parked_job_execution_context
+        if context is None:
+            return None
+        if context.task_binding is None:
+            raise RuntimeError("parked JobExecutionContext has no Task binding")
+        return _ParkedJobRun(context.binding, context.task_binding, context.progress)
+
+    @_parked_job_run.setter
+    def _parked_job_run(self, parked: _ParkedJobRun | None) -> None:
+        if parked is None:
+            self._parked_job_run_id = None
+            return
+        context = self._context_for_run(parked.binding.run.id)
+        if context is None:
+            raise RuntimeError("parked JobRun has no execution context")
+        context.replace_binding(parked.binding)
+        if parked.task_binding.task.id != context.task_id:
+            raise RuntimeError("parked Task identity does not match its context")
+        context.task_binding = parked.task_binding
+        context.progress = parked.progress
+        context.execution_state = "parked"
+        self._parked_job_run_id = context.run_id
+
+    @property
+    def _active_job_work_task(self) -> asyncio.Task[object] | None:
+        active = [context.active_work_task for context in self._job_execution_contexts.values()
+                  if context.active_work_task is not None]
+        if len(active) > 1:
+            raise RuntimeError("multiple Job work tasks violate Phase 2 capacity")
+        return None if not active else active[0]
+
+    @_active_job_work_task.setter
+    def _active_job_work_task(self, task: asyncio.Task[object] | None) -> None:
+        if task is None:
+            current = asyncio.current_task()
+            for context in self._job_execution_contexts.values():
+                if context.active_work_task is current:
+                    context.active_work_task = None
+            return
+        active = self._active_job_work_task
+        if active is not None and active is not task:
+            raise RuntimeError("another Job work episode is already active")
+        context = self.current_job_execution_context
+        if context is None:
+            raise RuntimeError("Job work task requires an exact execution context")
+        context.active_work_task = task
 
     @property
     def active_goal(self) -> ActiveGoal | None:
@@ -1646,8 +1852,15 @@ class RobotApplication:
             binding.run.id, status, result_report=result_report, **kwargs
         )
         finished = CurrentJobRun(binding.job, run, task)
+        context = self._context_for_run(binding.run.id)
+        if context is None:
+            raise RuntimeError("current JobRun has no execution context")
+        context.replace_binding(finished)
+        context.continuation = None
+        context.progress = None
+        context.execution_state = "terminal"
         self._current_job_run = None
-        self._job_progress = None
+        self._remove_job_execution_context(binding.run.id)
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s task=%s status=%s result=persisted report_chars=%s",
             binding.job.id, run.id, task.id, status.value,
@@ -1730,6 +1943,9 @@ class RobotApplication:
         binding, task_binding, goal = (
             self._validate_job_work_preconditions() if prepared is None else prepared
         )
+        context = self._context_for_run(binding.run.id)
+        if context is None or context.binding is not binding:
+            raise RuntimeError("Job work requires its exact execution context")
         if episode is None:
             episode = self._try_start_job_work_episode(binding, goal)
             if episode is None:
@@ -1869,8 +2085,7 @@ class RobotApplication:
             try:
                 await self._finish_job_work_episode(episode, reason)
             finally:
-                if self._active_job_work_task is current_async_task:
-                    self._active_job_work_task = None
+                self._clear_context_work_task(context, current_async_task)
 
     def _arm_job_continuation(self, outcome: JobWorkOutcome, *, source: str = "manual") -> None:
         if not self.options.jobs_auto_continue or self.jobs is None:
@@ -1999,7 +2214,6 @@ class RobotApplication:
         )
         self._current_job_run = None
         self._current_task_binding = None
-        self._job_progress = None
         LOGGER.info("[JOBS] job=JOB%s run=RUN%s continuation=parked task=%s",
                     binding.job.id, binding.run.id, binding.task.id)
 
@@ -2223,16 +2437,18 @@ class RobotApplication:
         previous_work_summary: str | None,
         wake_event: JobWakeEvent | None,
     ) -> None:
-        continuation = self._job_continuation
         binding, task_binding, goal = prepared
+        context = self._context_for_run(binding.run.id)
+        continuation = None if context is None else context.continuation
         if (continuation is None
                 or continuation.job_id != binding.job.id
                 or continuation.run_id != binding.run.id
                 or continuation.task_id != binding.task.id
                 or not self._job_work_binding_matches(binding, task_binding, goal)):
             self.episode_coordinator.close(episode, "stale_goal")
-            if self._active_job_work_task is asyncio.current_task():
-                self._active_job_work_task = None
+            current_task = asyncio.current_task()
+            if context is not None and current_task is not None:
+                self._clear_context_work_task(context, current_task)
             return
         try:
             outcome = await self._work_current_job_once(
@@ -3224,10 +3440,7 @@ class RobotApplication:
         except BaseException as error:
             failure = error
         shutdown_jobs = tuple(
-            binding for binding in (
-                self._current_job_run,
-                None if self._parked_job_run is None else self._parked_job_run.binding,
-            ) if binding is not None
+            context.binding for context in self._job_execution_contexts.values()
         )
         for current in shutdown_jobs:
             if self.jobs is None:
@@ -3279,6 +3492,9 @@ class RobotApplication:
                 current.job.id, current.run.id, current.task.id,
             )
             self._parked_job_run = None
+        self._job_execution_contexts.clear()
+        self._foreground_job_run_id = None
+        self._parked_job_run_id = None
         try:
             await self.attention.stop()
         except BaseException as error:
@@ -3341,15 +3557,24 @@ class RobotApplication:
         self.persistent_memory.close()
 
     async def _stop_job_work(self) -> None:
-        """Cancel and join explicit Job cognition before volatile Task cleanup."""
-        task = self._active_job_work_task
-        if task is None or task is asyncio.current_task():
-            return
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        if self._active_job_work_task is task:
-            self._active_job_work_task = None
+        """Cancel and join every context-owned task before volatile cleanup."""
+        current = asyncio.current_task()
+        owned = tuple(
+            (context, context.active_work_task)
+            for context in self._job_execution_contexts.values()
+            if context.active_work_task is not None
+            and context.active_work_task is not current
+        )
+        for _, task in owned:
+            assert task is not None
+            if not task.done():
+                task.cancel()
+        if owned:
+            await asyncio.gather(*(task for _, task in owned if task is not None),
+                                 return_exceptions=True)
+        for context, task in owned:
+            assert task is not None
+            self._clear_context_work_task(context, task)
 
     def _close_job_store(self) -> None:
         """Close Job persistence without changing any durable run state."""
