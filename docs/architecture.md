@@ -501,9 +501,8 @@ continuation), one outcome evaluation, and no WorkingMemory write.
 This is asyncio concurrency, not an OS thread per semantic activity. The
 `ResourceArbiter` remains authoritative for exclusive microphones, speakers,
 camera/body effects, and Task-derived resources. Jobs themselves remain
-single-flight in Phase 1: there is still one current JobRun, Task binding,
-Job-bound ActiveGoal, continuation, and `_active_job_work_task`. Per-JobRun
-execution contexts and multi-Job concurrency are deferred to a later phase.
+single-flight in Phase 2: their volatile authority now belongs to exact
+per-JobRun execution contexts, while multi-Job cognition remains deferred.
 
 ## Authoritative temporal grounding
 
@@ -523,3 +522,54 @@ supplies recent semantic interaction content; cognition may combine that content
 with recency, but the runtime does not classify or summarize recent activity.
 No domain object gained timestamps, no temporal history database exists, and
 the existing operator and autonomous attention bounds are unchanged.
+
+## Job execution-context ownership
+
+A `JobExecutionContext` is volatile, session-local state owned by the runtime. One
+exact JobRun occurrence owns one context, identified by Job ID, JobRun ID, and
+Task UUID. The context owns the occurrence's Task binding, Job-bound ActiveGoal
+reference, continuation/readiness and wake evidence, progress, parked/runnable
+state, active work task, Workspace authority identity, and Task-derived resource
+owner. It is never recovered across process restarts.
+
+```text
+                         APPLICATION
+                +----------------------------+
+                | shared RuntimeState        |
+                | shared WorkingMemory       |
+                | shared persistent memory   |
+                | shared cognition backend   |
+                | shared sensors/diagnostics |
+                +-------------+--------------+
+                              |
+             +----------------+----------------+
+             |                                 |
+       operator lane                  Job context registry
+                                             |
+                              +--------------+--------------+
+                              |              |              |
+                           RUN A          RUN B          RUN C
+                           context        context        context
+                              |
+                        admitted Job work
+                              |
+                       autonomous lane
+```
+
+The registry is an ownership model, not a worker pool. Phase 2 retains one
+runtime-wide Job cognition slot and the existing bounded parked-context policy;
+only the admitted context may use the autonomous lane. The independently
+single-flight operator lane can still overlap that work. Physical effects remain
+separately controlled by `ResourceArbiter` and its exact Task-derived owner.
+
+WorkingMemory, persistent memory, RuntimeState, platform/sensor state,
+diagnostics, and the cognition backend remain shared application services—not
+context fields. Each cognition episode snapshots the shared WorkingMemory at its
+start boundary. A concurrent operator completion therefore does not mutate an
+already-running Job episode's history, while the next Job episode sees the new
+shared turn. Job work continues to use Workspace for Job-specific material and
+does not append ordinary conversational turns.
+
+Phase 3 can admit multiple eligible contexts only after adding an explicit Job
+cognition capacity, bounded autonomous attention admission, multi-Job trigger
+arbitration, and policy for genuinely shared resources.

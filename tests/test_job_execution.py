@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 import tempfile
@@ -8,7 +9,8 @@ from unittest.mock import AsyncMock
 
 from embodied_runtime.app import (
     JOB_OUTCOME_EVALUATION_REQUEST, REPORT_JOB_OUTCOME_TOOL,
-    ApplicationOptions, RobotApplication,
+    ApplicationOptions, JobExecutionContext, RobotApplication,
+    _CurrentTaskBinding,
 )
 from embodied_runtime.cognition import CognitionToolCall, TextCognitionBackend
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
@@ -16,7 +18,7 @@ from embodied_runtime.jobs import (
     MAX_RUN_REPORT_CHARS, JobRunStatus, JobWorkDisposition, SQLiteJobStore,
 )
 from embodied_runtime.profile import RobotProfile
-from embodied_runtime.tasks import TaskStatus
+from embodied_runtime.tasks import Task, TaskStatus
 from tests.test_platform import snapshot
 
 
@@ -140,6 +142,45 @@ class OverlappingOperatorBackend(JobBackend):
         return "bounded response"
 
 
+class ContinuingOverlapBackend(JobBackend):
+    def __init__(self):
+        super().__init__()
+        self.first_job_started = asyncio.Event()
+        self.release_first_job = asyncio.Event()
+        self.operator_started = asyncio.Event()
+        self.release_operator = asyncio.Event()
+        self.job_initial_instructions = []
+        self.outcome_requests = 0
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((message, instructions, tuple(tool.name for tool in tools)))
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            self.outcome_requests += 1
+            disposition = (
+                "continue" if self.outcome_requests == 1 else "completed"
+            )
+            readiness = "ready" if disposition == "continue" else None
+            await tool_executor(CognitionToolCall(
+                REPORT_JOB_OUTCOME_TOOL.name,
+                json.dumps({"disposition": disposition, "summary": "bounded",
+                            "report": None, "readiness": readiness,
+                            "delay_seconds": None}),
+            ))
+            return "bounded response"
+        if "kind: job_run_work" in (instructions or ""):
+            self.job_initial_instructions.append(instructions)
+            if len(self.job_initial_instructions) == 1:
+                self.first_job_started.set()
+                await self.release_first_job.wait()
+            return "job work"
+        if message == "shared turn B":
+            self.operator_started.set()
+            await self.release_operator.wait()
+            return "operator answer B"
+        return "bounded response"
+
+
 class FakeTimer:
     def __init__(self):
         self.now = 100.0
@@ -183,6 +224,20 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
 
+    async def test_context_rejects_initially_mismatched_task_binding(self):
+        app = self.app(JobBackend())
+        await app.start()
+        binding = app.start_job_run(self.store.create_job("Exact identity").id)
+
+        with self.assertRaisesRegex(
+            ValueError, "Task binding must match its JobRun Task"
+        ):
+            JobExecutionContext(
+                binding, _CurrentTaskBinding(Task("Different Task"), None)
+            )
+
+        await app.stop()
+
     async def test_one_explicit_continue_episode_is_grounded_and_does_not_repeat(self):
         backend = JobBackend()
         job = self.store.create_job("Review logs", "Full durable description")
@@ -224,6 +279,12 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         binding = app.start_job_run(job.id)
         task_binding = app._current_task_binding
         active_goal = app.active_goal
+        context = app.current_job_execution_context
+        self.assertIsNotNone(context)
+        self.assertEqual((context.job_id, context.run_id, context.task_id),
+                         (binding.job.id, binding.run.id, binding.task.id))
+        self.assertEqual(len(app.job_execution_contexts), 1)
+        self.assertNotIn("working_memory", {field.name for field in fields(context)})
 
         work = asyncio.create_task(app.work_current_job_once())
         await backend.job_started.wait()
@@ -246,17 +307,138 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         backend.release_operator.set()
         self.assertEqual(await operator, "operator answer")
+        self.assertNotIn("what's your current voltage", backend.requests[0][1])
+        self.assertEqual(app.working_memory.snapshot()[-1].operator_text,
+                         "what's your current voltage")
         self.assertIs(app.current_job_run, binding)
         self.assertIs(app._current_task_binding, task_binding)
         self.assertIs(app.active_goal, active_goal)
         self.assertIs(app._active_job_work_task, work)
+        self.assertIs(context.active_work_task, work)
+        self.assertEqual(sum(item.active_work_task is not None
+                             for item in app.job_execution_contexts), 1)
 
         backend.release_job.set()
         outcome = await work
         self.assertIs(outcome.disposition, JobWorkDisposition.COMPLETED)
         self.assertIsNone(app.current_job_run)
+        self.assertEqual(app.job_execution_contexts, ())
         self.assertIs(self.store.get_run(binding.run.id).status, JobRunStatus.COMPLETED)
+        later = self.store.create_job("See later shared memory")
+        app.start_job_run(later.id)
+        later_request_index = len(backend.requests)
+        await app.work_current_job_once()
+        self.assertIn("what's your current voltage",
+                      backend.requests[later_request_index][1])
+        self.assertEqual(len(app.working_memory.snapshot()), 1)
         await app.stop()
+
+    async def test_same_job_context_sees_operator_turn_only_on_next_episode(self):
+        backend = ContinuingOverlapBackend()
+        app = self.app(backend)
+        await app.start()
+        binding = app.start_job_run(self.store.create_job("Continue exactly").id)
+        context = app.current_job_execution_context
+        memory_before = app.working_memory.snapshot()
+
+        first_work = asyncio.create_task(app.work_current_job_once())
+        await backend.first_job_started.wait()
+        operator = asyncio.create_task(app.request_cognition(
+            "shared turn B", source="voice"
+        ))
+        await backend.operator_started.wait()
+        backend.release_operator.set()
+        self.assertEqual(await operator, "operator answer B")
+        self.assertEqual(len(app.working_memory.snapshot()), len(memory_before) + 1)
+        self.assertNotIn("shared turn B", backend.job_initial_instructions[0])
+
+        backend.release_first_job.set()
+        first = await first_work
+        self.assertIs(first.disposition, JobWorkDisposition.CONTINUE)
+        self.assertIs(app.current_job_execution_context, context)
+        self.assertEqual((app.current_job_run.run.id, app.current_task.id),
+                         (binding.run.id, binding.task.id))
+
+        second = await app.work_current_job_once()
+
+        self.assertIs(second.disposition, JobWorkDisposition.COMPLETED)
+        self.assertIn("shared turn B", backend.job_initial_instructions[1])
+        self.assertEqual(len(app.working_memory.snapshot()), len(memory_before) + 1)
+        await app.stop()
+
+    async def test_terminal_context_retains_capacity_until_exact_task_cleanup(self):
+        app = None
+        old_context = None
+        replacement = None
+        rejected_task = None
+
+        def inspect_terminal_unwind():
+            nonlocal replacement, rejected_task
+            app.finish_job_run = finish_job_run
+            self.assertEqual(old_context.execution_state, "terminal")
+            self.assertIs(old_context.active_work_task, work)
+            self.assertIn(old_context, app.job_execution_contexts)
+            self.assertIs(app._active_job_work_task, work)
+
+            second_job = self.store.create_job("Replacement occurrence")
+            app.start_job_run(second_job.id)
+            replacement = app.current_job_execution_context
+            rejected_task = asyncio.create_task(asyncio.sleep(10))
+            with self.assertRaisesRegex(
+                RuntimeError, "another Job work episode is already active"
+            ):
+                app._active_job_work_task = rejected_task
+            rejected_task.cancel()
+            self.assertIs(app._active_job_work_task, work)
+
+        backend = OutcomeProposalBackend("completed")
+        app = self.app(backend)
+        await app.start()
+        app.start_job_run(self.store.create_job("Terminal owner").id)
+        old_context = app.current_job_execution_context
+        finish_job_run = app.finish_job_run
+
+        def finish_and_inspect(*args, **kwargs):
+            finished = finish_job_run(*args, **kwargs)
+            inspect_terminal_unwind()
+            return finished
+
+        app.finish_job_run = finish_and_inspect
+        work = asyncio.create_task(app.work_current_job_once())
+
+        outcome = await work
+
+        self.assertIs(outcome.disposition, JobWorkDisposition.COMPLETED)
+        self.assertIsNone(old_context.active_work_task)
+        self.assertNotIn(old_context, app.job_execution_contexts)
+        self.assertIs(app.current_job_execution_context, replacement)
+        self.assertIn(replacement, app.job_execution_contexts)
+        self.assertIsNone(replacement.active_work_task)
+        await asyncio.gather(rejected_task, return_exceptions=True)
+        await app.work_current_job_once()
+        await app.stop()
+
+    async def test_shutdown_clears_context_registry_and_joins_owned_work(self):
+        backend = BlockingBackend()
+        job = self.store.create_job("Block until shutdown")
+        app = self.app(backend)
+        await app.start()
+        binding = app.start_job_run(job.id)
+        work = asyncio.create_task(app.work_current_job_once())
+        await backend.started.wait()
+        context = app.current_job_execution_context
+        self.assertIs(context.active_work_task, work)
+
+        await app.stop()
+
+        self.assertTrue(work.done())
+        self.assertEqual(app.job_execution_contexts, ())
+        reopened = SQLiteJobStore(self.path)
+        try:
+            self.assertIs(reopened.get_run(binding.run.id).status,
+                          JobRunStatus.INTERRUPTED)
+        finally:
+            reopened.close()
 
     async def test_completed_uses_authoritative_job_and_task_terminal_path(self):
         app = None

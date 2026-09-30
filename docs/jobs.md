@@ -657,3 +657,29 @@ The Jobs database schema version is 6. Opening a version-4 database transactiona
 adds the trigger table; opening version 5 expands its bounded event-type constraint.
 Both migrations preserve Jobs, JobRuns, schedules, result reports, trigger rows,
 and the unique-enabled-owner invariant.
+
+## Session execution contexts
+
+Every live occurrence is represented by one runtime-owned
+`JobExecutionContext`. Its stable identity is the exact `(job_id, run_id,
+task_uuid)` tuple; a context is never rebound to a later run of the same Job.
+It owns volatile execution authority: the Task/TaskGoal and Job ActiveGoal
+relationship, continuation and readiness/wake state, progress, active asyncio
+work task, parked/runnable state, Workspace scope, and Task resource-owner
+identity. Terminalization removes only that occurrence's context; shutdown
+cancels and joins context-owned tasks, interrupts durable running JobRuns under
+the existing policy, releases Task resources, and clears the volatile registry.
+
+`current_job_run`, `current_task`, `active_goal`, `job current`, and runtime
+inspection remain compatibility projections of the foreground context (or the
+sole parked occurrence where existing behavior requires it). They are views,
+not independent mutable owners. A parked context retains the exact paused Task
+and continuation but owns no active attention episode, provider request, or
+physical-resource lease.
+
+The context registry does **not** imply concurrent Jobs. Phase 2 remains
+Job-cognition-single-flight and retains the existing single parked slot. The
+operator lane remains independent. Shared WorkingMemory and persistent memory
+remain application-level sources; contexts neither contain nor create private
+conversation histories or semantic-memory stores. Workspace authority remains
+captured from the exact Job context for each bounded cognition episode.
