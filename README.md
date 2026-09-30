@@ -39,11 +39,14 @@ Diagnostics report both the selected robot hardware backend and a separate
 snapshot of the real host platform, including available identity and resource
 telemetry.
 
-The runtime loads the Mira robot profile and uses hardware-free virtual hardware
-and body backends by default. An explicitly selected SunFounder Fusion HAT+
-backend provides board readiness and low-level PWM access; the semantic body
-intentionally remains virtual. See [the hardware notes](docs/hardware/fusion-hat-plus.md)
-and [architecture notes](docs/architecture.md).
+The runtime loads the Mira robot profile independently of its embodiment. The
+checked-in deployment configuration automatically selects a ready SunFounder
+Fusion HAT+ or falls back to a physical host-only backend, while the historical
+no-argument development default remains virtual. Physical launches do not
+invent a semantic body; the virtual backend intentionally provides the
+simulated body used in development. See [the hardware
+notes](docs/hardware/fusion-hat-plus.md) and [architecture
+notes](docs/architecture.md).
 
 The default demo also includes one deterministic local reflex: a transition to
 semantic presence centers body yaw and pitch through the application body API.

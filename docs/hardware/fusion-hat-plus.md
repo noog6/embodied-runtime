@@ -2,7 +2,27 @@
 
 This is the verified integration record for the initial physical hardware
 backend. The low-level hardware boundary remains separate from semantic body
-control: selecting `fusion-hat` still composes `VirtualBodyBackend`.
+control. Neither a host-only physical launch nor the current Fusion HAT launch
+composes a semantic body backend, because physical orientation control has not
+been implemented. `VirtualBodyBackend` is reserved for an explicitly virtual
+runtime.
+
+## Runtime selection
+
+Mira's deployment configuration uses `hardware = "auto"`. At the launch
+composition boundary, the runtime checks the same narrow Fusion driver sysfs
+readiness interface used by the backend. A ready interface resolves to
+`fusion_hat`; an absent interface resolves to the physical `host` backend and
+is not an error. The host backend advertises no robot-I/O capabilities, so no
+Fusion voice, TTS, earcon, battery, PWM, or body component is fabricated.
+Camera selection is independent: `camera = "auto"` separately uses the narrow
+Picamera2 adapter probe and resolves to no camera when no usable CSI camera is
+attached.
+
+Explicit `host` and `virtual` selections force those backends. Explicit
+`fusion-hat` retains fail-fast startup and its concise `fusion_hat doctor`
+guidance. Diagnostics report the resolved backend, physical status, and its
+actual capabilities.
 
 ## Source-verified facts
 
@@ -70,7 +90,8 @@ Human bench checklist:
 1. Run `fusion_hat doctor` (and optionally `fusion_hat info`).
 2. Run the non-actuating readiness check:
    `python main.py --hardware fusion-hat --diagnostics`.
-3. Confirm hardware reports physical while body reports virtual.
+3. Confirm hardware reports physical and no semantic orientation/body tool is
+   advertised.
 4. Compare one read-only battery measurement with a multimeter:
    `python main.py --hardware fusion-hat --diagnostics --fusion-battery-test`.
    The `[BATTERY]` line reports the driver's `voltage_uv` value and converted

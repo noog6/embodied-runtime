@@ -16,7 +16,7 @@ from embodied_runtime.config import (
 
 
 EXPLICIT_AGENTIC = [
-    "--hardware", "fusion-hat", "--camera", "picamera2",
+    "--hardware", "auto", "--camera", "auto",
     "--cognition", "openai-responses",
     "--vision", "openai-responses", "--initiative",
     "--initiative-platform-attention", "--initiative-actions",
@@ -79,6 +79,22 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(HISTORICAL_DEFAULTS.interaction_environment, "workstation")
         self.assertFalse(HISTORICAL_DEFAULTS.sms_enabled)
         self.assertTrue(HISTORICAL_DEFAULTS.earcons_enabled)
+
+    def test_all_hardware_selection_values_are_accepted(self):
+        for hardware in ("auto", "virtual", "host", "fusion-hat"):
+            with self.subTest(hardware=hardware):
+                self.assertEqual(
+                    self.effective(f"[runtime]\nhardware='{hardware}'\n").hardware,
+                    hardware,
+                )
+
+    def test_all_camera_selection_values_are_accepted(self):
+        for camera in ("auto", "none", "picamera2"):
+            with self.subTest(camera=camera):
+                self.assertEqual(
+                    self.effective(f"[runtime]\ncamera='{camera}'\n").camera,
+                    camera,
+                )
 
     def test_earcons_config_and_cli_disable_are_strict_and_independent_of_tts(self):
         self.assertTrue(self.effective("[earcons]\nenabled=true\n").earcons_enabled)

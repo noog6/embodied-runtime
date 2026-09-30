@@ -201,8 +201,8 @@ _INTERACTION_KEYS = {"environment"}
 _SMS_KEYS = {"enabled", "backend", "bind_host", "bind_port", "webhook_path"}
 _POWER_KEYS = {"interval_seconds", "attention_voltage_v", "recovery_voltage_v"}
 _ENUMS = {
-    "runtime.hardware": {"virtual", "fusion-hat"},
-    "runtime.camera": {"none", "picamera2"},
+    "runtime.hardware": {"auto", "virtual", "host", "fusion-hat"},
+    "runtime.camera": {"auto", "none", "picamera2"},
     "runtime.cognition": {"none", "openai-responses"},
     "runtime.vision": {"none", "openai-responses"},
     "runtime.mode": {"run", "console", "diagnostics"},

@@ -40,8 +40,8 @@ Only the documented tables and keys are accepted:
 ```toml
 [runtime]
 profile = "mira"
-hardware = "virtual"
-camera = "picamera2"
+hardware = "auto"
+camera = "auto"
 cognition = "openai-responses"
 vision = "openai-responses"
 mode = "console"
@@ -86,8 +86,26 @@ scheduler_poll_seconds = 30
 or `remote`, and defaults to `workstation`. It is a fixed runtime interaction
 posture, not physical-presence evidence or a permission setting.
 
-`hardware`, `camera`, and `cognition` accept the same values as their existing
-CLI options. `runtime.mode` is exactly one of `run`, `console`, or `diagnostics`:
+`hardware` accepts `auto`, `host`, `fusion-hat`, or `virtual`. `auto` is the
+normal physical deployment selection: it uses the Fusion HAT backend when the
+existing driver sysfs interface is ready and otherwise uses the physical,
+capability-empty host backend. That fallback is expected and lets Mira's
+cognition, memory, Jobs, scheduling, SMS, console, platform monitoring, and
+network features run on a bare Raspberry Pi. `host` forces that host-only
+backend, `fusion-hat` remains fail-fast when explicitly requested, and
+`virtual` is the nonphysical development/simulation backend. The historical
+no-argument CLI default remains `virtual`; the checked-in Mira deployment file
+explicitly selects `auto`.
+
+`camera` accepts `auto`, `none`, or `picamera2`. `auto` narrowly probes the
+existing Picamera2 adapter and composes it only when a usable CSI camera can be
+opened; a missing package or camera resolves cleanly to no camera. The opened
+backend is retained for application startup rather than opening the device a
+second time. Explicit `picamera2` remains fail-fast, while `none` disables the
+camera. Camera resolution is independent of Fusion HAT resolution.
+
+`cognition` accepts the same values as its existing CLI option.
+`runtime.mode` is exactly one of `run`, `console`, or `diagnostics`:
 
 - `run` is the headless, long-lived runtime suitable for process supervisors;
 - `console` adds the interactive development/operator console; and

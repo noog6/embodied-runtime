@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from collections.abc import Sequence
+from contextlib import ExitStack
 import logging
 import math
 from pathlib import Path
@@ -32,6 +33,7 @@ from embodied_runtime.hardware.fusion_hat import (
     SERVO_PERIOD_US,
     normalize_pwm_channel,
 )
+from embodied_runtime.hardware.host import HostHardwareBackend
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.logging_config import configure_logging
 from embodied_runtime.run_history import (
@@ -130,10 +132,10 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     parser.add_argument("--profile", default=configurable_default("mira"),
                         help="robot profile identifier")
     parser.add_argument(
-        "--hardware", choices=("virtual", "fusion-hat"),
+        "--hardware", choices=("auto", "virtual", "host", "fusion-hat"),
         default=configurable_default("virtual")
     )
-    parser.add_argument("--camera", choices=("none", "picamera2"),
+    parser.add_argument("--camera", choices=("auto", "none", "picamera2"),
                         default=configurable_default("none"))
     parser.add_argument("--no-color", action="store_true",
                         help="disable ANSI colour in console and runtime logs")
@@ -316,13 +318,43 @@ def _elevenlabs_tts_speed(value: str) -> float:
 def build_hardware_backend(args: argparse.Namespace) -> HardwareBackend:
     if args.hardware == "fusion-hat":
         return FusionHatHardwareBackend()
-    return VirtualHardwareBackend()
+    if args.hardware == "host":
+        return HostHardwareBackend()
+    if args.hardware == "virtual":
+        return VirtualHardwareBackend()
+    fusion = FusionHatHardwareBackend()
+    if fusion.sysfs.is_ready:
+        resolved: HardwareBackend = fusion
+    else:
+        resolved = HostHardwareBackend()
+    LOGGER.info("[HARDWARE] configured=auto resolved=%s", resolved.identifier)
+    return resolved
 
 
 def build_camera_backend(args: argparse.Namespace) -> CameraBackend | None:
     if args.camera == "picamera2":
         return Picamera2CameraBackend()
+    if args.camera == "auto":
+        camera = Picamera2CameraBackend()
+        try:
+            camera.start()
+        except Picamera2UnavailableError as error:
+            LOGGER.info(
+                "[CAMERA] configured=auto resolved=none reason=%s",
+                type(error).__name__,
+            )
+            return None
+        LOGGER.info("[CAMERA] configured=auto resolved=%s", camera.identifier)
+        return camera
     return None
+
+
+def _stop_unowned_camera(camera: CameraBackend) -> None:
+    """Release a probed camera without replacing the composition failure."""
+    try:
+        camera.stop()
+    except BaseException:
+        LOGGER.exception("[CAMERA] pre_application_cleanup_failed")
 
 
 def build_cognition_backend(args: argparse.Namespace) -> TextCognitionBackend | None:
@@ -373,9 +405,15 @@ def build_platform_monitor_policy(
     return None
 
 
-def build_text_to_speech_provider(args: argparse.Namespace):
+def build_text_to_speech_provider(
+    args: argparse.Namespace, hardware: HardwareBackend | None = None,
+):
     """Build the selected physical speech adapter only when voice is available."""
-    if not (args.voice_enabled and args.hardware == "fusion-hat"):
+    fusion_selected = (
+        isinstance(hardware, FusionHatHardwareBackend)
+        if hardware is not None else args.hardware == "fusion-hat"
+    )
+    if not (args.voice_enabled and fusion_selected):
         return None
     if args.tts == "piper":
         return FusionHatPiperTTSProvider(model_path=args.piper_model)
@@ -495,101 +533,111 @@ async def _run_application(
 ) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
-    cognition = build_cognition_backend(args)
-    vision = build_visual_perception_backend(args)
-    application: RobotApplication | None = None
-    sms_service = None
-    if args.sms_enabled:
-        settings = TwilioSmsSettings.from_environment(
-            bind_host=args.sms_bind_host, bind_port=args.sms_bind_port,
-            webhook_path=args.sms_webhook_path,
+    with ExitStack() as composition_cleanup:
+        if args.camera == "auto" and camera is not None:
+            composition_cleanup.callback(_stop_unowned_camera, camera)
+        cognition = build_cognition_backend(args)
+        vision = build_visual_perception_backend(args)
+        application: RobotApplication | None = None
+        sms_service = None
+        if args.sms_enabled:
+            settings = TwilioSmsSettings.from_environment(
+                bind_host=args.sms_bind_host, bind_port=args.sms_bind_port,
+                webhook_path=args.sms_webhook_path,
+            )
+
+            async def request_sms_cognition(message: str, **kwargs: object) -> str:
+                assert application is not None
+                return await application.request_cognition(message, **kwargs)
+
+            sms_service = TwilioSmsService(settings, request_sms_cognition)
+        message_channel = ConsoleOperatorMessageChannel() if args.console else None
+        routes: list[OperatorDeliveryRoute] = []
+        if message_channel is not None:
+            routes.append(OperatorDeliveryRoute(
+                OperatorDeliveryDestination(
+                    "console", InteractionChannel.CONSOLE, "local plain-text console"
+                ), message_channel,
+            ))
+        if sms_service is not None:
+            routes.append(OperatorDeliveryRoute(
+                OperatorDeliveryDestination(
+                    "sms", InteractionChannel.REMOTE_TEXT, "configured operator SMS"
+                ), sms_service,
+            ))
+        delivery_routes = OperatorDeliveryRouteCatalog(routes)
+        notification_sink = message_channel or sms_service
+        persistent_memory = build_persistent_memory_store(args)
+        jobs = build_job_store(args)
+        try:
+            job_workspaces = build_job_workspace_store(args)
+        except BaseException:
+            if jobs is not None:
+                jobs.close()
+            if persistent_memory is not None:
+                persistent_memory.close()
+            raise
+        resources = ResourceArbiter()
+        application = RobotApplication(
+            profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
+                                                  initiative_enabled=args.initiative,
+                                                  initiative_platform_attention_enabled=args.initiative_platform_attention,
+                                                  initiative_actions_enabled=args.initiative_actions,
+                                                  initiative_messages_enabled=args.initiative_messages,
+                                                  initiative_continuation_enabled=args.initiative_continuation,
+                                                  initiative_goal_closure_enabled=args.initiative_goal_closure,
+                                                  jobs_auto_continue=args.jobs_auto_continue,
+                                                  jobs_heartbeat_seconds=args.jobs_heartbeat_seconds,
+                                                  jobs_max_auto_steps=args.jobs_max_auto_steps,
+                                                  jobs_scheduler_poll_seconds=args.jobs_scheduler_poll_seconds,
+                                                  voice_enabled=args.voice_enabled,
+                                                  voice_wake_word_enabled=args.voice_wake_word_enabled,
+                                                  voice_tts_mode=args.tts,
+                                                  cognition_backend=args.cognition,
+                                                  camera_backend=args.camera,
+                                                  diagnostics_enabled=True,
+                                                  runtime_mode=("diagnostics" if args.diagnostics
+                                                                else "console" if args.console
+                                                                else "run")),
+            body_backend=(VirtualBodyBackend()
+                          if isinstance(hardware, VirtualHardwareBackend) else None),
+            reflexes=(PresenceCenteringReflex(),),
+            camera_backend=camera,
+            cognition_backend=cognition,
+            visual_perception_backend=vision,
+            operator_message_sink=notification_sink,
+            operator_delivery_routes=delivery_routes,
+            platform_monitor_policy=build_platform_monitor_policy(args),
+            power_monitor_policy=PowerMonitorPolicy(
+                interval_seconds=args.power_interval_seconds,
+                attention_voltage_v=args.power_attention_voltage_v,
+                recovery_voltage_v=args.power_recovery_voltage_v,
+            ),
+            voice_provider=(FusionHatVoiceProvider()
+                            if args.voice_enabled
+                            and isinstance(hardware, FusionHatHardwareBackend) else None),
+            text_to_speech_provider=build_text_to_speech_provider(args, hardware),
+            voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
+            voice_wake_words=(args.voice_wake_words
+                              if args.voice_enabled and args.voice_wake_word_enabled
+                              and isinstance(hardware, FusionHatHardwareBackend) else None),
+            timezone_name=args.timezone,
+            persistent_memory_store=persistent_memory,
+            job_store=jobs,
+            job_workspace_store=job_workspaces,
+            run_history_evidence=history_evidence,
+            observability=observability,
+            interaction_environment=InteractionEnvironment(args.interaction_environment),
+            sms_service=sms_service,
+            resource_arbiter=resources,
+            earcon_player=EarconPlayer(
+                resources,
+                FusionHatEarconOutput()
+                if args.earcons_enabled
+                and isinstance(hardware, FusionHatHardwareBackend) else None,
+            ),
         )
-
-        async def request_sms_cognition(message: str, **kwargs: object) -> str:
-            assert application is not None
-            return await application.request_cognition(message, **kwargs)
-
-        sms_service = TwilioSmsService(settings, request_sms_cognition)
-    message_channel = ConsoleOperatorMessageChannel() if args.console else None
-    routes: list[OperatorDeliveryRoute] = []
-    if message_channel is not None:
-        routes.append(OperatorDeliveryRoute(
-            OperatorDeliveryDestination(
-                "console", InteractionChannel.CONSOLE, "local plain-text console"
-            ), message_channel,
-        ))
-    if sms_service is not None:
-        routes.append(OperatorDeliveryRoute(
-            OperatorDeliveryDestination(
-                "sms", InteractionChannel.REMOTE_TEXT, "configured operator SMS"
-            ), sms_service,
-        ))
-    delivery_routes = OperatorDeliveryRouteCatalog(routes)
-    notification_sink = message_channel or sms_service
-    persistent_memory = build_persistent_memory_store(args)
-    jobs = build_job_store(args)
-    try:
-        job_workspaces = build_job_workspace_store(args)
-    except BaseException:
-        if jobs is not None:
-            jobs.close()
-        if persistent_memory is not None:
-            persistent_memory.close()
-        raise
-    resources = ResourceArbiter()
-    application = RobotApplication(
-        profile, hardware, ApplicationOptions(startup_prompt=args.startup_prompt,
-                                              initiative_enabled=args.initiative,
-                                              initiative_platform_attention_enabled=args.initiative_platform_attention,
-                                              initiative_actions_enabled=args.initiative_actions,
-                                              initiative_messages_enabled=args.initiative_messages,
-                                              initiative_continuation_enabled=args.initiative_continuation,
-                                              initiative_goal_closure_enabled=args.initiative_goal_closure,
-                                              jobs_auto_continue=args.jobs_auto_continue,
-                                              jobs_heartbeat_seconds=args.jobs_heartbeat_seconds,
-                                              jobs_max_auto_steps=args.jobs_max_auto_steps,
-                                              jobs_scheduler_poll_seconds=args.jobs_scheduler_poll_seconds,
-                                              voice_enabled=args.voice_enabled,
-                                              voice_wake_word_enabled=args.voice_wake_word_enabled,
-                                              voice_tts_mode=args.tts,
-                                              cognition_backend=args.cognition,
-                                              camera_backend=args.camera,
-                                              diagnostics_enabled=True,
-                                              runtime_mode=("diagnostics" if args.diagnostics
-                                                            else "console" if args.console
-                                                            else "run")),
-        body_backend=VirtualBodyBackend(),
-        reflexes=(PresenceCenteringReflex(),),
-        camera_backend=camera,
-        cognition_backend=cognition,
-        visual_perception_backend=vision,
-        operator_message_sink=notification_sink,
-        operator_delivery_routes=delivery_routes,
-        platform_monitor_policy=build_platform_monitor_policy(args),
-        power_monitor_policy=PowerMonitorPolicy(
-            interval_seconds=args.power_interval_seconds,
-            attention_voltage_v=args.power_attention_voltage_v,
-            recovery_voltage_v=args.power_recovery_voltage_v,
-        ),
-        voice_provider=(FusionHatVoiceProvider() if args.voice_enabled and args.hardware == "fusion-hat" else None),
-        text_to_speech_provider=build_text_to_speech_provider(args),
-        voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
-        voice_wake_words=(args.voice_wake_words if args.voice_enabled and args.voice_wake_word_enabled and args.hardware == "fusion-hat" else None),
-        timezone_name=args.timezone,
-        persistent_memory_store=persistent_memory,
-        job_store=jobs,
-        job_workspace_store=job_workspaces,
-        run_history_evidence=history_evidence,
-        observability=observability,
-        interaction_environment=InteractionEnvironment(args.interaction_environment),
-        sms_service=sms_service,
-        resource_arbiter=resources,
-        earcon_player=EarconPlayer(
-            resources,
-            FusionHatEarconOutput()
-            if args.earcons_enabled and args.hardware == "fusion-hat" else None,
-        ),
-    )
+        composition_cleanup.pop_all()
     if args.diagnostics:
         try:
             await application.start()

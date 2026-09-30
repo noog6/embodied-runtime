@@ -339,7 +339,35 @@ class CameraCliTests(unittest.TestCase):
         self.assertEqual(args.camera, "none")
         self.assertIsNone(args.camera_test)
         selected = build_parser().parse_args(["--camera", "picamera2"])
-        self.assertIsInstance(build_camera_backend(selected), Picamera2CameraBackend)
+        backend = build_camera_backend(selected)
+        self.assertIsInstance(backend, Picamera2CameraBackend)
+        self.assertFalse(backend.is_running)
+
+    def test_auto_camera_keeps_usable_picamera_open_for_application_start(self):
+        camera = FakeCamera()
+        args = build_parser().parse_args(["--camera", "auto"])
+        with patch(
+            "embodied_runtime.cli.Picamera2CameraBackend", return_value=camera,
+        ):
+            self.assertIs(build_camera_backend(args), camera)
+        self.assertEqual(camera.starts, 1)
+        self.assertTrue(camera.is_running)
+
+    def test_auto_camera_resolves_unavailable_picamera_to_none(self):
+        camera = FakeCamera(fail_start=True)
+        args = build_parser().parse_args(["--camera", "auto"])
+        with patch(
+            "embodied_runtime.cli.Picamera2CameraBackend", return_value=camera,
+        ), patch.object(
+            camera, "start", side_effect=Picamera2DeviceUnavailableError("missing"),
+        ):
+            self.assertIsNone(build_camera_backend(args))
+
+    def test_none_camera_remains_absent(self):
+        args = build_parser().parse_args(["--camera", "none"])
+        with patch("embodied_runtime.cli.Picamera2CameraBackend") as constructor:
+            self.assertIsNone(build_camera_backend(args))
+        constructor.assert_not_called()
 
     def test_camera_test_validation(self):
         for argv in (["--camera", "picamera2", "--camera-test", "out.jpg"],
