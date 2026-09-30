@@ -172,6 +172,14 @@ Cognition authority and delivery semantics are separate concerns.
 
 Interaction identity is request-scoped grounding, not robot state.
 
+Operator dialogue from voice, SMS, and console shares one single-flight operator
+attention lane. It does not wait behind an autonomous/Job episode that is already
+thinking; both provider requests may be outstanding as independent asyncio tasks.
+A second operator request waits for the operator lane. Operator activity or a
+waiting operator suppresses admission of new autonomous episodes, but does not
+preempt an episode already running. Physical effects remain subject to the shared
+`ResourceArbiter` and are not made concurrent merely because semantic cognition is.
+
 Operator dialogue describes the current interaction itself. Autonomous cognition
 is not a notification interaction: it retains its attention identity, stimulus,
 goal binding, budgets, and lifecycle, but may have an outbound notification

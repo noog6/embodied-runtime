@@ -220,7 +220,7 @@ class JobContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.job_continuation.automatic_steps_remaining, 3)
         self.assertIsNone(app._active_job_work_task)
         self.assertEqual(len(app._cognition_backend.requests), 2)
-        app.episode_coordinator.close(app.episode_coordinator.current, "handled")
+        app.episode_coordinator.close(app.episode_coordinator.current_autonomous, "handled")
         await app.stop()
 
     async def test_started_automatic_provider_failure_consumes_step_and_stops(self):

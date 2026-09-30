@@ -106,6 +106,40 @@ class FirstRequestBlocksBackend(JobBackend):
         return "bounded response"
 
 
+class OverlappingOperatorBackend(JobBackend):
+    def __init__(self):
+        super().__init__("completed")
+        self.job_started = asyncio.Event()
+        self.operator_started = asyncio.Event()
+        self.release_operator = asyncio.Event()
+        self.release_job = asyncio.Event()
+        self.job_outstanding = False
+        self.operator_tools = None
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        self.requests.append((message, instructions, tuple(tool.name for tool in tools)))
+        if "kind: job_run_work" in (instructions or "") and not self.job_started.is_set():
+            self.job_outstanding = True
+            self.job_started.set()
+            await self.release_job.wait()
+            self.job_outstanding = False
+            return "job work"
+        if message == "what's your current voltage":
+            self.assert_job_outstanding = self.job_outstanding
+            self.operator_tools = tuple(tool.name for tool in tools)
+            self.operator_started.set()
+            await self.release_operator.wait()
+            return "operator answer"
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            await tool_executor(CognitionToolCall(
+                REPORT_JOB_OUTCOME_TOOL.name,
+                '{"disposition":"completed","summary":"done","report":null,'
+                '"readiness":null,"delay_seconds":null}',
+            ))
+        return "bounded response"
+
+
 class FakeTimer:
     def __init__(self):
         self.now = 100.0
@@ -174,12 +208,54 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(app.current_task, binding.task)
         self.assertIs(app.active_goal, app._current_task_binding.active_goal)
         self.assertEqual(app.working_memory.snapshot(), memory)
-        self.assertIsNone(app.episode_coordinator.current)
+        self.assertIsNone(app.episode_coordinator.current_autonomous)
         await asyncio.sleep(0)
         self.assertEqual(len(backend.requests), 2)
 
         await app.work_current_job_once()
         self.assertEqual(len(backend.requests), 4)
+        await app.stop()
+
+    async def test_operator_provider_request_overlaps_job_and_preserves_binding(self):
+        backend = OverlappingOperatorBackend()
+        job = self.store.create_job("Check system")
+        app = self.app(backend)
+        await app.start()
+        binding = app.start_job_run(job.id)
+        task_binding = app._current_task_binding
+        active_goal = app.active_goal
+
+        work = asyncio.create_task(app.work_current_job_once())
+        await backend.job_started.wait()
+        autonomous = app.episode_coordinator.current_autonomous
+        operator = asyncio.create_task(app.request_cognition(
+            "what's your current voltage", source="voice"
+        ))
+        await backend.operator_started.wait()
+
+        self.assertTrue(backend.assert_job_outstanding)
+        self.assertNotIn("set_goal", backend.operator_tools)
+        self.assertNotIn("resolve_goal", backend.operator_tools)
+        self.assertIs(app.current_job_run, binding)
+        self.assertIs(app._current_task_binding, task_binding)
+        self.assertIs(app.active_goal, active_goal)
+        self.assertIs(app.episode_coordinator.current_autonomous, autonomous)
+        self.assertEqual(app.episode_coordinator.current_operator.trigger_source, "voice")
+        self.assertNotEqual(
+            app.episode_coordinator.current_operator.id, autonomous.id
+        )
+        backend.release_operator.set()
+        self.assertEqual(await operator, "operator answer")
+        self.assertIs(app.current_job_run, binding)
+        self.assertIs(app._current_task_binding, task_binding)
+        self.assertIs(app.active_goal, active_goal)
+        self.assertIs(app._active_job_work_task, work)
+
+        backend.release_job.set()
+        outcome = await work
+        self.assertIs(outcome.disposition, JobWorkDisposition.COMPLETED)
+        self.assertIsNone(app.current_job_run)
+        self.assertIs(self.store.get_run(binding.run.id).status, JobRunStatus.COMPLETED)
         await app.stop()
 
     async def test_completed_uses_authoritative_job_and_task_terminal_path(self):
@@ -369,7 +445,7 @@ class JobExecutionTests(unittest.IsolatedAsyncioTestCase):
         app.episode_coordinator.close = record_close
         work = asyncio.create_task(app.work_current_job_once())
         await backend.started.wait()
-        self.assertEqual(app.episode_coordinator.current.trigger_kind, "job_run")
+        self.assertEqual(app.episode_coordinator.current_autonomous.trigger_kind, "job_run")
         await timer.advance()
         self.assertEqual(app.temporal_followup_status().state, "due_pending")
         backend.release.set()

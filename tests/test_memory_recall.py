@@ -167,7 +167,7 @@ class AutonomousRecallBackend(TextCognitionBackend):
     async def respond(self, message, *, instructions=None, tools=(),
                       tool_executor=None, **kwargs):
         self.requests.append((instructions, tuple(tool.name for tool in tools)))
-        self.episode_ids.append(self.app.episode_coordinator.current.id)
+        self.episode_ids.append(self.app.episode_coordinator.current_autonomous.id)
         if len(self.requests) == 1:
             if self.replace_goal:
                 self.app.resolve_goal("cancelled")
@@ -346,7 +346,7 @@ class MemoryRecallIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("acquisitions_remaining: 1", backend.requests[1][0])
         self.assertEqual(tuple(tool.name for tool in app.effect_tools()),
                          initial_effect_tools)
-        self.assertEqual(app.episode_coordinator.current, episode)
+        self.assertEqual(app.episode_coordinator.current_autonomous, episode)
         self.assertEqual(app.episode_coordinator._next_id, 2)
         self.assertEqual(store.exact_lookups, 1)
         self.assertEqual(store.list_memories_for_entity(gordon.id), before)
@@ -377,7 +377,7 @@ class MemoryRecallIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("expected active goal is no longer current",
                       backend.results[0].output)
         self.assertEqual(backend.episode_ids, [episode.id])
-        self.assertEqual(app.episode_coordinator.current, episode)
+        self.assertEqual(app.episode_coordinator.current_autonomous, episode)
         app.episode_coordinator.close(episode, "stale_goal")
         await app.stop()
 

@@ -320,7 +320,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         await app.start(); goal = app.set_goal("goal"); await self.schedule(app)
         operator = asyncio.create_task(app.request_cognition("hold"))
         await backend.started.wait()
-        self.assertEqual(app.episode_coordinator.current.id, 1)
+        self.assertEqual(app.episode_coordinator.current_operator.id, 1)
         await self.timer.advance()
         self.assertEqual(app.temporal_followup_status().state, "due_pending")
         self.assertEqual(len(backend.requests), 1)
@@ -333,7 +333,7 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
                          (2, "temporal_followup_due", goal.id))
         await app.stop()
 
-    async def test_due_is_not_claimed_in_operator_waiter_handoff_gap(self):
+    async def test_due_is_not_claimed_while_autonomous_lane_is_active(self):
         events = HoldingEventBus()
         backend = FirstRequestBlocksBackend()
         app = self.make_app(backend=backend, events=events)
@@ -351,33 +351,20 @@ class TemporalTests(unittest.IsolatedAsyncioTestCase):
         await backend.started.wait()
         operator = asyncio.create_task(app.request_cognition("operator"))
         await asyncio.sleep(0)
-        self.assertTrue(app.episode_coordinator.operator_waiting)
+        self.assertFalse(app.episode_coordinator.operator_waiting)
+        await operator
         await self.timer.advance()
         due = events.temporal_events[0]
-
-        release_waiter = asyncio.Event()
-        original_notify = app.episode_coordinator._notify_idle
-
-        async def held_notify():
-            await release_waiter.wait()
-            await original_notify()
-
-        app.episode_coordinator._notify_idle = held_notify
-        backend.release.set()
-        while app.episode_coordinator.current is not None:
-            await asyncio.sleep(0)
-        self.assertTrue(app.episode_coordinator.operator_waiting)
         await app.attention._on_temporal_event(due)
         self.assertEqual(app.temporal_followup_status().state, "due_pending")
         self.assertIs(app.temporal.pending.goal, goal)
-        release_waiter.set()
-        await operator
-        while app.attention.status().state == "in_flight":
+        backend.release.set()
+        while len(backend.requests) < 3 or app.attention.status().state == "in_flight":
             await asyncio.sleep(0)
         self.assertEqual(len(backend.requests), 3)
         self.assertEqual(backend.requests[1][0], "operator")
         self.assertEqual([(episode.id, episode.trigger_kind) for episode in closed], [
-            (1, "test"), (2, "operator_utterance"), (3, "temporal_followup_due")
+            (2, "operator_utterance"), (1, "test"), (3, "temporal_followup_due")
         ])
         self.assertEqual(app.episode_coordinator.last.id, 3)
         self.assertEqual(app.episode_coordinator.last.trigger_kind, "temporal_followup_due")
