@@ -296,7 +296,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  job start JOB<n>               Start a JobRun and bounded Task\n"
             "  job schedule JOB<n> [daily HH:MM [--timezone ZONE]]\n"
             "  job unschedule JOB<n>          Remove a Job's daily schedule\n"
-            "  job work                       Perform one bounded Job work episode\n"
+            "  job work [RUN<n>]              Perform one bounded Job work episode\n"
             "  job current                    Show current JobRun and Task\n"
             "  job complete [summary]         Complete current JobRun\n"
             "  job fail <error-summary>       Fail current JobRun\n"

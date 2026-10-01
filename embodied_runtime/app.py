@@ -2558,7 +2558,7 @@ class RobotApplication:
         if parked is not None and current.task.status is not TaskStatus.PAUSED:
             self._clear_job_continuation("binding_changed")
             return
-        context = self.current_job_execution_context
+        context = self._job_execution_context.get() or self.current_job_execution_context
         if context is not None and context.active_work_task is not None:
             self._log_job_continuation_deferred(continuation, "work_active")
             return
@@ -2734,7 +2734,10 @@ class RobotApplication:
             raise RuntimeError("No cognition backend is configured")
         if self.jobs is None:
             raise RuntimeError("Jobs persistence is disabled")
-        context = context or self.current_job_execution_context or self._compat_job_context()
+        # An asyncio Job cognition task's ContextVar is execution authority.
+        # Foreground remains only the fallback compatibility view for operator calls.
+        context = (context or self._job_execution_context.get()
+                   or self.current_job_execution_context or self._compat_job_context())
         binding = None if context is None else context.binding
         if binding is None:
             raise RuntimeError("no current JobRun")
@@ -5885,11 +5888,17 @@ class RobotApplication:
             raise RuntimeError("workspace_persistence_unavailable")
         if job_binding is None:
             raise RuntimeError("stale_job_work_binding")
+        binding, task_binding, goal = job_binding
+        # The captured binding belongs to one exact execution context.  Foreground
+        # selection is only a compatibility/operator projection and may change while
+        # this cognition task is awaiting a tool result.
+        context = self._context_for_run(binding.run.id)
+        if context is None or context.binding is not binding:
+            raise RuntimeError("stale_job_work_binding")
         try:
-            current = self._validate_job_work_preconditions()
+            current = self._validate_job_work_preconditions(context)
         except RuntimeError as error:
             raise RuntimeError("stale_job_work_binding") from error
-        binding, task_binding, goal = job_binding
         if (current[0] is not binding or current[1] is not task_binding
                 or current[2] is not goal or expected_goal is not goal
                 or not self._job_work_binding_matches(binding, task_binding, goal)):

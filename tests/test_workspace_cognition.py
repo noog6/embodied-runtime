@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,6 +88,96 @@ class AutomaticWorkspaceBackend(TextCognitionBackend):
         return "work"
 
 
+class ConcurrentWorkspaceBackend(TextCognitionBackend):
+    """Exercise Workspace tools while exact Job cognition tasks are suspended."""
+
+    identifier = "concurrent-workspace-test"
+
+    def __init__(self, contents):
+        self.contents = contents
+        self.calls = {source: 0 for source in contents}
+        self.read = {source: asyncio.Event() for source in contents}
+        self.release = {source: asyncio.Event() for source in contents}
+        self.results = {source: [] for source in contents}
+        self.after_write = None
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        text = instructions or ""
+        source = next((item for item in self.contents if f"source: {item}" in text), None)
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            await tool_executor(CognitionToolCall(
+                REPORT_JOB_OUTCOME_TOOL.name, json.dumps({
+                    "disposition": "completed", "summary": "workspace isolated",
+                    "report": None, "readiness": None, "delay_seconds": None,
+                }),
+            ))
+            return "outcome"
+        if source is None:
+            return "ok"
+        call = self.calls[source]
+        self.calls[source] += 1
+        if call == 0:
+            result = await tool_executor(CognitionToolCall(
+                "workspace_read", json.dumps({"path": "state.txt", "offset_chars": 0})))
+            self.results[source].append(json.loads(result.output))
+            self.read[source].set()
+            await self.release[source].wait()
+            return "read"
+        if call == 1:
+            result = await tool_executor(CognitionToolCall(
+                "workspace_write", json.dumps({
+                    "path": "state.txt", "mode": "replace",
+                    "content": self.contents[source],
+                })))
+            self.results[source].append(json.loads(result.output))
+            if self.after_write is not None:
+                self.after_write(source)
+            return "written"
+        return "done"
+
+
+class HeartbeatWorkspaceBackend(TextCognitionBackend):
+    identifier = "heartbeat-workspace-test"
+
+    def __init__(self, contents):
+        self.contents = contents
+        self.work_calls = {source: 0 for source in contents}
+        self.outcomes = {source: 0 for source in contents}
+        self.results = {source: [] for source in contents}
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None):
+        text = instructions or ""
+        source = next(item for item in self.contents if f"source: {item}" in text)
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            count = self.outcomes[source]
+            self.outcomes[source] += 1
+            await tool_executor(CognitionToolCall(
+                REPORT_JOB_OUTCOME_TOOL.name, json.dumps({
+                    "disposition": "continue" if count == 0 else "completed",
+                    "summary": "continue" if count == 0 else "done",
+                    "report": None, "readiness": "ready" if count == 0 else None,
+                    "delay_seconds": None,
+                }),
+            ))
+            return "outcome"
+        count = self.work_calls[source]
+        self.work_calls[source] += 1
+        if count == 1:
+            result = await tool_executor(CognitionToolCall(
+                "workspace_read", json.dumps({"path": "state.txt", "offset_chars": 0})))
+            self.results[source].append(json.loads(result.output))
+            return "read"
+        if count == 2:
+            result = await tool_executor(CognitionToolCall(
+                "workspace_write", json.dumps({"path": "state.txt", "mode": "replace",
+                                                "content": self.contents[source]})))
+            self.results[source].append(json.loads(result.output))
+            return "written"
+        return "initial"
+
+
 class ScheduledProgressBackend(TextCognitionBackend):
     """Script the live two-episode report case, optionally retrying the create."""
 
@@ -148,10 +239,12 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
                 pass
         self.temp.cleanup()
 
-    def app(self, backend=None, *, jobs=True, workspaces=True, initiative=False):
+    def app(self, backend=None, *, jobs=True, workspaces=True, initiative=False,
+            capacity=1):
         return RobotApplication(
             RobotProfile("test", "Test"), VirtualHardwareBackend(),
-            ApplicationOptions(initiative_enabled=initiative),
+            ApplicationOptions(initiative_enabled=initiative,
+                               jobs_max_concurrent_work=capacity),
             platform_provider=Platform(), cognition_backend=backend or ScriptedBackend(),
             job_store=self.jobs if jobs else None,
             job_workspace_store=self.workspaces if workspaces else None,
@@ -281,6 +374,107 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
                                             "content": "x"})),
             job_binding=captured, expected_goal=captured[2])
         self.assertEqual(json.loads(stale.output)["reason"], "stale_job_work_binding")
+
+    async def test_inflight_job_workspace_authority_survives_foreground_change(self):
+        jobs = [self.jobs.create_job(name) for name in ("A", "B")]
+        for job in jobs:
+            self.workspaces.write(job.id, "state.txt", "create", job.name)
+        source_a = None
+        backend = ConcurrentWorkspaceBackend({})
+        app = self.app(backend, initiative=True, capacity=2)
+        await app.start()
+        binding_a = app.start_job_run(jobs[0].id)
+        source_a = f"JOB{binding_a.job.id}/RUN{binding_a.run.id}"
+        backend.contents[source_a] = "A updated"
+        backend.calls[source_a] = 0
+        backend.read[source_a] = asyncio.Event()
+        backend.release[source_a] = asyncio.Event()
+        backend.results[source_a] = []
+        context_a = app._context_for_run(binding_a.run.id)
+        identity = (context_a, context_a.binding, context_a.task_binding,
+                    context_a.task_binding.active_goal)
+        identity_after_write = []
+        backend.after_write = lambda _: identity_after_write.append((
+            context_a, context_a.binding, context_a.task_binding,
+            context_a.task_binding.active_goal,
+        ))
+
+        work_a = asyncio.create_task(app.work_job_run_once(binding_a.run.id))
+        await backend.read[source_a].wait()
+        binding_b = app.start_job_run(jobs[1].id)
+        self.assertEqual(app.current_job_execution_context.run_id, binding_b.run.id)
+        backend.release[source_a].set()
+        outcome = await work_a
+
+        self.assertEqual((outcome.job_id, outcome.run_id),
+                         (binding_a.job.id, binding_a.run.id))
+        self.assertEqual([result["status"] for result in backend.results[source_a]],
+                         ["ok", "applied"])
+        self.assertEqual(self.workspaces.read(jobs[0].id, "state.txt").content,
+                         "A updated")
+        self.assertEqual(self.workspaces.read(jobs[1].id, "state.txt").content, "B")
+        self.assertEqual(identity_after_write, [identity])
+
+    async def test_simultaneous_job_workspaces_remain_isolated_from_foreground(self):
+        jobs = [self.jobs.create_job(name) for name in ("A", "B")]
+        for job in jobs:
+            self.workspaces.write(job.id, "state.txt", "create", job.name)
+        app = self.app(initiative=True, capacity=2)
+        await app.start()
+        bindings = [app.start_job_run(job.id) for job in jobs]
+        sources = [f"JOB{item.job.id}/RUN{item.run.id}" for item in bindings]
+        backend = ConcurrentWorkspaceBackend(dict(zip(sources, ("A updated", "B updated"))))
+        app._cognition_backend = backend
+        tasks = [asyncio.create_task(app.work_job_run_once(item.run.id))
+                 for item in bindings]
+        await asyncio.gather(*(backend.read[source].wait() for source in sources))
+        app._foreground_job_run_id = bindings[0].run.id
+        for event in backend.release.values():
+            event.set()
+        outcomes = await asyncio.gather(*tasks)
+
+        self.assertEqual({(item.job_id, item.run_id) for item in outcomes},
+                         {(item.job.id, item.run.id) for item in bindings})
+        for job, source, expected in zip(jobs, sources, ("A updated", "B updated")):
+            self.assertEqual([result["status"] for result in backend.results[source]],
+                             ["ok", "applied"])
+            self.assertEqual(backend.results[source][0]["artifact"]["content"], job.name)
+            self.assertEqual(self.workspaces.read(job.id, "state.txt").content, expected)
+
+    async def test_heartbeat_continuations_keep_exact_workspace_authority(self):
+        jobs = [self.jobs.create_job(name) for name in ("A", "B")]
+        for job in jobs:
+            self.workspaces.write(job.id, "state.txt", "create", job.name)
+        app = RobotApplication(
+            RobotProfile("test", "Test"), VirtualHardwareBackend(),
+            ApplicationOptions(initiative_enabled=True, jobs_auto_continue=True,
+                               jobs_max_concurrent_work=2),
+            platform_provider=Platform(), cognition_backend=ScriptedBackend(),
+            job_store=self.jobs, job_workspace_store=self.workspaces,
+            wall_clock=lambda: datetime(2026, 9, 26, 12, tzinfo=UTC),
+            job_continuation_sleep=lambda _: asyncio.Event().wait(),
+        )
+        await app.start()
+        bindings = [app.start_job_run(job.id) for job in jobs]
+        sources = [f"JOB{item.job.id}/RUN{item.run.id}" for item in bindings]
+        backend = HeartbeatWorkspaceBackend(dict(zip(sources, ("A heartbeat", "B heartbeat"))))
+        app._cognition_backend = backend
+        await asyncio.gather(*(app.work_job_run_once(item.run.id) for item in bindings))
+        contexts = [app._context_for_run(item.run.id) for item in bindings]
+        self.assertTrue(all(context.continuation is not None for context in contexts))
+
+        app._foreground_job_run_id = bindings[1].run.id
+        app._offer_job_continuation()
+        tasks = [context.active_work_task for context in contexts]
+        self.assertTrue(all(task is not None for task in tasks))
+        self.assertNotEqual(app.current_job_execution_context.run_id, bindings[0].run.id)
+        await asyncio.gather(*tasks)
+
+        for job, source, expected in zip(jobs, sources,
+                                         ("A heartbeat", "B heartbeat")):
+            self.assertEqual([result["status"] for result in backend.results[source]],
+                             ["ok", "applied"])
+            self.assertEqual(self.workspaces.read(job.id, "state.txt").content, expected)
 
     def test_workspace_acquisitions_are_not_progress_bases_and_ordinals_stay_fixed(self):
         initiative = InitiativeOutcome("done", acquisitions=(
