@@ -195,12 +195,17 @@ and bounded TaskGoal are supplied as explicit authoritative cognition context.
 No synthetic operator utterance or WorkingMemory conversation turn is created.
 The full Job description remains separate from the short TaskGoal.
 
-The episode occupies the single autonomous semantic-execution lane and uses the
-existing bounded initiative machinery, including its acquisition, effect,
-continuation, resource, and Task-owned camera authority. One already-running Job
-episode may coexist with one operator episode; operator activity does not preempt
-the Job merely because it arrives. `ResourceArbiter` remains authoritative for
-genuinely exclusive physical resources. Job work cannot use generic
+Job cognition uses a bounded set of independent semantic-execution slots, sized
+by `jobs.max_concurrent_work`, and uses the existing bounded initiative machinery,
+including its acquisition, effect, continuation, resource, and Task-owned camera
+authority. Each live occurrence owns an exact `JobExecutionContext` containing
+its JobRun, Task, Job-bound ActiveGoal, continuation, progress, active work task,
+Workspace authority, and Task-derived resource identity. Multiple different Jobs
+may execute cognition concurrently; another activation of the same Job still
+coalesces to its one active occurrence. Operator cognition remains independent of
+Job capacity and does not preempt already-running Job work. General autonomous
+attention remains conservatively separate. `ResourceArbiter` remains authoritative
+for genuinely exclusive physical and effect resources. Job work cannot use generic
 `complete_goal`; its final decision instead passes through a separate
 `report_job_outcome` tool and an exact Job/JobRun/Task/ActiveGoal binding check.
 Only an accepted `completed` or `failed` report delegates to the authoritative
@@ -221,11 +226,13 @@ invocation. There is no Job-owned resource authority.
 
 ## Cooperative closed-loop continuation
 
-Phase 4 optionally gives the exact, explicitly started current JobRun another
-bounded work opportunity on a runtime heartbeat. This is closed-loop
+Phase 4 optionally gives an exact live JobRun context another bounded work
+opportunity on a runtime heartbeat. Manually started, trigger-started, and
+schedule-started occurrences may use this policy when configured. This is closed-loop
 continuation, not Job scheduling: scheduling would decide when to start a new
 JobRun, while continuation only offers another turn to the already-bound
-JobRun/Task. A manual `continue` arms a volatile grant of `max_auto_steps`.
+JobRun/Task and never creates a new occurrence. A `continue` outcome arms that
+context's volatile grant of `max_auto_steps`.
 Each accepted heartbeat consumes one step and schedules one separately owned,
 finite invocation of the same Job executor. A further `continue` yields fully
 before the next heartbeat; there is no cognition-owned or recursive loop.
@@ -233,7 +240,8 @@ The automatic step is accepted, and its budget charged, only after the attention
 coordinator grants the autonomous lane to the Job episode. Operator activity or
 an operator waiter prevents admission of new autonomous Job work and leaves the
 grant unchanged. An autonomous Job episode that has already started is not
-preempted when an operator arrives.
+preempted when an operator arrives. Readiness and execution remain bound to the
+exact context and the configured bounded Job work capacity.
 
 The volatile record binds Job ID, JobRun ID, and Task UUID, and records
 `armed` or `awaiting_operator`, the remaining step count, and last summary. It
@@ -243,10 +251,11 @@ operator activity or waiters, and another active autonomous episode defer withou
 consuming a step. Operator attention wins before automatic work starts; an
 already-started finite Job episode may continue beside it.
 
-Jobs themselves remain single-flight in Phase 1. The current JobRun, Task,
-TaskGoal, Job-bound ActiveGoal, continuation, Workspace binding, and
-`_active_job_work_task` remain singular. Per-JobRun execution contexts and
-Job-vs-Job concurrency are deferred to a later phase.
+Foreground/current Job, Task, and goal APIs remain compatibility and inspection
+views rather than execution authority. Exact JobRun, Task, ActiveGoal,
+continuation, progress, and Workspace authority remain context-local throughout
+an asynchronous episode. Phase 3B trigger fan-out, multiple trigger owners, and
+multi-Job selection from one activation remain deferred.
 
 Budget exhaustion leaves the Task and JobRun running in `awaiting_operator`;
 an explicit `job work` can grant a fresh burst. An automatic provider failure
@@ -312,8 +321,8 @@ gate used by the heartbeat. That gate still decides whether work starts based on
 the exact occurrence binding, lifecycle, Task state, authority and budget,
 operator priority, attention, and active-work ownership. A waiting occurrence stays
 durably `RUNNING`, but its exact volatile Job/Run/Task continuation is parked and its
-Task is paused, so it does not own the single execution slot. An unrelated due Job
-may use that slot; Job cognition remains single-flight. Event satisfaction
+Task is paused, so it does not own a Job cognition slot. An unrelated eligible Job
+may use any free bounded slot. Event satisfaction
 does not itself run cognition or consume budget. The periodic heartbeat remains
 the fallback for reconciliation and retry after temporary contention. The
 projected `present` boolean is a bounded runtime-authored fact; it establishes
@@ -677,9 +686,12 @@ not independent mutable owners. A parked context retains the exact paused Task
 and continuation but owns no active attention episode, provider request, or
 physical-resource lease.
 
-The context registry does **not** imply concurrent Jobs. Phase 2 remains
-Job-cognition-single-flight and retains the existing single parked slot. The
-operator lane remains independent. Shared WorkingMemory and persistent memory
-remain application-level sources; contexts neither contain nor create private
-conversation histories or semantic-memory stores. Workspace authority remains
-captured from the exact Job context for each bounded cognition episode.
+The context registry is the authority for bounded Phase-3A Job-vs-Job cognition
+concurrency. Runnable and parked contexts consume no work slot until their exact
+asyncio cognition task starts. The operator lane remains independent, while
+general autonomous initiative remains conservative and separate. Shared
+WorkingMemory and persistent memory remain application-level sources; contexts
+neither contain nor create private conversation histories or semantic-memory
+stores. Workspace authority remains captured from the exact Job context for each
+bounded cognition episode. Phase 3B trigger fan-out and multiple trigger owners
+remain deferred.

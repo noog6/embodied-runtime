@@ -6,7 +6,9 @@ from embodied_runtime.app import (
     COMPLETE_GOAL_TOOL, ORIENT_BODY_TOOL, INSPECT_SELF_TOOL, DIAGNOSTIC_TOOLS, SCHEDULE_FOLLOWUP_TOOL,
     ApplicationOptions, RobotApplication,
 )
-from embodied_runtime.attention import ACTION_INITIATIVE_REQUEST, INITIATIVE_REQUEST
+from embodied_runtime.attention import (
+    ACTION_INITIATIVE_REQUEST, INITIATIVE_REQUEST, AttentionEpisodeCoordinator,
+)
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import (
     CognitionError, CognitionToolCall, TextCognitionBackend,
@@ -448,3 +450,35 @@ class AttentionTests(unittest.IsolatedAsyncioTestCase):
 
 async def _record(event, sources):
     sources.append(event.source)
+
+class ConcurrentJobAttentionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capacity_thirty_two_admits_exactly_thirty_two_jobs(self):
+        coordinator = AttentionEpisodeCoordinator(max_concurrent_job_episodes=32)
+        episodes = tuple(
+            coordinator.try_start_job(f"JOB{index}/RUN{index}", "work", index)
+            for index in range(1, 33)
+        )
+        self.assertTrue(all(episode is not None for episode in episodes))
+        self.assertEqual(len({episode.id for episode in episodes}), 32)
+        self.assertIsNone(coordinator.try_start_job("JOB33/RUN33", "work", 33))
+        for episode in episodes:
+            coordinator.close(episode, "handled")
+
+    async def test_bounded_job_episodes_overlap_and_operator_is_independent(self):
+        coordinator = AttentionEpisodeCoordinator(max_concurrent_job_episodes=2)
+        first = coordinator.try_start_job("JOB1/RUN1", "first", 1)
+        second = coordinator.try_start_job("JOB2/RUN2", "second", 2)
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first.id, second.id)
+        self.assertIsNone(coordinator.current_autonomous)
+        self.assertEqual(coordinator.current_autonomous_episodes, (first, second))
+        self.assertIsNone(coordinator.try_start_job("JOB3/RUN3", "third", 3))
+        operator = await coordinator.start_operator("test", "question")
+        self.assertNotIn(operator, coordinator.current_autonomous_episodes)
+        coordinator.close(first, "handled")
+        self.assertEqual(coordinator.current_autonomous_episodes, (second,))
+        coordinator.close(operator, "handled")
+        self.assertEqual(coordinator.current_autonomous_episodes, (second,))
+        coordinator.close(second, "handled")
+        self.assertFalse(coordinator.any_active)

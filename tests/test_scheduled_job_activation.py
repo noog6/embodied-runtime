@@ -109,7 +109,7 @@ class ScheduledJobActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.list_runs(waiting.id)), 1)
         await app.stop()
 
-    async def test_second_dormant_wait_fails_without_replacing_parked_occurrence(self):
+    async def test_two_dormant_waits_remain_context_local(self):
         backend = ReadinessBackend((
             {"disposition": "continue", "summary": "A waits",
              "readiness": "wait_for_event", "delay_seconds": None,
@@ -133,14 +133,17 @@ class ScheduledJobActivationTests(unittest.IsolatedAsyncioTestCase):
         await app._offer_scheduled_job()
         await app._active_job_work_task
         run_b = self.store.list_runs(job_b.id)[0]
-        self.assertIs(run_b.status, JobRunStatus.FAILED)
-        self.assertIn("parked slot occupied", run_b.error_summary)
-        self.assertIs(app.job_continuation, original_continuation)
-        self.assertEqual(app._parked_job_run.binding.run.id, original.run.id)
+        self.assertIs(run_b.status, JobRunStatus.RUNNING)
+        contexts = {context.run_id: context for context in app.job_execution_contexts}
+        self.assertIs(contexts[original.run.id].continuation, original_continuation)
+        self.assertEqual(contexts[run_b.id].continuation.last_summary, "B also waits")
+        self.assertTrue(all(context.execution_state == "parked"
+                            for context in contexts.values()))
+        self.assertIsNone(app._parked_job_run)
         self.assertIsNone(app._current_job_run)
 
         await app._on_power_recovered(type("Recovery", (), {
-            "timestamp_ns": app.job_continuation.event_armed_after_ns + 1,
+            "timestamp_ns": original_continuation.event_armed_after_ns + 1,
             "battery_voltage_v": 7.7,
         })())
         await app._active_job_work_task
@@ -225,7 +228,7 @@ class ScheduledJobActivationTests(unittest.IsolatedAsyncioTestCase):
                     app.clear_goal()
         await app.stop()
 
-    async def test_current_job_is_a_global_deferral(self):
+    async def test_unrelated_context_does_not_globally_defer_due_schedule(self):
         current = self.store.create_job("Current")
         due = self.store.create_job("Due")
         app = self.app(JobBackend())
@@ -234,8 +237,11 @@ class ScheduledJobActivationTests(unittest.IsolatedAsyncioTestCase):
         self.store.set_schedule(due.id, "01:00", "America/Toronto")
         self.clock.value = datetime.fromisoformat("2026-09-21T03:00:00-04:00")
         await app._offer_scheduled_job()
-        self.assertEqual(self.store.list_runs(due.id), ())
-        self.assertIsNone(self.store.get_schedule(due.id).last_started_local_date)
+        run, = self.store.list_runs(due.id)
+        self.assertIs(run.status, JobRunStatus.RUNNING)
+        self.assertEqual(self.store.get_schedule(due.id).last_started_local_date,
+                         "2026-09-21")
+        await app._context_for_run(run.id).active_work_task
         await app.stop()
 
     async def test_cognition_unavailable_does_not_consume_date(self):

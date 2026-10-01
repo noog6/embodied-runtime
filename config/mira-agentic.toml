@@ -44,6 +44,7 @@ database_path = "../data/jobs.sqlite3"
 auto_continue = true
 heartbeat_seconds = 30
 max_auto_steps = 3
+max_concurrent_work = 4
 
 [power]
 interval_seconds = 30.0

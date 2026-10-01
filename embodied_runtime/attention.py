@@ -82,16 +82,21 @@ class AttentionEpisode:
 
 
 class AttentionEpisodeCoordinator:
-    """Own globally unique episodes in two independently single-flight lanes."""
+    """Own globally unique operator, general-autonomy, and bounded Job episodes."""
 
     def __init__(self, monotonic_clock: Callable[[], float] = monotonic,
-                 observability: RunObservability | None = None) -> None:
+                 observability: RunObservability | None = None,
+                 max_concurrent_job_episodes: int = 1) -> None:
+        if not 1 <= max_concurrent_job_episodes <= 256:
+            raise ValueError("max_concurrent_job_episodes must be from 1 to 256")
         self._next_id = 1
         self._current: dict[AttentionLane, AttentionEpisode | None] = {
             "operator": None,
             "autonomous": None,
         }
         self._last: AttentionEpisode | None = None
+        self._job_episodes: dict[int, AttentionEpisode] = {}
+        self._max_concurrent_job_episodes = max_concurrent_job_episodes
         self._last_completed_monotonic: float | None = None
         self._monotonic = monotonic_clock
         self._operator_waiters = 0
@@ -104,14 +109,26 @@ class AttentionEpisodeCoordinator:
 
     @property
     def current_autonomous(self) -> AttentionEpisode | None:
-        return self._current["autonomous"]
+        episodes = self.current_autonomous_episodes
+        return episodes[0] if len(episodes) == 1 else None
+
+    @property
+    def current_autonomous_episodes(self) -> tuple[AttentionEpisode, ...]:
+        general = self._current["autonomous"]
+        return (() if general is None else (general,)) + tuple(
+            self._job_episodes.values()
+        )
+
+    @property
+    def general_autonomous_active(self) -> bool:
+        return self._current["autonomous"] is not None
 
     def current_for_lane(self, lane: AttentionLane) -> AttentionEpisode | None:
         return self._current[lane]
 
     @property
     def any_active(self) -> bool:
-        return self.current_operator is not None or self.current_autonomous is not None
+        return self.current_operator is not None or bool(self.current_autonomous_episodes)
 
     @property
     def last(self) -> AttentionEpisode | None:
@@ -128,10 +145,24 @@ class AttentionEpisodeCoordinator:
     def try_start(self, trigger_kind: str, trigger_source: str, concern: str,
                   goal_id: int | None) -> AttentionEpisode | None:
         """Start autonomous work only when idle and no operator is waiting."""
-        if (self.current_autonomous is not None or self.current_operator is not None
+        if (self.current_autonomous_episodes or self.current_operator is not None
                 or self._operator_waiters):
             return None
         return self._start("autonomous", trigger_kind, trigger_source, concern, goal_id)
+
+    def try_start_job(self, trigger_source: str, concern: str,
+                      goal_id: int) -> AttentionEpisode | None:
+        """Claim one bounded Job episode without broadening general autonomy."""
+        if (self._current["autonomous"] is not None
+                or self.current_operator is not None or self._operator_waiters
+                or len(self._job_episodes) >= self._max_concurrent_job_episodes):
+            return None
+        episode = self._start(
+            "autonomous", "job_run", trigger_source, concern, goal_id,
+            install_current=False,
+        )
+        self._job_episodes[episode.id] = episode
+        return episode
 
     async def start_operator(self, trigger_source: str, concern: str) -> AttentionEpisode:
         """Wait fairly enough to serialize an explicit operator request."""
@@ -146,13 +177,14 @@ class AttentionEpisodeCoordinator:
                 self._operator_waiters -= 1
 
     def _start(self, lane: AttentionLane, trigger_kind: str, trigger_source: str, concern: str,
-               goal_id: int | None) -> AttentionEpisode:
+               goal_id: int | None, *, install_current: bool = True) -> AttentionEpisode:
         episode = AttentionEpisode(
             self._next_id, trigger_kind, trigger_source, concern, goal_id, lane,
             state="active",
         )
         self._next_id += 1
-        self._current[lane] = episode
+        if install_current:
+            self._current[lane] = episode
         goal = "none" if goal_id is None else f"G{goal_id}"
         LOGGER.info("[ATTENTION] episode=E%s lane=%s status=started trigger=%s source=%s goal=%s",
                     episode.id, lane, trigger_kind, trigger_source, goal)
@@ -174,10 +206,14 @@ class AttentionEpisodeCoordinator:
 
     def close(self, episode: AttentionEpisode,
               reason: EpisodeCompletionReason) -> AttentionEpisode:
-        if self._current[episode.lane] is not episode:
+        is_job = self._job_episodes.get(episode.id) is episode
+        if self._current[episode.lane] is not episode and not is_job:
             return dataclass_replace(episode, state="closed", completion_reason=reason)
         closed = dataclass_replace(episode, state="closed", completion_reason=reason)
-        self._current[episode.lane] = None
+        if is_job:
+            self._job_episodes.pop(episode.id, None)
+        else:
+            self._current[episode.lane] = None
         self._last = closed
         self._last_completed_monotonic = self._monotonic()
         goal = "none" if episode.goal_id is None else f"G{episode.goal_id}"
@@ -577,7 +613,7 @@ class GoalAttentionController:
                 "reason=goal_changed"
             )
             return
-        if (self.coordinator.current_autonomous is not None
+        if (bool(self.coordinator.current_autonomous_episodes)
                 or self.coordinator.current_operator is not None
                 or self.coordinator.operator_waiting):
             LOGGER.info(
@@ -603,7 +639,7 @@ class GoalAttentionController:
     ) -> None:
         if not self._is_running() or not self._backend_available or not self._has_active_goal():
             return
-        if (self.coordinator.current_autonomous is not None
+        if (bool(self.coordinator.current_autonomous_episodes)
                 or self.coordinator.current_operator is not None
                 or self.coordinator.operator_waiting):
             LOGGER.info("[ATTENTION] event=%s decision=suppressed reason=in_flight",
@@ -654,7 +690,7 @@ class GoalAttentionController:
 
     async def _release_temporal_due(self) -> None:
         """Atomically claim and accept due work when attention is actually idle."""
-        if (self.coordinator.current_autonomous is not None
+        if (bool(self.coordinator.current_autonomous_episodes)
                 or self.coordinator.current_operator is not None
                 or self.coordinator.operator_waiting):
             return

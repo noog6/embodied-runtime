@@ -175,10 +175,16 @@ class RuntimeConsole:
             return f"Unable to parse command: {error}.", False
         lowered = [word.lower() for word in words]
         if lowered[:2] == ["job", "work"]:
-            if len(words) != 2:
-                return "Usage: job work.", False
+            if len(words) not in (2, 3):
+                return "Usage: job work [RUN<n>].", False
             try:
-                outcome = await self._application.work_current_job_once()
+                if len(words) == 2:
+                    outcome = await self._application.work_current_job_once()
+                else:
+                    match = re.fullmatch(r"RUN(\d+)", words[2], re.IGNORECASE)
+                    if match is None:
+                        return "Usage: job work [RUN<n>].", False
+                    outcome = await self._application.work_job_run_once(int(match.group(1)))
             except (CognitionError, RuntimeError, ValueError) as error:
                 return f"Unable to work current Job: {error}.", False
             continuation = self._job_continuation_for(
@@ -948,6 +954,7 @@ class RuntimeConsole:
 
     def _attention(self) -> str:
         status = self._application.attention.status()
+        autonomous_episodes = self._application.episode_coordinator.current_autonomous_episodes
         lines = [
             "Attention",
             f"  autonomous_enabled: {str(status.enabled).lower()}",
@@ -968,6 +975,10 @@ class RuntimeConsole:
             f"  source:        {status.autonomous_episode_source or 'none'}",
             f"  concern:       {status.autonomous_episode_concern or 'none'}",
             f"  goal_id:       {'none' if status.autonomous_episode_goal_id is None else f'G{status.autonomous_episode_goal_id}'}",
+            "",
+            "Autonomous episodes",
+            *(f"  E{episode.id}:        {episode.trigger_source}"
+              for episode in autonomous_episodes),
             "",
             "Last episode",
             f"  id:            {'none' if status.last_episode_id is None else f'E{status.last_episode_id}'}",
