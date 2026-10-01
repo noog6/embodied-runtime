@@ -853,6 +853,7 @@ class ApplicationOptions:
     jobs_auto_continue: bool = False
     jobs_heartbeat_seconds: float = 30.0
     jobs_max_auto_steps: int = 3
+    jobs_max_concurrent_work: int = 1
     jobs_scheduler_poll_seconds: float = 30.0
     voice_enabled: bool = False
     voice_wake_word_enabled: bool = False
@@ -1028,6 +1029,8 @@ class RobotApplication:
         self._timezone = ZoneInfo(timezone_name)
         self._wall_clock = wall_clock
         self.options = options or ApplicationOptions()
+        if not 1 <= self.options.jobs_max_concurrent_work <= 256:
+            raise ValueError("jobs_max_concurrent_work must be from 1 to 256")
         self.events = events or EventBus()
         self.resources = (
             resource_arbiter if resource_arbiter is not None else ResourceArbiter()
@@ -1040,6 +1043,9 @@ class RobotApplication:
         self._cognition_backend = cognition_backend
         self._active_operator_cognition_task: asyncio.Task[object] | None = None
         self._job_execution_contexts: dict[int, JobExecutionContext] = {}
+        self._job_execution_context: ContextVar[JobExecutionContext | None] = ContextVar(
+            "job_execution_context", default=None
+        )
         self._foreground_job_run_id: int | None = None
         self._parked_job_run_id: int | None = None
         self._unbound_task_binding: _CurrentTaskBinding | None = None
@@ -1134,7 +1140,8 @@ class RobotApplication:
             monotonic_clock=self._monotonic,
         )
         self.episode_coordinator = AttentionEpisodeCoordinator(
-            self._monotonic, self.observability
+            self._monotonic, self.observability,
+            max_concurrent_job_episodes=self.options.jobs_max_concurrent_work,
         )
         self._job_continuation_controller = (
             JobContinuationController(
@@ -1191,10 +1198,33 @@ class RobotApplication:
         run_id = self._foreground_job_run_id
         return None if run_id is None else self._job_execution_contexts.get(run_id)
 
+    def _execution_job_context(self) -> JobExecutionContext | None:
+        return self._job_execution_context.get() or self.current_job_execution_context
+
+    def _compat_job_context(self) -> JobExecutionContext | None:
+        exact = self._job_execution_context.get()
+        if exact is not None:
+            return exact
+        parked = self._parked_job_execution_context
+        foreground = self.current_job_execution_context
+        if parked is not None:
+            return parked
+        if foreground is not None:
+            return foreground
+        contexts = tuple(self._job_execution_contexts.values())
+        return contexts[0] if len(contexts) == 1 else None
+
     @property
     def _parked_job_execution_context(self) -> JobExecutionContext | None:
+        exact = self._job_execution_context.get()
+        if exact is not None and exact.execution_state == "parked":
+            return exact
         run_id = self._parked_job_run_id
-        return None if run_id is None else self._job_execution_contexts.get(run_id)
+        if run_id is not None:
+            return self._job_execution_contexts.get(run_id)
+        parked = tuple(context for context in self._job_execution_contexts.values()
+                       if context.execution_state == "parked")
+        return parked[0] if len(parked) == 1 else None
 
     def _context_for_run(self, run_id: int) -> JobExecutionContext | None:
         return self._job_execution_contexts.get(run_id)
@@ -1223,7 +1253,7 @@ class RobotApplication:
 
     @property
     def _current_job_run(self) -> CurrentJobRun | None:
-        context = self.current_job_execution_context
+        context = self._execution_job_context()
         return None if context is None else context.binding
 
     @_current_job_run.setter
@@ -1246,12 +1276,12 @@ class RobotApplication:
 
     @property
     def _current_task_binding(self) -> _CurrentTaskBinding | None:
-        context = self.current_job_execution_context
+        context = self._execution_job_context()
         return self._unbound_task_binding if context is None else context.task_binding
 
     @_current_task_binding.setter
     def _current_task_binding(self, binding: _CurrentTaskBinding | None) -> None:
-        context = self.current_job_execution_context
+        context = self._execution_job_context()
         if context is None:
             self._unbound_task_binding = binding
         elif binding is not None:
@@ -1265,12 +1295,12 @@ class RobotApplication:
 
     @property
     def _job_continuation(self) -> JobContinuation | None:
-        context = self._parked_job_execution_context or self.current_job_execution_context
+        context = self._compat_job_context()
         return None if context is None else context.continuation
 
     @_job_continuation.setter
     def _job_continuation(self, continuation: JobContinuation | None) -> None:
-        context = self._parked_job_execution_context or self.current_job_execution_context
+        context = self._compat_job_context()
         if context is None:
             if continuation is not None:
                 raise RuntimeError("Job continuation requires an exact execution context")
@@ -1279,12 +1309,12 @@ class RobotApplication:
 
     @property
     def _job_progress(self) -> JobProgress | None:
-        context = self.current_job_execution_context or self._parked_job_execution_context
+        context = self._compat_job_context()
         return None if context is None else context.progress
 
     @_job_progress.setter
     def _job_progress(self, progress: JobProgress | None) -> None:
-        context = self.current_job_execution_context or self._parked_job_execution_context
+        context = self._compat_job_context()
         if context is None:
             if progress is not None:
                 raise RuntimeError("Job progress requires an exact execution context")
@@ -1297,12 +1327,15 @@ class RobotApplication:
         if context is None:
             return None
         if context.task_binding is None:
-            raise RuntimeError("parked JobExecutionContext has no Task binding")
+            return None
         return _ParkedJobRun(context.binding, context.task_binding, context.progress)
 
     @_parked_job_run.setter
     def _parked_job_run(self, parked: _ParkedJobRun | None) -> None:
         if parked is None:
+            current = self._parked_job_execution_context
+            if current is not None:
+                current.execution_state = "runnable"
             self._parked_job_run_id = None
             return
         context = self._context_for_run(parked.binding.run.id)
@@ -1321,8 +1354,8 @@ class RobotApplication:
         active = [context.active_work_task for context in self._job_execution_contexts.values()
                   if context.active_work_task is not None]
         if len(active) > 1:
-            raise RuntimeError("multiple Job work tasks violate Phase 2 capacity")
-        return None if not active else active[0]
+            raise RuntimeError("multiple Job work tasks make compatibility view ambiguous")
+        return active[0] if active else None
 
     @_active_job_work_task.setter
     def _active_job_work_task(self, task: asyncio.Task[object] | None) -> None:
@@ -1332,17 +1365,47 @@ class RobotApplication:
                 if context.active_work_task is current:
                     context.active_work_task = None
             return
-        active = self._active_job_work_task
-        if active is not None and active is not task:
-            raise RuntimeError("another Job work episode is already active")
-        context = self.current_job_execution_context
+        context = self._execution_job_context()
         if context is None:
             raise RuntimeError("Job work task requires an exact execution context")
+        if context.active_work_task is not None and context.active_work_task is not task:
+            raise RuntimeError("another Job work episode is already active")
+        if context.active_work_task is None and self.job_work_slots_available <= 0:
+            raise RuntimeError("another Job work episode is already active")
         context.active_work_task = task
 
     @property
+    def job_work_slots_occupied(self) -> int:
+        return sum(context.active_work_task is not None
+                   for context in self._job_execution_contexts.values())
+
+    @property
+    def job_work_slots_available(self) -> int:
+        return max(0, self.options.jobs_max_concurrent_work
+                   - self.job_work_slots_occupied)
+
+    @property
     def active_goal(self) -> ActiveGoal | None:
+        context = self._execution_job_context()
+        if context is not None and context.task_binding is not None:
+            return context.task_binding.active_goal
         return self._active_goal
+
+    def _goal_is_live(self, goal: ActiveGoal) -> bool:
+        if self._active_goal is goal:
+            return True
+        return any(context.task_binding is not None
+                   and context.task_binding.active_goal is goal
+                   for context in self._job_execution_contexts.values())
+
+    def _standalone_execution_active(self) -> bool:
+        if self._unbound_task_binding is not None:
+            return True
+        return self._active_goal is not None and not any(
+            context.task_binding is not None
+            and context.task_binding.active_goal is self._active_goal
+            for context in self._job_execution_contexts.values()
+        )
 
     @property
     def current_task(self) -> Task | None:
@@ -1355,7 +1418,10 @@ class RobotApplication:
         """Return the active or sole parked volatile JobRun association."""
         if self._current_job_run is not None:
             return self._current_job_run
-        return None if self._parked_job_run is None else self._parked_job_run.binding
+        if self._parked_job_run is not None:
+            return self._parked_job_run.binding
+        contexts = tuple(self._job_execution_contexts.values())
+        return contexts[0].binding if len(contexts) == 1 else None
 
     @property
     def job_continuation(self) -> JobContinuation | None:
@@ -1488,35 +1554,41 @@ class RobotApplication:
 
     def _satisfy_job_event(self, event_type: JobReadinessEventType, timestamp_ns: int,
                            wake_event: JobWakeEvent) -> bool:
-        continuation = self._job_continuation
-        parked = self._parked_job_run
-        current = self._current_job_run if parked is None else parked.binding
-        task_binding = self._current_task_binding if parked is None else parked.task_binding
-        if (self.state is not LifecycleState.RUNNING or continuation is None
-                or continuation.readiness is not JobContinuationReadiness.WAIT_FOR_EVENT
-                or continuation.event_type is not event_type
-                or continuation.event_armed_after_ns is None
-                or timestamp_ns <= continuation.event_armed_after_ns
-                or continuation.event_satisfied
-                or (self._active_job_work_task is not None
-                    and self._current_job_run is not None
-                    and self._current_job_run.run.id == continuation.run_id)
-                or current is None
-                or current.job.id != continuation.job_id
-                or current.run.id != continuation.run_id
-                or current.task.id != continuation.task_id
-                or current.run.status is not JobRunStatus.RUNNING
-                or task_binding is None
-                or task_binding.task.id != continuation.task_id):
+        if self.state is not LifecycleState.RUNNING or self.jobs is None:
             return False
-        self._job_continuation = replace(
-            continuation, event_satisfied=True, wake_event=wake_event)
-        busy = self._current_job_run is not None or self._active_job_work_task is not None \
-            or self.episode_coordinator.any_active
-        LOGGER.info("[JOBS] event=%s run=RUN%s action=%s", event_type.value,
-                    continuation.run_id, "retained_busy" if busy else "matched")
-        self._offer_job_continuation(trigger="event")
-        return True
+        matched = False
+        for context in sorted(self._job_execution_contexts.values(),
+                              key=lambda item: item.run_id):
+            continuation = context.continuation
+            task_binding = context.task_binding
+            if (continuation is None
+                    or continuation.readiness is not JobContinuationReadiness.WAIT_FOR_EVENT
+                    or continuation.event_type is not event_type
+                    or continuation.event_armed_after_ns is None
+                    or timestamp_ns <= continuation.event_armed_after_ns
+                    or continuation.event_satisfied
+                    or context.active_work_task is not None
+                    or context.binding.run.status is not JobRunStatus.RUNNING
+                    or task_binding is None
+                    or task_binding.task.id != continuation.task_id
+                    or (continuation.job_id, continuation.run_id, continuation.task_id)
+                    != (context.job_id, context.run_id, context.task_id)):
+                continue
+            durable = self.jobs.get_run(context.run_id)
+            if durable is None or durable.status is not JobRunStatus.RUNNING:
+                context.continuation = None
+                context.execution_state = "terminal"
+                if context.active_work_task is None:
+                    self._remove_job_execution_context(context.run_id)
+                continue
+            context.continuation = replace(
+                continuation, event_satisfied=True, wake_event=wake_event)
+            matched = True
+            LOGGER.info("[JOBS] event=%s run=RUN%s action=matched",
+                        event_type.value, context.run_id)
+        if matched:
+            self._offer_job_continuation(trigger="event")
+        return matched
 
     async def _activate_triggered_jobs(self, trigger_type: JobTriggerType) -> bool:
         if self.jobs is None or self.state is not LifecycleState.RUNNING:
@@ -1540,18 +1612,20 @@ class RobotApplication:
             return False
         active = next((run for run in self.jobs.list_runs(job.id)
                        if run.status in (JobRunStatus.PENDING, JobRunStatus.RUNNING)), None)
-        if active is not None or (self._current_job_run is not None
-                                  and self._current_job_run.job.id == job.id):
+        live_same_job = next((context for context in self._job_execution_contexts.values()
+                              if context.job_id == job.id), None)
+        if active is not None or live_same_job is not None:
             LOGGER.info("[JOBS] trigger=%s job=JOB%s action=coalesced active_run=RUN%s",
                         trigger_type.value, job.id,
-                        active.id if active else self._current_job_run.run.id)
+                        active.id if active else live_same_job.run_id)
             self._pending_job_triggers.discard(trigger_type)
             return False
         # Existing coordination remains authoritative. Retain exactly one activation bit.
-        if (self._current_job_run is not None or self._current_task_binding is not None
-                or self._active_goal is not None or self._active_job_work_task is not None
-                or self._cognition_backend is None or self.episode_coordinator.operator_waiting
-                or self.episode_coordinator.any_active):
+        if (self._cognition_backend is None or self.job_work_slots_available <= 0
+                or self._standalone_execution_active()
+                or self.episode_coordinator.operator_waiting
+                or self.episode_coordinator.current_operator is not None
+                or self.episode_coordinator.general_autonomous_active):
             already_pending = trigger_type in self._pending_job_triggers
             self._pending_job_triggers.add(trigger_type)
             LOGGER.info("[JOBS] trigger=%s job=JOB%s action=%s reason=busy",
@@ -1584,15 +1658,21 @@ class RobotApplication:
             self._pending_job_triggers.discard(trigger_type)
             return False
         binding = self._start_job_occurrence(job, run)
-        prepared = self._validate_job_work_preconditions()
-        episode = self._try_start_job_work_episode(binding, prepared[2])
+        context = self._context_for_run(binding.run.id)
+        assert context is not None
+        token = self._job_execution_context.set(context)
+        try:
+            prepared = self._validate_job_work_preconditions(context)
+            episode = self._try_start_job_work_episode(binding, prepared[2])
+        finally:
+            self._job_execution_context.reset(token)
         if episode is None:
             return False
         self._pending_job_triggers.discard(trigger_type)
         LOGGER.info("[JOBS] trigger=%s job=JOB%s action=start", trigger_type.value, job.id)
         task = asyncio.create_task(self._run_triggered_initial_work(prepared, episode),
                                    name="job-triggered-initial-work")
-        self._active_job_work_task = task
+        context.active_work_task = task
         return True
 
     async def _offer_job_activations(self) -> None:
@@ -1632,12 +1712,13 @@ class RobotApplication:
             raise RuntimeError(f"Job not found: JOB{job_id}")
         if not job.enabled:
             raise RuntimeError(f"Job is disabled: JOB{job.id}")
-        if self._current_job_run is not None:
-            raise RuntimeError("another JobRun is already current")
-        if self._current_task_binding is not None:
+        if (self._current_task_binding is not None
+                and self.current_job_execution_context is None):
             raise RuntimeError("an unrelated Task is already current")
-        if self._active_goal is not None:
+        if self._active_goal is not None and not self._job_execution_contexts:
             raise RuntimeError("an unrelated active goal prevents Task start")
+        if any(context.job_id == job.id for context in self._job_execution_contexts.values()):
+            raise RuntimeError(f"JOB{job.id} already has an active occurrence")
 
         run = self.jobs.create_run(job.id)
         return self._start_job_occurrence(job, run)
@@ -1649,8 +1730,20 @@ class RobotApplication:
             f"Run JOB{job.id}: {job.name}",
             goal=TaskGoal(f"Complete JOB{job.id}: {job.name}"),
         )
+        staged_binding: _CurrentTaskBinding | None = None
         try:
-            running_task = self.start_task(task)
+            if self._job_execution_contexts:
+                running_task = task.transition_to(TaskStatus.RUNNING)
+                assert running_task.goal is not None
+                normalized = validate_goal_description(running_task.goal.description)
+                goal = ActiveGoal(self._next_goal_id, normalized)
+                self._next_goal_id += 1
+                staged_binding = _CurrentTaskBinding(running_task, goal)
+                self._unbound_task_binding = staged_binding
+                LOGGER.info("[TASK] task=%s status=running goal=G%s",
+                            running_task.id, goal.id)
+            else:
+                running_task = self.start_task(task)
         except BaseException:
             current = self.current_task
             if current is not None and current.id == task.id:
@@ -1668,7 +1761,14 @@ class RobotApplication:
             running_run = self.jobs.transition_run(run.id, JobRunStatus.RUNNING)
         except BaseException:
             try:
-                if self.current_task is not None and self.current_task.id == running_task.id:
+                if (staged_binding is not None
+                        and self._unbound_task_binding is staged_binding):
+                    try:
+                        self.resources.release_all(self._task_resource_owner(running_task))
+                        running_task = running_task.transition_to(TaskStatus.STOPPED)
+                    finally:
+                        self._unbound_task_binding = None
+                elif self.current_task is not None and self.current_task.id == running_task.id:
                     self.finish_task(TaskStatus.STOPPED)
             except BaseException:
                 LOGGER.exception(
@@ -1708,17 +1808,17 @@ class RobotApplication:
         global_reason = None
         if self.state is not LifecycleState.RUNNING:
             global_reason = "not_running"
-        elif self._current_job_run is not None:
-            global_reason = "current_job"
-        elif self._current_task_binding is not None or self._active_goal is not None:
-            global_reason = "task_busy"
-        elif self._active_job_work_task is not None:
-            global_reason = "work_active"
         elif self._cognition_backend is None:
             global_reason = "cognition_unavailable"
+        elif self._standalone_execution_active():
+            global_reason = "standalone_execution"
+        elif self.job_work_slots_available <= 0:
+            global_reason = "work_capacity"
         elif self.episode_coordinator.operator_waiting:
             global_reason = "operator_waiting"
-        elif self.episode_coordinator.any_active:
+        elif self.episode_coordinator.current_operator is not None:
+            global_reason = "operator_active"
+        elif self.episode_coordinator.general_autonomous_active:
             global_reason = "attention_busy"
         if global_reason is not None:
             if due:
@@ -1747,8 +1847,14 @@ class RobotApplication:
         if run is None:
             return
         binding = self._start_job_occurrence(job, run)
-        prepared = self._validate_job_work_preconditions()
-        episode = self._try_start_job_work_episode(binding, prepared[2])
+        context = self._context_for_run(binding.run.id)
+        assert context is not None
+        token = self._job_execution_context.set(context)
+        try:
+            prepared = self._validate_job_work_preconditions(context)
+            episode = self._try_start_job_work_episode(binding, prepared[2])
+        finally:
+            self._job_execution_context.reset(token)
         if episode is None:
             LOGGER.info("[JOBS] job=JOB%s run=RUN%s schedule=daily date=%s activation=deferred reason=attention_busy",
                         job.id, run.id, local_date)
@@ -1759,7 +1865,7 @@ class RobotApplication:
             self._run_scheduled_initial_work(prepared, episode),
             name="job-scheduled-initial-work",
         )
-        self._active_job_work_task = task
+        context.active_work_task = task
 
     async def _run_scheduled_initial_work(self, prepared, episode) -> None:
         try:
@@ -1909,8 +2015,9 @@ class RobotApplication:
         """Perform one explicitly requested, finite episode for the current JobRun."""
         # An explicit request supersedes any old automatic grant. Its result alone
         # decides whether a fresh grant is created.
-        if self._active_job_work_task is not None:
-            raise RuntimeError("another Job work episode is already active")
+        if self.job_work_slots_available <= 0:
+            self.observability.increment("job_work_capacity_rejections")
+            raise RuntimeError("Job work capacity unavailable")
         if self._current_job_run is None and self._parked_job_run is not None:
             self._restore_parked_job_run()
         prepared = self._validate_job_work_preconditions()
@@ -1930,6 +2037,29 @@ class RobotApplication:
             self._arm_job_continuation(outcome)
         return outcome
 
+    async def work_job_run_once(self, run_id: int) -> JobWorkOutcome:
+        """Perform one bounded episode for an exact live JobRun context."""
+        context = self._context_for_run(run_id)
+        if context is None:
+            raise RuntimeError(f"no live JobExecutionContext for RUN{run_id}")
+        if context.active_work_task is not None:
+            raise RuntimeError(f"RUN{run_id} already owns active Job work")
+        if self.job_work_slots_available <= 0:
+            self.observability.increment("job_work_capacity_rejections")
+            raise RuntimeError("Job work capacity unavailable")
+        token = self._job_execution_context.set(context)
+        try:
+            prepared = self._validate_job_work_preconditions(context)
+            previous = self._valid_job_continuity_summary(*prepared[:2])
+            outcome = await self._work_current_job_once(
+                "manual", prepared=prepared, previous_work_summary=previous,
+            )
+            if outcome.disposition is JobWorkDisposition.CONTINUE:
+                self._arm_job_continuation(outcome)
+            return outcome
+        finally:
+            self._job_execution_context.reset(token)
+
     async def _work_current_job_once(
         self,
         invocation: str,
@@ -1946,6 +2076,7 @@ class RobotApplication:
         context = self._context_for_run(binding.run.id)
         if context is None or context.binding is not binding:
             raise RuntimeError("Job work requires its exact execution context")
+        context_token = self._job_execution_context.set(context)
         if episode is None:
             episode = self._try_start_job_work_episode(binding, goal)
             if episode is None:
@@ -1956,10 +2087,14 @@ class RobotApplication:
         if current_async_task is None:
             self.episode_coordinator.close(episode, "error")
             raise RuntimeError("Job work requires an asyncio task")
-        if self._active_job_work_task not in (None, current_async_task):
+        if (context.active_work_task not in (None, current_async_task)
+                or (context.active_work_task is None
+                    and self.job_work_slots_available <= 0)):
             self.episode_coordinator.close(episode, "error")
-            raise RuntimeError("another Job work episode is already active")
-        self._active_job_work_task = current_async_task
+            self._job_execution_context.reset(context_token)
+            self.observability.increment("job_work_capacity_rejections")
+            raise RuntimeError("Job work capacity unavailable")
+        context.active_work_task = current_async_task
         target = "unassigned" if binding.job.target is None else str(binding.job.target)
         wake_facts = ()
         if wake_event is not None:
@@ -2086,27 +2221,15 @@ class RobotApplication:
                 await self._finish_job_work_episode(episode, reason)
             finally:
                 self._clear_context_work_task(context, current_async_task)
+                self._job_execution_context.reset(context_token)
 
     def _arm_job_continuation(self, outcome: JobWorkOutcome, *, source: str = "manual") -> None:
         if not self.options.jobs_auto_continue or self.jobs is None:
             self._job_continuation = None
             return
-        current = self._current_job_run
+        outcome_context = self._context_for_run(outcome.run_id)
+        current = None if outcome_context is None else outcome_context.binding
         if current is None or current.run.id != outcome.run_id:
-            return
-        if (self._parked_job_run is not None
-                and self._parked_job_run.binding.run.id != outcome.run_id):
-            LOGGER.warning("[JOBS] job=JOB%s run=RUN%s continuation=rejected "
-                           "reason=parked_slot_occupied action=fail_run",
-                           outcome.job_id, outcome.run_id)
-            # The bounded runtime cannot preserve a second continuation without
-            # overwriting the first occurrence's exact authority. Treat that as an
-            # execution-level failure rather than leaving this run active with its
-            # requested readiness silently discarded.
-            self.finish_job_run(
-                JobRunStatus.FAILED,
-                "Continuation capacity unavailable: parked slot occupied",
-            )
             return
         if outcome.readiness is None:
             self._await_operator_after_invalid_outcome(outcome)
@@ -2121,7 +2244,7 @@ class RobotApplication:
             monotonic_ns()
             if outcome.readiness is JobContinuationReadiness.WAIT_FOR_EVENT else None
         )
-        self._job_continuation = JobContinuation(
+        outcome_context.continuation = JobContinuation(
             outcome.job_id, outcome.run_id, outcome.task_id,
             JobContinuationState.ARMED, self.options.jobs_max_auto_steps,
             outcome.summary, outcome.readiness, eligible_at, event_type,
@@ -2138,26 +2261,15 @@ class RobotApplication:
             JobContinuationReadiness.WAIT_FOR_OPERATOR,
             JobContinuationReadiness.WAIT_FOR_EVENT,
         ):
-            self._park_current_job_run()
+            self._park_job_context(outcome_context)
 
     def _await_operator_after_invalid_outcome(self, outcome: JobWorkOutcome) -> None:
         """Park an uncommitted occurrence after its bounded outcome attempts fail."""
-        current = self._current_job_run
+        context = self._context_for_run(outcome.run_id)
+        current = None if context is None else context.binding
         if current is None or current.run.id != outcome.run_id:
             return
-        if (self._parked_job_run is not None
-                and self._parked_job_run.binding.run.id != outcome.run_id):
-            LOGGER.warning(
-                "[JOBS] job=JOB%s run=RUN%s continuation=rejected "
-                "reason=parked_slot_occupied action=fail_run",
-                outcome.job_id, outcome.run_id,
-            )
-            self.finish_job_run(
-                JobRunStatus.FAILED,
-                "Continuation capacity unavailable: parked slot occupied",
-            )
-            return
-        previous = self._job_continuation
+        previous = context.continuation
         remaining = (
             previous.automatic_steps_remaining
             if previous is not None and previous.run_id == outcome.run_id
@@ -2167,7 +2279,7 @@ class RobotApplication:
             previous.last_summary
             if previous is not None and previous.run_id == outcome.run_id else None
         )
-        self._job_continuation = JobContinuation(
+        context.continuation = JobContinuation(
             outcome.job_id, outcome.run_id, outcome.task_id,
             JobContinuationState.AWAITING_OPERATOR, remaining, last_summary,
             JobContinuationReadiness.WAIT_FOR_OPERATOR,
@@ -2178,7 +2290,7 @@ class RobotApplication:
             "reason=invalid_outcome",
             outcome.job_id, outcome.run_id,
         )
-        self._park_current_job_run()
+        self._park_job_context(context)
 
     @staticmethod
     def _log_job_continuation_armed(
@@ -2197,28 +2309,78 @@ class RobotApplication:
 
     def _park_current_job_run(self) -> None:
         """Release execution ownership while retaining one exact volatile binding."""
-        if self._parked_job_run is not None:
-            LOGGER.warning("[JOBS] continuation=park_rejected reason=parked_slot_occupied")
+        context = self._execution_job_context()
+        if context is None:
             return
-        binding = self._current_job_run
-        task_binding = self._current_task_binding
-        if binding is None or task_binding is None or task_binding.task is not binding.task:
-            self._clear_job_continuation("binding_changed")
+        self._park_job_context(context)
+
+    def _park_job_context(self, context: JobExecutionContext) -> None:
+        """Park one exact context without imposing a runtime-wide parked limit."""
+        task_binding = context.task_binding
+        if task_binding is None or task_binding.task.status is not TaskStatus.RUNNING:
+            context.continuation = None
             return
-        paused = self.pause_task()
-        paused_binding = self._current_task_binding
-        assert paused_binding is not None
-        parked_binding = CurrentJobRun(binding.job, binding.run, paused)
-        self._parked_job_run = _ParkedJobRun(
-            parked_binding, paused_binding, self._job_progress,
+        paused = task_binding.task.transition_to(TaskStatus.PAUSED)
+        self._release_task_resources(task_binding)
+        if self._active_goal is task_binding.active_goal:
+            self._active_goal = None
+            self._active_goal_started_monotonic = None
+            self.temporal.cancel("goal_changed")
+        context.task_binding = _CurrentTaskBinding(paused, None)
+        context.replace_binding(CurrentJobRun(
+            context.binding.job, context.binding.run, paused))
+        context.execution_state = "parked"
+        self._parked_job_run_id = (
+            context.run_id if sum(item.execution_state == "parked"
+                                  for item in self._job_execution_contexts.values()) == 1
+            else None
         )
-        self._current_job_run = None
-        self._current_task_binding = None
+        if self._foreground_job_run_id == context.run_id:
+            self._foreground_job_run_id = None
         LOGGER.info("[JOBS] job=JOB%s run=RUN%s continuation=parked task=%s",
-                    binding.job.id, binding.run.id, binding.task.id)
+                    context.job_id, context.run_id, context.task_id)
 
     def _restore_parked_job_run(self) -> CurrentJobRun:
         """Restore the exact parked Task binding, failing closed on any conflict."""
+        exact = self._job_execution_context.get() or self._parked_job_execution_context
+        if exact is not None and exact.execution_state == "parked":
+            task_binding = exact.task_binding
+            continuation = exact.continuation
+            if (task_binding is None or continuation is None
+                    or task_binding.task.status is not TaskStatus.PAUSED
+                    or continuation.task_id != exact.task_id):
+                exact.continuation = None
+                exact.execution_state = "runnable"
+                if self._parked_job_run_id == exact.run_id:
+                    self._parked_job_run_id = None
+                raise RuntimeError("parked JobRun authority is stale: binding_changed")
+            assert self.jobs is not None
+            authoritative_job = self.jobs.get_job(exact.job_id)
+            authoritative_run = self.jobs.get_run(exact.run_id)
+            if (authoritative_job is None or not authoritative_job.enabled
+                    or authoritative_run is None
+                    or authoritative_run.status is not JobRunStatus.RUNNING):
+                self._clear_job_continuation("authority_stale")
+                exact.task_binding = None
+                exact.execution_state = "terminal"
+                if self._parked_job_run_id == exact.run_id:
+                    self._parked_job_run_id = None
+                if self._foreground_job_run_id == exact.run_id:
+                    self._foreground_job_run_id = None
+                self._remove_job_execution_context(exact.run_id)
+                raise RuntimeError("parked JobRun authority is stale: authority_stale")
+            running = task_binding.task.transition_to(TaskStatus.RUNNING)
+            normalized = validate_goal_description(running.goal.description)
+            goal = ActiveGoal(self._next_goal_id, normalized)
+            self._next_goal_id += 1
+            exact.task_binding = _CurrentTaskBinding(running, goal)
+            exact.replace_binding(CurrentJobRun(authoritative_job, authoritative_run, running))
+            exact.execution_state = "runnable"
+            if self._parked_job_run_id == exact.run_id:
+                self._parked_job_run_id = None
+            if self._job_execution_context.get() is None:
+                self._foreground_job_run_id = exact.run_id
+            return exact.binding
         parked = self._parked_job_run
         if parked is None:
             raise RuntimeError("no parked JobRun")
@@ -2316,14 +2478,37 @@ class RobotApplication:
         self, binding: CurrentJobRun, goal: ActiveGoal,
     ) -> AttentionEpisode | None:
         """Atomically claim the attention grant for one bounded Job episode."""
-        return self.episode_coordinator.try_start(
-            "job_run", f"JOB{binding.job.id}/RUN{binding.run.id}",
+        if self.options.jobs_max_concurrent_work == 1:
+            return self.episode_coordinator.try_start(
+                "job_run", f"JOB{binding.job.id}/RUN{binding.run.id}",
+                f"Perform one bounded work episode for JOB{binding.job.id}/RUN{binding.run.id}",
+                goal.id,
+            )
+        return self.episode_coordinator.try_start_job(
+            f"JOB{binding.job.id}/RUN{binding.run.id}",
             f"Perform one bounded work episode for JOB{binding.job.id}/RUN{binding.run.id}",
             goal.id,
         )
 
     def _offer_job_continuation(self, *, trigger: str = "heartbeat") -> None:
-        """Validate and schedule at most one separately owned automatic episode."""
+        """Fill free slots from eligible contexts in stable Run-ID order."""
+        if self.episode_coordinator.operator_waiting \
+                or self.episode_coordinator.current_operator is not None:
+            return
+        for context in sorted(self._job_execution_contexts.values(),
+                              key=lambda item: item.run_id):
+            if self.job_work_slots_available <= 0:
+                break
+            if context.active_work_task is not None or context.continuation is None:
+                continue
+            token = self._job_execution_context.set(context)
+            try:
+                self._offer_exact_job_continuation(trigger=trigger)
+            finally:
+                self._job_execution_context.reset(token)
+
+    def _offer_exact_job_continuation(self, *, trigger: str = "heartbeat") -> None:
+        """Validate and schedule one exact context-owned automatic episode."""
         continuation = self._job_continuation
         if continuation is None or continuation.state is not JobContinuationState.ARMED:
             return
@@ -2356,9 +2541,15 @@ class RobotApplication:
                 return
             if self._monotonic() < continuation.eligible_at_monotonic:
                 return
-        if parked is not None and (
+        if (parked is not None and self._job_execution_context.get() is None and (
             self._current_job_run is not None or self._current_task_binding is not None
-        ):
+        )):
+            self._log_job_continuation_deferred(continuation, "execution_busy")
+            return
+        foreground = self.current_job_execution_context
+        exact_context = self._job_execution_context.get()
+        if (self.options.jobs_max_concurrent_work == 1 and foreground is not None
+                and exact_context is not None and foreground is not exact_context):
             self._log_job_continuation_deferred(continuation, "execution_busy")
             return
         if parked is None and current.task.status is TaskStatus.PAUSED:
@@ -2367,13 +2558,15 @@ class RobotApplication:
         if parked is not None and current.task.status is not TaskStatus.PAUSED:
             self._clear_job_continuation("binding_changed")
             return
-        if self._active_job_work_task is not None:
+        context = self.current_job_execution_context
+        if context is not None and context.active_work_task is not None:
             self._log_job_continuation_deferred(continuation, "work_active")
             return
         if self.episode_coordinator.operator_waiting:
             self._log_job_continuation_deferred(continuation, "operator_waiting")
             return
-        if self.episode_coordinator.any_active:
+        if (self.episode_coordinator.current_operator is not None
+                or self.episode_coordinator.general_autonomous_active):
             self._log_job_continuation_deferred(continuation, "attention_busy")
             return
         if continuation.automatic_steps_remaining <= 0:
@@ -2389,7 +2582,7 @@ class RobotApplication:
             task_binding = self._current_task_binding
         if (task_binding is None or task_binding.active_goal is None
                 or current.task.status is not TaskStatus.RUNNING
-                or self._active_goal is not task_binding.active_goal):
+                or not self._goal_is_live(task_binding.active_goal)):
             self._clear_job_continuation("binding_changed")
             return
         # The attention claim is the acceptance boundary. Nothing is charged until
@@ -2416,7 +2609,10 @@ class RobotApplication:
             ),
             name="job-continuation-work",
         )
-        self._active_job_work_task = task
+        exact_context = self._job_execution_context.get()
+        if exact_context is None:
+            raise RuntimeError("automatic Job work lost exact context authority")
+        exact_context.active_work_task = task
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s continuation=accepted remaining=%s source=%s",
             continuation.job_id, continuation.run_id, remaining, trigger,
@@ -2530,7 +2726,7 @@ class RobotApplication:
             await self.attention.release_temporal_due()
 
     def _validate_job_work_preconditions(
-        self,
+        self, context: JobExecutionContext | None = None,
     ) -> tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal]:
         if self.state is not LifecycleState.RUNNING:
             raise RuntimeError("Job work requires a running application")
@@ -2538,12 +2734,13 @@ class RobotApplication:
             raise RuntimeError("No cognition backend is configured")
         if self.jobs is None:
             raise RuntimeError("Jobs persistence is disabled")
-        binding = self._current_job_run
+        context = context or self.current_job_execution_context or self._compat_job_context()
+        binding = None if context is None else context.binding
         if binding is None:
             raise RuntimeError("no current JobRun")
         if binding.run.status is not JobRunStatus.RUNNING:
             raise RuntimeError("current JobRun must be running")
-        task_binding = self._current_task_binding
+        task_binding = None if context is None else context.task_binding
         if task_binding is None or task_binding.task is not binding.task:
             raise RuntimeError("current JobRun Task binding is inconsistent")
         if binding.task.status is TaskStatus.PAUSED:
@@ -2551,27 +2748,25 @@ class RobotApplication:
         if binding.task.status is not TaskStatus.RUNNING:
             raise RuntimeError("current JobRun Task must be running")
         goal = task_binding.active_goal
-        if goal is None or self._active_goal is not goal:
+        if goal is None:
             raise RuntimeError("current JobRun Task ActiveGoal binding is inconsistent")
-        self._validate_current_task_binding(task_binding)
         return binding, task_binding, goal
 
     def _job_work_binding_matches(
         self, binding: CurrentJobRun, task_binding: _CurrentTaskBinding,
         goal: ActiveGoal,
     ) -> bool:
-        current = self._current_job_run
+        context = self._context_for_run(binding.run.id)
+        current = None if context is None else context.binding
         return (
             self.state is LifecycleState.RUNNING
             and current is binding
             and current.job.id == binding.job.id
             and current.run.id == binding.run.id
             and current.run.status is JobRunStatus.RUNNING
-            and self._current_task_binding is task_binding
-            and self.current_task is binding.task
+            and context.task_binding is task_binding
             and binding.task.status is TaskStatus.RUNNING
             and task_binding.active_goal is goal
-            and self._active_goal is goal
         )
 
     def _active_state_tending_conditions(
@@ -3147,6 +3342,18 @@ class RobotApplication:
     def _validate_current_task_binding(self, binding: _CurrentTaskBinding) -> None:
         """Fail closed unless Task ownership matches the exact active intention."""
         goal = binding.active_goal
+        context = self._job_execution_context.get()
+        if context is None:
+            foreground = self.current_job_execution_context
+            if foreground is not None and foreground.task_binding is binding:
+                context = foreground
+        if context is not None:
+            if context.task_binding is not binding or binding.task.id != context.task_id:
+                raise RuntimeError("current Task binding is not owned by this Job context")
+            if binding.task.status is TaskStatus.RUNNING and binding.task.goal is not None \
+                    and goal is None:
+                raise RuntimeError("current Task ActiveGoal binding is inconsistent")
+            return
         if binding.task.status is TaskStatus.PAUSED:
             if goal is not None or self._active_goal is not None:
                 raise RuntimeError("current Task ActiveGoal binding is inconsistent")
@@ -3167,6 +3374,18 @@ class RobotApplication:
         self._validate_current_task_binding(binding)
         goal = binding.active_goal
         if goal is None:
+            return
+        context = self._job_execution_context.get()
+        if context is None:
+            foreground = self.current_job_execution_context
+            if foreground is not None and foreground.task_binding is binding:
+                context = foreground
+        if context is not None:
+            context.task_binding = _CurrentTaskBinding(binding.task, None)
+            if self._active_goal is goal:
+                self._active_goal = None
+                self._active_goal_started_monotonic = None
+                self.temporal.cancel("goal_changed")
             return
         self._active_goal = None
         self._active_goal_started_monotonic = None
@@ -3655,7 +3874,7 @@ class RobotApplication:
             and binding.task.status is TaskStatus.RUNNING
             and binding.active_goal is not None
             and binding.active_goal is expected_goal
-            and self._active_goal is expected_goal
+            and self._goal_is_live(expected_goal)
         ):
             return self._task_resource_owner(binding.task)
         return VISUAL_PERCEPTION_OWNER
@@ -4141,7 +4360,7 @@ class RobotApplication:
         context = compose_cognition_instructions(
             self.cognition_context(), self.temporal_context(), self.temporal_situation(),
             self.options.startup_prompt, working_memory,
-            expected_goal if self._active_goal is expected_goal else None,
+            expected_goal if self._goal_is_live(expected_goal) else None,
         )
         sequencing = (
             "\n\nYou may request at most one semantic capability in this request. "
@@ -4208,7 +4427,10 @@ class RobotApplication:
         if backend is None:
             raise RuntimeError("No cognition backend is configured")
         prior_memory = self.working_memory.snapshot()
-        expected_goal = self._active_goal
+        expected_goal = (
+            job_binding[2] if job_work and job_binding is not None
+            else self._active_goal
+        )
         # Private-call compatibility for focused executor tests. Accepted runtime
         # attention always supplies the controller-allocated positive episode ID.
         if episode is None and expected_goal is not None:
@@ -4301,7 +4523,7 @@ class RobotApplication:
                 )
             else:
                 action = call.name
-                if self._active_goal is not expected_goal:
+                if not self._goal_is_live(expected_goal):
                     result = self._rejected_tool(
                         call.name, "attention episode's bound goal is no longer current",
                         log_prefix="INITIATIVE",
@@ -4381,7 +4603,7 @@ class RobotApplication:
         continuation_completed = True
         if (acquisitions and expected_goal is not None
                 and self.state is LifecycleState.RUNNING
-                and self._active_goal is expected_goal):
+                and self._goal_is_live(expected_goal)):
             followup_completed, followup_effect = await self._request_acquisition_followup(
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
                 notification_interaction, job_work=job_work,
@@ -4398,7 +4620,7 @@ class RobotApplication:
             and effects and effects[0].status == "applied"
             and expected_goal is not None
             and self.state is LifecycleState.RUNNING
-            and self._active_goal is expected_goal
+            and self._goal_is_live(expected_goal)
             and self._continuation_tools_for_episode(
                 effects[0].name, job_work=job_work
             )
@@ -4418,7 +4640,7 @@ class RobotApplication:
             and effects
             and expected_goal is not None
             and self.state is LifecycleState.RUNNING
-            and self._active_goal is expected_goal
+            and self._goal_is_live(expected_goal)
         ):
             stimulus_outcome = GoalOutcomeStimulus(
                 effects=tuple(effects),
@@ -4449,7 +4671,7 @@ class RobotApplication:
             compose_cognition_instructions(
                 self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt, working_memory,
-                expected_goal if self._active_goal is expected_goal else None,
+                expected_goal if self._goal_is_live(expected_goal) else None,
             ), *self._notification_sections(tools, notification_interaction),
             episode.render(), stimulus.render(actions_enabled=None), *progress_section,
             followup.render(),
@@ -4514,7 +4736,7 @@ class RobotApplication:
                     "status=requested", episode.id, expected_goal.id, call.name,
                 )
             if (self.state is not LifecycleState.RUNNING
-                    or self._active_goal is not expected_goal
+                    or not self._goal_is_live(expected_goal)
                     or not any(tool.name == call.name for tool in available)):
                 result = self._rejected_tool(
                     call.name, "capability is not available",
@@ -4609,7 +4831,7 @@ class RobotApplication:
             "backend=%s request=completed",
             episode.id, expected_goal.id, backend.identifier,
         )
-        if second_acquisition is not None and self._active_goal is expected_goal:
+        if second_acquisition is not None and self._goal_is_live(expected_goal):
             final_completed, final_effect = await self._request_final_effect_decision(
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
                 notification_interaction,
@@ -4653,7 +4875,7 @@ class RobotApplication:
                 "status=requested", episode.id, expected_goal.id, call.name,
             )
             if (self.state is not LifecycleState.RUNNING
-                    or self._active_goal is not expected_goal
+                    or not self._goal_is_live(expected_goal)
                     or not any(tool.name == call.name for tool in available)):
                 result = self._rejected_tool(call.name, "effect capability is not available",
                                              log_prefix="ACQUISITION")
@@ -4728,7 +4950,7 @@ class RobotApplication:
             compose_cognition_instructions(
                 self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt, working_memory,
-                expected_goal if self._active_goal is expected_goal else None,
+                expected_goal if self._goal_is_live(expected_goal) else None,
             ),
             *self._notification_sections(tools, notification_interaction),
             episode.render(), stimulus.render(actions_enabled=None),
@@ -4780,7 +5002,7 @@ class RobotApplication:
             if (
                 first_effect.status != "applied"
                 or self.state is not LifecycleState.RUNNING
-                or self._active_goal is not expected_goal
+                or not self._goal_is_live(expected_goal)
                 or call.name == first_effect.name
                 or not any(tool.name == call.name for tool in available)
             ):
@@ -4859,7 +5081,7 @@ class RobotApplication:
             compose_cognition_instructions(
                 self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt, working_memory,
-                expected_goal if self._active_goal is expected_goal else None,
+                expected_goal if self._goal_is_live(expected_goal) else None,
             ),
             episode.render(), stimulus.render(actions_enabled=None),
             outcome.render(),
@@ -4934,7 +5156,7 @@ class RobotApplication:
             self.options.initiative_goal_closure_enabled
             and (all_effects_applied is True or all_effects_applied == "applied")
             and self.state is LifecycleState.RUNNING
-            and self._active_goal is expected_goal
+            and self._goal_is_live(expected_goal)
             and (
                 self._current_task_binding is None
                 or self._current_task_binding.active_goal is not expected_goal
@@ -5925,7 +6147,7 @@ class RobotApplication:
         try:
             if self.state is not LifecycleState.RUNNING or self._run_history_evidence is None:
                 raise RuntimeError("run history inspection is not available")
-            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+            if autonomous and (expected_goal is None or not self._goal_is_live(expected_goal)):
                 raise RuntimeError("expected active goal is no longer current")
             operation, selector, query = self._normalize_run_history_arguments(call)
             run = None if operation == "recent" else selector
@@ -5975,7 +6197,7 @@ class RobotApplication:
         try:
             if self.state is not LifecycleState.RUNNING or self._memory_recall is None:
                 raise RuntimeError("persistent memory recall is not available")
-            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+            if autonomous and (expected_goal is None or not self._goal_is_live(expected_goal)):
                 raise RuntimeError("expected active goal is no longer current")
             arguments = self._tool_arguments(call, {"query"})
             result = self._memory_recall.recall(arguments["query"])
@@ -6011,7 +6233,7 @@ class RobotApplication:
                 raise ValueError("focus must be at most 300 characters")
             if not self.visual_perception_available():
                 raise RuntimeError("visual perception is not available")
-            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+            if autonomous and (expected_goal is None or not self._goal_is_live(expected_goal)):
                 raise RuntimeError("expected active goal is no longer current")
             LOGGER.info("[PERCEPTION] modality=visual status=capture_requested")
             owner = self._visual_perception_resource_owner(
@@ -6092,7 +6314,7 @@ class RobotApplication:
             LOGGER.info("[INSPECTION] area=%s status=requested", area)
             if self.state is not LifecycleState.RUNNING:
                 raise RuntimeError("self-inspection requires a running application")
-            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+            if autonomous and (expected_goal is None or not self._goal_is_live(expected_goal)):
                 raise RuntimeError("expected active goal is no longer current")
             result = replace(
                 self._inspect_area(area), observed_at=self._aware_wall_clock()
@@ -6126,7 +6348,7 @@ class RobotApplication:
                 raise RuntimeError("diagnostics require a running application")
             if not self.options.diagnostics_enabled:
                 raise RuntimeError("diagnostics are disabled")
-            if autonomous and (expected_goal is None or self._active_goal is not expected_goal):
+            if autonomous and (expected_goal is None or not self._goal_is_live(expected_goal)):
                 raise RuntimeError("expected active goal is no longer current")
             if call.name == INSPECT_EVENTS_TOOL.name:
                 result = self._diagnostic_events(call)
@@ -6289,6 +6511,7 @@ class RobotApplication:
                 "goal_closure_enabled": self.options.initiative_goal_closure_enabled,
             },
             "jobs": {"available": self.jobs is not None,
+                     "max_concurrent_work": self.options.jobs_max_concurrent_work,
                      "auto_continue": self.options.jobs_auto_continue,
                      "heartbeat_seconds": self.options.jobs_heartbeat_seconds,
                      "max_automatic_steps": self.options.jobs_max_auto_steps,
@@ -6315,13 +6538,32 @@ class RobotApplication:
 
     def _diagnostic_job_runtime(self) -> dict[str, object]:
         current = self.current_job_run
+        slots = {
+            "maximum": self.options.jobs_max_concurrent_work,
+            "occupied": self.job_work_slots_occupied,
+            "available": self.job_work_slots_available,
+        }
+        contexts = [{
+            "job_id": context.job_id,
+            "run_id": context.run_id,
+            "task_id": str(context.task_id),
+            "state": ("working" if context.active_work_task is not None
+                      else "waiting_ready" if context.continuation is not None
+                      else context.execution_state),
+        } for context in sorted(
+            self._job_execution_contexts.values(), key=lambda item: item.run_id
+        )[:8]]
         if current is None:
-            return {"status": "idle", "observed_at": self._aware_wall_clock().isoformat(),
+            active = bool(contexts)
+            return {"status": "ok" if active else "idle",
+                    "observed_at": self._aware_wall_clock().isoformat(),
                     "source": "current_runtime", "scope": "current_job_occurrence",
                     "completeness": "complete_for_current_occurrence",
                     "run_id": self.observability.run_id,
-                    "job_state": "no_active_job",
-                    "current_job": None}
+                    "job_state": ("multiple_live_contexts" if active
+                                  else "no_active_job"),
+                    "current_job": None, "work_slots": slots,
+                    "live_contexts": contexts}
         continuation = self.job_continuation
         progress = self.job_progress
         goal = current.task.goal
@@ -6331,6 +6573,8 @@ class RobotApplication:
             "completeness": "complete_for_current_occurrence",
             "run_id": self.observability.run_id,
             "job_state": self._diagnostic_job_state(current, continuation),
+            "work_slots": slots,
+            "live_contexts": contexts,
             "current_job": {
                 "job": {"job_id": current.job.id, "name": current.job.name,
                         "enabled": current.job.enabled,
@@ -6757,7 +7001,7 @@ class RobotApplication:
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
     ) -> CognitionToolResult:
         try:
-            if expected_goal is not None and self._active_goal is not expected_goal:
+            if expected_goal is not None and not self._goal_is_live(expected_goal):
                 raise RuntimeError("active goal changed since this decision was grounded")
             arguments = self._tool_arguments(call, {"outcome"})
             outcome = arguments["outcome"]

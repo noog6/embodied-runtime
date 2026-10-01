@@ -66,6 +66,7 @@ class JobsFileConfig:
     auto_continue: bool = False
     heartbeat_seconds: float = 30.0
     max_auto_steps: int = 3
+    max_concurrent_work: int = 1
     scheduler_poll_seconds: float = 30.0
 
 
@@ -141,6 +142,7 @@ class LaunchConfiguration:
     jobs_auto_continue: bool
     jobs_heartbeat_seconds: float
     jobs_max_auto_steps: int
+    jobs_max_concurrent_work: int
     jobs_scheduler_poll_seconds: float
     sms_enabled: bool
     sms_backend: str
@@ -169,7 +171,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     earcons_enabled=True,
     memory_enabled=False, memory_database_path=None,
     jobs_enabled=False, jobs_database_path=None, jobs_auto_continue=False,
-    jobs_heartbeat_seconds=30.0, jobs_max_auto_steps=3,
+    jobs_heartbeat_seconds=30.0, jobs_max_auto_steps=3, jobs_max_concurrent_work=1,
     jobs_scheduler_poll_seconds=30.0,
     sms_enabled=False, sms_backend="twilio", sms_bind_host="127.0.0.1",
     sms_bind_port=8080, sms_webhook_path="/sms",
@@ -194,7 +196,7 @@ _EARCONS_KEYS = {"enabled"}
 _MEMORY_KEYS = {"enabled", "database_path"}
 _JOBS_KEYS = {
     "enabled", "database_path", "auto_continue", "heartbeat_seconds",
-    "max_auto_steps",
+    "max_auto_steps", "max_concurrent_work",
     "scheduler_poll_seconds",
 }
 _INTERACTION_KEYS = {"environment"}
@@ -318,6 +320,11 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     if (isinstance(max_auto_steps, bool) or not isinstance(max_auto_steps, int)
             or max_auto_steps <= 0):
         raise ConfigurationError("jobs.max_auto_steps must be a positive integer")
+    max_concurrent_work = jobs.get("max_concurrent_work", 1)
+    if (isinstance(max_concurrent_work, bool)
+            or not isinstance(max_concurrent_work, int)
+            or not 1 <= max_concurrent_work <= 256):
+        raise ConfigurationError("jobs.max_concurrent_work must be an integer from 1 to 256")
     scheduler_poll_seconds = jobs.get("scheduler_poll_seconds", 30.0)
     if (isinstance(scheduler_poll_seconds, bool)
             or not isinstance(scheduler_poll_seconds, (int, float))
@@ -412,7 +419,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         MemoryFileConfig(memory_enabled, database_path),
         JobsFileConfig(
             jobs_enabled, jobs_database_path, jobs.get("auto_continue", False),
-            float(heartbeat_seconds), max_auto_steps,
+            float(heartbeat_seconds), max_auto_steps, max_concurrent_work,
             float(scheduler_poll_seconds),
         ),
         InteractionFileConfig(**interaction),
@@ -511,6 +518,8 @@ def resolve_launch_configuration(
         jobs_auto_continue=jobs.auto_continue,
         jobs_heartbeat_seconds=jobs.heartbeat_seconds,
         jobs_max_auto_steps=jobs.max_auto_steps,
+        jobs_max_concurrent_work=scalar(
+            "jobs_max_concurrent_work", jobs.max_concurrent_work, 1),
         jobs_scheduler_poll_seconds=jobs.scheduler_poll_seconds,
         sms_enabled=opt_in("sms", sms.enabled, False),
         sms_backend=sms.backend,

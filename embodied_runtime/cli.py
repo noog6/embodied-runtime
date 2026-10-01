@@ -203,6 +203,11 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         default=configurable_default(False),
         help="allow one post-effect evaluation to complete the same active goal",
     )
+    parser.add_argument(
+        "--jobs-max-concurrent-work", type=int, choices=range(1, 257),
+        default=configurable_default(1),
+        help="maximum concurrent bounded Job cognition tasks (1..256)",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
         "--mode", choices=("run", "console", "diagnostics"),
@@ -282,6 +287,7 @@ def parse_launch_arguments(
     args.jobs_auto_continue = effective.jobs_auto_continue
     args.jobs_heartbeat_seconds = effective.jobs_heartbeat_seconds
     args.jobs_max_auto_steps = effective.jobs_max_auto_steps
+    args.jobs_max_concurrent_work = effective.jobs_max_concurrent_work
     args.jobs_scheduler_poll_seconds = effective.jobs_scheduler_poll_seconds
     args.power_interval_seconds = effective.power_interval_seconds
     args.power_attention_voltage_v = effective.power_attention_voltage_v
@@ -589,6 +595,7 @@ async def _run_application(
                                                   jobs_auto_continue=args.jobs_auto_continue,
                                                   jobs_heartbeat_seconds=args.jobs_heartbeat_seconds,
                                                   jobs_max_auto_steps=args.jobs_max_auto_steps,
+                                                  jobs_max_concurrent_work=args.jobs_max_concurrent_work,
                                                   jobs_scheduler_poll_seconds=args.jobs_scheduler_poll_seconds,
                                                   voice_enabled=args.voice_enabled,
                                                   voice_wake_word_enabled=args.voice_wake_word_enabled,

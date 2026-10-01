@@ -71,6 +71,7 @@ class ConfigurationTests(unittest.TestCase):
                 "jobs_enabled": True,
                 "jobs_database_path": Path("data/jobs.sqlite3").resolve(),
                 "jobs_auto_continue": True,
+                "jobs_max_concurrent_work": 4,
             }),
         )
 
@@ -79,6 +80,37 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(HISTORICAL_DEFAULTS.interaction_environment, "workstation")
         self.assertFalse(HISTORICAL_DEFAULTS.sms_enabled)
         self.assertTrue(HISTORICAL_DEFAULTS.earcons_enabled)
+        self.assertEqual(HISTORICAL_DEFAULTS.jobs_max_concurrent_work, 1)
+
+    def test_job_concurrent_work_configuration_and_cli_override(self):
+        self.assertEqual(
+            self.effective("[jobs]\nmax_concurrent_work=4\n").jobs_max_concurrent_work,
+            4,
+        )
+        self.assertEqual(
+            self.effective("[jobs]\nmax_concurrent_work=32\n").jobs_max_concurrent_work,
+            32,
+        )
+        self.assertEqual(
+            self.effective("[jobs]\nmax_concurrent_work=256\n").jobs_max_concurrent_work,
+            256,
+        )
+        self.assertEqual(
+            self.effective(
+                "[jobs]\nmax_concurrent_work=4\n",
+                ("--jobs-max-concurrent-work", "32"),
+            ).jobs_max_concurrent_work,
+            32,
+        )
+
+    def test_job_concurrent_work_configuration_rejects_invalid_values(self):
+        for value in ("0", "-1", "257", "true", "1.5"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ConfigurationError, "max_concurrent_work"
+            ):
+                load_runtime_config(self.write(
+                    f"[jobs]\nmax_concurrent_work={value}\n"
+                ))
 
     def test_all_hardware_selection_values_are_accepted(self):
         for hardware in ("auto", "virtual", "host", "fusion-hat"):

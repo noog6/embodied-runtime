@@ -107,17 +107,19 @@ class JobCoordinationTests(unittest.IsolatedAsyncioTestCase):
             no_store.start_job_run(1)
         await no_store.stop()
 
-    async def test_current_binding_is_exclusive(self):
+    async def test_foreground_selection_does_not_limit_live_contexts(self):
         first = self.store.create_job("First")
         second = self.store.create_job("Second")
         app = self.make_app(self.store)
         await app.start()
-        binding = app.start_job_run(first.id)
-        with self.assertRaisesRegex(RuntimeError, "already current"):
-            app.start_job_run(second.id)
-        self.assertIs(app.current_job_run, binding)
-        self.assertIs(app.current_task, binding.task)
-        self.assertEqual(self.store.list_runs(second.id), ())
+        first_binding = app.start_job_run(first.id)
+        second_binding = app.start_job_run(second.id)
+        self.assertIs(app.current_job_run, second_binding)
+        self.assertIs(app.current_task, second_binding.task)
+        self.assertEqual(
+            {context.run_id for context in app.job_execution_contexts},
+            {first_binding.run.id, second_binding.run.id},
+        )
         await app.stop()
 
     async def test_start_task_failure_stops_pending_run(self):
@@ -145,6 +147,41 @@ class JobCoordinationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.current_job_run)
         self.assertIsNone(app.current_task)
         self.assertIsNone(app.active_goal)
+        await app.stop()
+
+    async def test_concurrent_running_transition_failure_cleans_exact_staging_only(self):
+        job_a = self.store.create_job("A")
+        job_b = self.store.create_job("B")
+        job_c = self.store.create_job("C")
+        recording = RecordingStore(self.store)
+        app = self.make_app(recording)
+        await app.start()
+        binding_a = app.start_job_run(job_a.id)
+        context_a = app.current_job_execution_context
+        task_binding_a = context_a.task_binding
+        goal_a = task_binding_a.active_goal
+
+        recording.fail_running = True
+        with self.assertRaisesRegex(RuntimeError, "running persistence"):
+            app.start_job_run(job_b.id)
+
+        run_b, = self.store.list_runs(job_b.id)
+        self.assertIs(run_b.status, JobRunStatus.STOPPED)
+        self.assertIsNone(app._unbound_task_binding)
+        self.assertFalse(any(context.job_id == job_b.id
+                             for context in app.job_execution_contexts))
+        self.assertIs(app.current_job_execution_context, context_a)
+        self.assertIs(app.current_job_run, binding_a)
+        self.assertIs(context_a.task_binding, task_binding_a)
+        self.assertIs(context_a.task_binding.active_goal, goal_a)
+        self.assertIs(context_a.binding.task.status, TaskStatus.RUNNING)
+
+        recording.fail_running = False
+        binding_c = app.start_job_run(job_c.id)
+        self.assertEqual(
+            {context.run_id for context in app.job_execution_contexts},
+            {binding_a.run.id, binding_c.run.id},
+        )
         await app.stop()
 
     async def test_terminal_status_and_summary_mapping(self):

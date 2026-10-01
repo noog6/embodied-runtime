@@ -79,6 +79,7 @@ database_path = "../data/jobs.sqlite3"
 auto_continue = true
 heartbeat_seconds = 30
 max_auto_steps = 3
+max_concurrent_work = 1
 scheduler_poll_seconds = 30
 ```
 
@@ -167,6 +168,18 @@ conversation, and TTS responses remain available. It is intentionally not a
 general audio mute. Earcons are immediate, lossy state signals rather than
 guaranteed notifications: speaker contention skips a cue without queuing,
 retrying, or playing it later.
+
+`jobs.max_concurrent_work` fixes the process-lifetime number of concurrent
+bounded Job cognition tasks. It defaults to `1`, accepts integers from `1` to
+`256`, and may be overridden with `--jobs-max-concurrent-work`. Capacity is
+explicit deployment policy; it is not inferred from CPU count, memory, hardware
+backend, hostname, or platform. Suggested starting points are `4` for a small
+constrained SBC (including the Mira Raspberry Pi deployment), `32` for a typical
+desktop/workstation, and a deliberately tuned higher value for a larger host or
+server. These are starting points, not performance guarantees or detected
+defaults. Operator cognition is a separate lane and does not consume this
+capacity. Shared physical and effect resources remain independently governed by
+the fail-fast `ResourceArbiter`.
 
 `jobs.scheduler_poll_seconds` is the positive interval for the lightweight
 daily-schedule timer. It defaults to 30 seconds. It only determines when the
@@ -280,12 +293,16 @@ the database's parent directory only when enabled. See
 
 The optional `[jobs]` table accepts `enabled` (boolean), `database_path`
 (string), `auto_continue` (boolean), positive numeric `heartbeat_seconds`, and
-positive integer `max_auto_steps` (booleans are not integers here). Jobs and
+positive integer `max_auto_steps`, and `max_concurrent_work` from `1` through
+`256` (booleans are not integers here). Jobs and
 automatic continuation default off; the continuation timing and budget defaults
 are `30.0` seconds and `3`. Enabling Jobs requires a non-empty path. Relative
-paths resolve from the TOML file's directory. The continuation settings only
-govern another bounded turn for an explicitly started current JobRun; they do
-not schedule or recover Jobs. Persistent memory need not be enabled. See
+paths resolve from the TOML file's directory. A continuation belongs to one
+exact live JobRun context. Manually started, trigger-started, and
+schedule-started JobRuns may use bounded continuation when configured. A
+continuation never creates a new Job occurrence: its readiness and execution
+remain exact-context and capacity-bound. It does not recover Jobs. Persistent
+memory need not be enabled. See
 [`jobs.md`](jobs.md) for catalog, assignment, and lifecycle semantics.
 
 ## SMS transport
