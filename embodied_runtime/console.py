@@ -282,7 +282,7 @@ class RuntimeConsole:
                 "  job start JOB<n>               Start a JobRun and bounded Task",
                 "  job schedule JOB<n> [daily HH:MM [--timezone ZONE]]",
                 "  job unschedule JOB<n>          Remove a Job's daily schedule",
-                "  job work                       Perform one bounded Job work episode",
+                "  job work [RUN<n>]              Perform one bounded Job work episode",
                 "  job current                    Show current JobRun and Task",
                 "  job complete [summary]         Complete current JobRun",
                 "  job fail <error-summary>       Fail current JobRun",
