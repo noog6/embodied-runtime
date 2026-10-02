@@ -63,7 +63,20 @@ distinct bounded `WorkspaceQuotaError`.
 
 ## Mutation and durability
 
-The substrate supports only `create`, `replace`, and copy-on-write `append`.
+The substrate supports `create`, `replace`, copy-on-write `append`, and
+`upsert`. Their artifact-specific semantics are:
+
+- `create` requires absence and conflicts if the artifact exists;
+- `replace` requires presence and reports not found if the artifact is absent;
+- `append` extends an existing artifact and reports not found if it is absent;
+- `upsert` writes a complete artifact, creating it when absent or replacing it
+  when present.
+
+`upsert` is useful for durable baselines and current-state summaries rewritten
+across runs but potentially uninitialized on the first run. It avoids spending
+an acquisition merely to discover whether a complete durable working artifact
+has already been initialized. This is specifically a complete artifact
+create-or-replace operation, not a broader database-style facility.
 There is no delete, move, rename, search, glob, or recursive listing. Text is
 strictly UTF-8 encoded and embedded NUL and unencodable surrogates are rejected.
 CRLF, lone CR, whitespace, and trailing newlines are preserved exactly. File
@@ -73,14 +86,18 @@ Writes stage complete bytes in an unpredictable, exclusive, exact-grammar
 reserved temporary sibling, fsync the staged file, atomically publish, and
 fsync the containing directory. Create uses Linux `renameat2(RENAME_NOREPLACE)`
 so no-clobber publication and removal of the temporary name are one atomic
-operation; replacement uses atomic rename. Quotas are checked
-through the same contained traversal before publication. A failure before
+operation; replacement uses atomic rename. Missing-artifact `upsert` uses the
+same no-clobber publication, while existing-artifact `upsert` uses the same
+destination revalidation and replacement publication. Thus a destination that
+appears concurrently conflicts rather than being overwritten. Quotas are
+checked through the same contained traversal before publication. A failure before
 publication leaves the destination unchanged. If directory fsync fails after
 publication, `WorkspaceDurabilityError` truthfully reports `published = true`
 and `durability_confirmed = false`; it does not claim rollback.
 
-Ordinary failed creates best-effort remove only the exact empty parent and Job
-directories created by that attempt, in reverse order. They never recursively
+Ordinary failed creates and missing-path upserts best-effort remove only the
+exact empty parent and Job directories created by that attempt, in reverse
+order. They never recursively
 delete or remove pre-existing directories. Abrupt process death may retain an
 empty structural directory, but artifact publication remains old-or-new.
 
@@ -108,10 +125,10 @@ only when both Jobs and Workspace persistence exist and are absent from general
 autonomous initiative, notification attention, and non-Job temporal follow-up.
 
 The same explicit operator-dialogue projection offers one effect,
-`workspace_write(job, path, mode, content)`, with strict `create`, `replace`, and
-`append` modes and an 8,000-character model-facing ceiling. It is available only
-when Jobs and Workspace persistence both exist and is never an acquisition. The
-current request must explicitly request or
+`workspace_write(job, path, mode, content)`, with strict `create`, `replace`,
+`append`, and `upsert` modes and an 8,000-character model-facing ceiling. It is
+available only when Jobs and Workspace persistence both exist and is never an
+acquisition. The current request must explicitly request or
 clearly authorize the durable write; cognition must not take notes proactively,
 invent a destination, or create a Job. The finite operator grammar permits one
 such effect per episode, including after ordinary acquisitions, with no edit loop.
@@ -131,8 +148,9 @@ edit loop or Workspace-specific budget. Manual, scheduled, and automatic
 continuation work all use this same bounded episode path and exact binding.
 
 Create rejects an existing artifact; replace and append report a missing
-artifact rather than creating one. Only an applied, published, durability-
-confirmed result supports an unqualified success acknowledgement. Rejection or
+artifact rather than creating one; upsert atomically creates or replaces a
+complete artifact without adding an acquisition. Only an applied, published,
+durability-confirmed result supports an unqualified success acknowledgement. Rejection or
 unavailability does not prove a change. An indeterminate published result means
 the artifact may already have changed but durability was not confirmed, so it
 supports neither confirmed durable success nor confirmed failure.
