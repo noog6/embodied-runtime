@@ -68,6 +68,10 @@ untimestamped structured snapshot output; surrounding runtime logs are timestamp
 Validated launches also create a local, sequential [run history](docs/run-history.md)
 under `data/runs/`; this records runtime-owned logs, not a terminal transcript.
 
+Development examples of useful durable Job compositions are collected in
+[Tested Job patterns](docs/tested-jobs.md). They are patterns exercised while
+developing Mira, not Jobs installed by the generic runtime.
+
 ## Bounded delayed initiative
 
 When initiative is enabled, cognition may spend one semantic-effect slot to

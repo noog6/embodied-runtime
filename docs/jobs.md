@@ -1,5 +1,9 @@
 # Jobs
 
+This page specifies how the generic Job machinery works. For a concise gallery
+of practical compositions exercised during Mira development, see [Tested Job
+patterns](tested-jobs.md); those examples are not built-in Jobs.
+
 See [Findings and deliberate search](findings.md) for reusable, provenance-bearing
 claims published by completed JobRuns. Findings complement rather than replace
 JobRun result reports and private Job Workspaces.
