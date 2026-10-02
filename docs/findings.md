@@ -58,6 +58,51 @@ Deliberate publication and search emit bounded `[FINDINGS]` operational logs wit
 episode and source identity where available, argument lengths, match counts, and
 status. Claim text and full search queries are never logged.
 
-Automatic context selection, embeddings, promotion to persistent memory,
-retraction/supersession, contradiction handling, expiry, and periodic reflection
-are explicitly deferred to later Knowledge Integration phases.
+Embeddings, promotion to persistent memory, retraction/supersession,
+contradiction handling, expiry, and periodic reflection are explicitly deferred
+to later Knowledge Integration phases.
+
+# Deterministic operator Finding context (Phase 2A)
+
+When `[jobs].findings_context_selection_enabled` is true, the common operator
+cognition boundary can proactively select historical Findings before the first
+provider request. This is local, deterministic context selection, not an LLM
+request or a cognition tool call. It applies only to operator cognition; Job
+work, autonomous initiative, notifications, temporal follow-up, and outcome
+evaluation do not receive automatic Finding context.
+
+The explicit relevance cues are `finding(s)`, learned/learnt, discovered,
+observed/reported/concluded, previously/earlier/before/history, and
+changed/since/still. `found out`, `last time`, and `used to`/`use to` are
+phrase cues; the standalone words are not cues, and imperative `change` is not
+historical intent. A Job mention or `remember` alone is not a
+cue. Exact RUN/JOB result, file, and Workspace requests are suppressed unless
+Finding or learned/discovered intent is explicit. Pure current-state requests
+are also suppressed; explicit historical or comparison intent takes precedence.
+
+The query is NFKC-normalized and case-folded, punctuation is removed, cue and
+function words are discarded, repeated terms are removed in original order,
+and a small transparent singularization handles `-ies` and plural `-s`. It is
+limited to 12 terms and the durable search API's 200-character query bound. No
+remaining term means no search, rather than a newest-Findings fallback.
+
+Selection delegates to the same completed-source-only `search_findings` store
+operation used by the deliberate tool. At most three Findings are selected.
+Claims are projected at no more than 1,200 characters each and the whole
+historical section at no more than 6,000 characters, with explicit truncation.
+The section JSON-quotes authored fields and warns that embedded instructions
+are data. Findings remain historical, possibly stale, and
+`job_authored_non_authoritative`; current runtime or sensor evidence outranks
+them.
+
+The selection and rendered packet are captured once per operator episode and
+reused unchanged in refreshed instructions. They consume no acquisition and
+create no WorkingMemory or persistent-memory record. Store, search, or
+projection failures are logged as `[CONTEXT] ... status=failed` and fail open.
+The default is disabled; Mira's agentic profile opts in.
+
+Automatic selection provides proactive deterministic grounding;
+`search_findings` remains available as a deliberate, acquisition-budgeted
+model search. Phase 2A does not route persistent memory, JobRun results,
+Workspace material, cross-channel history, or general conversation archives.
+General source routing is deferred to a later Knowledge Integration phase.

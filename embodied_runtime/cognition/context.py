@@ -153,6 +153,7 @@ def compose_cognition_instructions(
     startup_prompt: str | None,
     working_memory: Sequence[WorkingMemoryTurn] = (),
     active_goal: ActiveGoal | None = None,
+    selected_historical_context: str = "",
 ) -> str:
     """Keep operator instructions distinct from machine-generated grounding."""
     sections = []
@@ -163,8 +164,10 @@ def compose_cognition_instructions(
         temporal_context.render(),
         temporal_situation.render(),
         render_active_goal(active_goal),
-        render_working_memory(working_memory),
     ))
+    if selected_historical_context:
+        sections.append(selected_historical_context)
+    sections.append(render_working_memory(working_memory))
     return "\n\n".join(sections)
 
 
