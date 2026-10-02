@@ -260,6 +260,57 @@ class ConcurrentJobSlotTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(verification.get_run(binding.run.id).status
                             is JobRunStatus.INTERRUPTED for binding in bindings))
 
+    async def test_exact_stop_cancels_only_selected_active_work(self):
+        backend = ConcurrentBackend()
+        app = self.app(backend, 2)
+        await app.start()
+        bindings = [app.start_job_run(self.store.create_job(name).id)
+                    for name in ("A", "B")]
+        sources = [f"JOB{item.job.id}/RUN{item.run.id}" for item in bindings]
+        for source in sources:
+            backend.gate(source)
+        works = [asyncio.create_task(app.work_job_run_once(item.run.id))
+                 for item in bindings]
+        await asyncio.gather(*(backend.started[source].wait() for source in sources))
+
+        stopped = await app.finish_job_run_by_id(
+            bindings[0].run.id, JobRunStatus.STOPPED, "operator stop")
+
+        self.assertIs(stopped.run.status, JobRunStatus.STOPPED)
+        self.assertTrue(works[0].cancelled())
+        self.assertIsNone(app._context_for_run(bindings[0].run.id))
+        context_b = app._context_for_run(bindings[1].run.id)
+        self.assertIsNotNone(context_b)
+        self.assertIs(context_b.active_work_task, works[1])
+        self.assertIn(sources[1], backend.outstanding)
+        self.assertEqual(len(app.episode_coordinator.current_autonomous_episodes), 1)
+        backend.release[sources[1]].set()
+        await works[1]
+        await app.stop()
+
+    async def test_exact_complete_fail_and_selectorless_ambiguity(self):
+        app = self.app(ConcurrentBackend(), 2)
+        await app.start()
+        jobs = [self.store.create_job(name) for name in ("A", "B", "C")]
+        bindings = [app.start_job_run(job.id) for job in jobs[:2]]
+        with self.assertRaisesRegex(RuntimeError, "ambiguous; specify RUN<n>"):
+            app.finish_job_run(JobRunStatus.STOPPED)
+        completed = await app.finish_job_run_by_id(
+            bindings[0].run.id, JobRunStatus.COMPLETED, "done")
+        failed = await app.finish_job_run_by_id(
+            bindings[1].run.id, JobRunStatus.FAILED, "failed")
+        self.assertIs(completed.run.status, JobRunStatus.COMPLETED)
+        self.assertIs(failed.run.status, JobRunStatus.FAILED)
+        self.assertEqual(self.store.get_run(failed.run.id).error_summary, "failed")
+
+        live = app.start_job_run(jobs[2].id)
+        self.store.set_job_enabled(jobs[2].id, False)
+        self.assertIsNotNone(app._context_for_run(live.run.id))
+        self.assertFalse(self.store.get_job(jobs[2].id).enabled)
+        stopped = app.finish_job_run(JobRunStatus.STOPPED)
+        self.assertEqual(stopped.run.id, live.run.id)
+        await app.stop()
+
     async def test_two_contexts_retain_independent_parked_continuations(self):
         backend = ParkingBackend()
         app = RobotApplication(

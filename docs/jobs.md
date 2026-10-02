@@ -589,7 +589,13 @@ responsibility definition in place for future occurrences while preserving Job
 identity, history, schedule, and Workspace. The currently executing same Job
 cannot be updated until its occurrence is terminal.
 Runtime coordination commands are `job start`, asynchronous `job work`, `job
-current`, `job complete`, `job fail`, and `job stop`.
+current`, `job complete`, `job fail`, and `job stop`. Terminal commands accept
+an exact `RUN<n>` selector; selector-less compatibility is allowed only when one
+live occurrence is unambiguous. Exact control cancels and joins that Run's active
+cognition before terminalizing its Task and durable result. Disabling a Job
+prevents future activation but deliberately does not stop an already-live Run.
+Exact stop, complete, and fail decisions may also terminalize a parked Run; the
+runtime does not start autonomous cognition merely to apply that operator decision.
 
 It does not mark the durable run failed; process shutdown or later startup
 reconciliation marks an unfinished occurrence `interrupted`. Cron, new-Job
@@ -620,20 +626,25 @@ It uses the same trigger admission, attention arbitration, bounded work, and
 result persistence as every other Job occurrence. A process restart creates a
 new runtime instance and therefore may legitimately create another occurrence.
 
-For this phase, each activation event type has at most one enabled trigger binding;
-creating or enabling a second binding fails closed until explicit multi-Job
-arbitration exists. Disabling a Job does not implicitly mutate its trigger row, so
-another Job cannot claim the event type until that enabled binding is disabled or
-removed.
+Several Jobs may own enabled bindings for the same event type. One event is
+offered independently to those subscribers in ascending Job ID order, and one
+subscriber's ineligibility or activation failure does not suppress the others.
+A raised semantic event may simultaneously satisfy existing continuation
+readiness and offer new trigger activation to subscribed Jobs. Same-Job
+active-occurrence coalescing prevents that dual use from creating a duplicate Run.
 Multiple trigger types may point to the same durable responsibility. Only one active
 occurrence of that Job is admitted regardless of which configured trigger fires.
 Further matching events coalesce rather than forming a queue. Runtime readiness
 also has an application-lifetime observation guard, so accidental duplicate
 delivery cannot create another startup occurrence. If coordination is
-busy, the application retains one volatile pending bit for that exact trigger and
-retries it at the next lightweight Job activation opportunity. It is discarded on
-shutdown, trigger removal, or authority disablement, and never stores event history
-or payloads. If its continuation is waiting for that semantic event, the same run wakes. `wait_for_event` supports
+busy, including while operator attention is active or waiting, the application
+retains one volatile pending bit per `(job_id, trigger_type)` subscription and
+retries it at the next lightweight Job activation opportunity. Repeated events
+coalesce, so this is bounded by configured subscriptions rather than raw events.
+Capacity admits as many initial episodes as the existing Job work slots allow.
+Pending state is discarded on shutdown, trigger removal, or Job disablement and
+never stores event history or payloads. If its continuation is waiting for that
+semantic event, the same run wakes. `wait_for_event` supports
 `presence_changed`, `power_attention_required`, `power_recovered`,
 `thermal_warning_raised`, `thermal_warning_cleared`, `memory_pressure_raised`,
 and `memory_pressure_cleared`. A wake
@@ -662,10 +673,11 @@ authority; a new JobRun performs bounded cognition; and a later event may wake
 that same run. Interrupted runs are never resurrected. Startup attention creates
 a new occurrence when the condition remains unresolved.
 
-The Jobs database schema version is 6. Opening a version-4 database transactionally
+The Jobs database schema version is 8. Opening a version-4 database transactionally
 adds the trigger table; opening version 5 expands its bounded event-type constraint.
-Both migrations preserve Jobs, JobRuns, schedules, result reports, trigger rows,
-and the unique-enabled-owner invariant.
+Opening version 7 removes the former globally unique enabled-event index without
+rewriting or deleting trigger rows. All migrations preserve Jobs, JobRuns,
+schedules, result reports, and trigger rows.
 
 ## Session execution contexts
 
@@ -693,5 +705,6 @@ general autonomous initiative remains conservative and separate. Shared
 WorkingMemory and persistent memory remain application-level sources; contexts
 neither contain nor create private conversation histories or semantic-memory
 stores. Workspace authority remains captured from the exact Job context for each
-bounded cognition episode. Phase 3B trigger fan-out and multiple trigger owners
-remain deferred.
+bounded cognition episode. Phase 3B-2 priority, fairness, preemption, and durable
+activation queuing remain deferred; subscriber ordering is deterministic admission
+iteration, not priority.

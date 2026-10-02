@@ -11,7 +11,7 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _JOB_RUNS_SCHEMA = """CREATE TABLE job_runs (
        id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
        status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','stopped','interrupted')),
@@ -38,8 +38,6 @@ _SCHEMA = (
            'thermal_warning_raised','memory_pressure_raised','runtime_ready')),
        enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
        PRIMARY KEY(job_id,event_type))""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS idx_job_triggers_enabled_event
-       ON job_triggers(event_type) WHERE enabled=1""",
 )
 
 
@@ -63,18 +61,28 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
+        if version == 7:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "DROP INDEX IF EXISTS idx_job_triggers_enabled_event")
+                self._connection.execute("PRAGMA user_version = 8")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+            return
         if version in (5, 6):
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 self._connection.execute("DROP INDEX IF EXISTS idx_job_triggers_enabled_event")
                 self._connection.execute("ALTER TABLE job_triggers RENAME TO job_triggers_previous")
-                self._connection.execute(_SCHEMA[-2])
+                self._connection.execute(_SCHEMA[-1])
                 self._connection.execute(
                     """INSERT INTO job_triggers(job_id,event_type,enabled)
                        SELECT job_id,event_type,enabled FROM job_triggers_previous""")
                 self._connection.execute("DROP TABLE job_triggers_previous")
-                self._connection.execute(_SCHEMA[-1])
-                self._connection.execute("PRAGMA user_version = 7")
+                self._connection.execute("PRAGMA user_version = 8")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -83,9 +91,8 @@ class SQLiteJobStore:
         if version == 4:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                self._connection.execute(_SCHEMA[-2])
                 self._connection.execute(_SCHEMA[-1])
-                self._connection.execute("PRAGMA user_version = 7")
+                self._connection.execute("PRAGMA user_version = 8")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -95,7 +102,7 @@ class SQLiteJobStore:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 if version == 1:
-                    self._connection.execute(_SCHEMA[-3])
+                    self._connection.execute(_SCHEMA[-2])
                 if version in (1, 2):
                     self._connection.execute("ALTER TABLE job_runs ADD COLUMN result_report TEXT")
                 self._connection.execute("ALTER TABLE job_runs RENAME TO job_runs_v3")
@@ -110,9 +117,8 @@ class SQLiteJobStore:
                 )
                 self._connection.execute("DROP TABLE job_runs_v3")
                 self._connection.execute("CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)")
-                self._connection.execute(_SCHEMA[-2])
                 self._connection.execute(_SCHEMA[-1])
-                self._connection.execute("PRAGMA user_version = 7")
+                self._connection.execute("PRAGMA user_version = 8")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -251,15 +257,10 @@ class SQLiteJobStore:
         trigger = JobTrigger(job_id, enabled, event_type)
         if self.get_job(job_id) is None:
             raise KeyError(f"unknown job: {job_id}")
-        try:
-            self._connection.execute(
-                """INSERT INTO job_triggers(job_id,event_type,enabled) VALUES(?,?,?)
-                   ON CONFLICT(job_id,event_type) DO UPDATE SET enabled=excluded.enabled""",
-                (job_id, event_type.value, int(enabled)))
-        except sqlite3.IntegrityError as error:
-            raise ValueError(
-                f"event trigger already has an enabled Job owner: {event_type.value}"
-            ) from error
+        self._connection.execute(
+            """INSERT INTO job_triggers(job_id,event_type,enabled) VALUES(?,?,?)
+               ON CONFLICT(job_id,event_type) DO UPDATE SET enabled=excluded.enabled""",
+            (job_id, event_type.value, int(enabled)))
         return trigger
 
     def get_trigger(self, job_id: int, event_type: JobTriggerType) -> JobTrigger | None:

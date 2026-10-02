@@ -70,7 +70,8 @@ from embodied_runtime.jobs import (
     MAX_JOB_CONTINUATION_DELAY_SECONDS,
     MAX_RUN_REPORT_CHARS,
     MIN_JOB_CONTINUATION_DELAY_SECONDS,
-    JobRun, JobRunStatus, JobStore, JobWorkspaceStore, JobWorkDisposition, JobWorkOutcome,
+    JobRun, JobRunStatus, JobStore, JobTrigger, JobWorkspaceStore,
+    JobWorkDisposition, JobWorkOutcome,
     WorkspaceBackendError, WorkspaceConflictError, WorkspaceDurabilityError,
     WorkspaceNotFoundError, WorkspaceQuotaError, WorkspaceUnsafeError,
     WorkspaceValidationError,
@@ -1049,8 +1050,8 @@ class RobotApplication:
         self._foreground_job_run_id: int | None = None
         self._parked_job_run_id: int | None = None
         self._unbound_task_binding: _CurrentTaskBinding | None = None
-        # One lossy, volatile activation bit per bounded trigger type; not an event queue.
-        self._pending_job_triggers: set[JobTriggerType] = set()
+        # One lossy, volatile activation bit per durable subscription; not an event queue.
+        self._pending_job_triggers: set[tuple[int, JobTriggerType]] = set()
         # Runtime lifecycle occurrence guard. It is deliberately volatile so a
         # new process/application instance gets a new readiness opportunity.
         self._runtime_ready_observed = False
@@ -1272,7 +1273,9 @@ class RobotApplication:
         else:
             context.replace_binding(binding)
             context.execution_state = "runnable"
-        self._foreground_job_run_id = binding.run.id
+        exact = self._job_execution_context.get()
+        if exact is None or exact is not context:
+            self._foreground_job_run_id = binding.run.id
 
     @property
     def _current_task_binding(self) -> _CurrentTaskBinding | None:
@@ -1488,8 +1491,10 @@ class RobotApplication:
 
     async def _on_power_recovered(self, event: PowerRecovered) -> None:
         trigger_type = JobTriggerType.POWER_ATTENTION_REQUIRED
-        if trigger_type in self._pending_job_triggers:
-            self._pending_job_triggers.discard(trigger_type)
+        pending = {item for item in self._pending_job_triggers
+                   if item[1] is trigger_type}
+        if pending:
+            self._pending_job_triggers.difference_update(pending)
             LOGGER.info("[JOBS] trigger=%s action=discarded reason=condition_resolved",
                         trigger_type.value)
         self._satisfy_job_event(JobReadinessEventType.POWER_RECOVERED, event.timestamp_ns,
@@ -1497,12 +1502,11 @@ class RobotApplication:
                                              battery_voltage_v=event.battery_voltage_v))
 
     async def _on_power_attention(self, event: PowerAttentionRequired) -> None:
-        if self._satisfy_job_event(JobReadinessEventType.POWER_ATTENTION_REQUIRED,
-                                   event.timestamp_ns,
-                                   JobWakeEvent(
-                                       JobReadinessEventType.POWER_ATTENTION_REQUIRED,
-                                       battery_voltage_v=event.battery_voltage_v)):
-            return
+        self._satisfy_job_event(
+            JobReadinessEventType.POWER_ATTENTION_REQUIRED, event.timestamp_ns,
+            JobWakeEvent(JobReadinessEventType.POWER_ATTENTION_REQUIRED,
+                         battery_voltage_v=event.battery_voltage_v),
+        )
         await self._activate_triggered_jobs(JobTriggerType.POWER_ATTENTION_REQUIRED)
 
     async def _on_thermal_warning_raised(self, event: ThermalWarningRaised) -> None:
@@ -1511,8 +1515,8 @@ class RobotApplication:
             cpu_temperature_celsius=event.cpu_temperature_celsius,
             threshold_celsius=event.warning_threshold_celsius,
         )
-        if not self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake):
-            await self._activate_triggered_jobs(JobTriggerType.THERMAL_WARNING_RAISED)
+        self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake)
+        await self._activate_triggered_jobs(JobTriggerType.THERMAL_WARNING_RAISED)
 
     async def _on_thermal_warning_cleared(self, event: ThermalWarningCleared) -> None:
         self._discard_resolved_job_trigger(JobTriggerType.THERMAL_WARNING_RAISED)
@@ -1531,8 +1535,8 @@ class RobotApplication:
             available_ratio=event.available_ratio,
             threshold_ratio=event.pressure_threshold_ratio,
         )
-        if not self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake):
-            await self._activate_triggered_jobs(JobTriggerType.MEMORY_PRESSURE_RAISED)
+        self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake)
+        await self._activate_triggered_jobs(JobTriggerType.MEMORY_PRESSURE_RAISED)
 
     async def _on_memory_pressure_cleared(self, event: MemoryPressureCleared) -> None:
         self._discard_resolved_job_trigger(JobTriggerType.MEMORY_PRESSURE_RAISED)
@@ -1546,11 +1550,24 @@ class RobotApplication:
         self._satisfy_job_event(wake.event_type, event.timestamp_ns, wake)
 
     def _discard_resolved_job_trigger(self, trigger_type: JobTriggerType) -> None:
-        if trigger_type not in self._pending_job_triggers:
+        pending = {item for item in self._pending_job_triggers
+                   if item[1] is trigger_type}
+        if not pending:
             return
-        self._pending_job_triggers.discard(trigger_type)
+        self._pending_job_triggers.difference_update(pending)
         LOGGER.info("[JOBS] trigger=%s action=discarded reason=condition_resolved",
                     trigger_type.value)
+
+    def discard_pending_job_trigger(
+        self, job_id: int, trigger_type: JobTriggerType,
+    ) -> None:
+        """Immediately revoke one volatile activation intent after configuration."""
+        self._pending_job_triggers.discard((job_id, trigger_type))
+
+    def discard_pending_job_activations(self, job_id: int) -> None:
+        """Immediately revoke every volatile activation intent owned by one Job."""
+        self._pending_job_triggers = {
+            item for item in self._pending_job_triggers if item[0] != job_id}
 
     def _satisfy_job_event(self, event_type: JobReadinessEventType, timestamp_ns: int,
                            wake_event: JobWakeEvent) -> bool:
@@ -1593,49 +1610,77 @@ class RobotApplication:
     async def _activate_triggered_jobs(self, trigger_type: JobTriggerType) -> bool:
         if self.jobs is None or self.state is not LifecycleState.RUNNING:
             return False
-        was_pending = trigger_type in self._pending_job_triggers
         enabled = tuple(trigger for trigger in self.jobs.list_triggers(trigger_type)
                         if trigger.enabled)
-        if len(enabled) > 1:
-            # Persistence enforces this for current stores; fail closed for custom stores.
-            LOGGER.error("[JOBS] trigger=%s action=rejected reason=multiple_enabled_owners",
-                         trigger_type.value)
-            self._pending_job_triggers.discard(trigger_type)
-            return False
+        LOGGER.info("[JOBS] trigger=%s status=offered subscribers=%s",
+                    trigger_type.value, len(enabled))
         if not enabled:
-            self._pending_job_triggers.discard(trigger_type)
+            self._pending_job_triggers = {
+                item for item in self._pending_job_triggers if item[1] is not trigger_type}
             return False
-        trigger = enabled[0]
+        started = False
+        for trigger in sorted(enabled, key=lambda item: item.job_id):
+            key = (trigger.job_id, trigger_type)
+            try:
+                started = self._activate_triggered_job(
+                    trigger, was_pending=key in self._pending_job_triggers) or started
+            except Exception:
+                self._pending_job_triggers.discard(key)
+                LOGGER.exception(
+                    "[JOBS] trigger=%s job=JOB%s activation=failed",
+                    trigger_type.value, trigger.job_id)
+        return started
+
+    def _activate_triggered_job(
+        self, trigger: JobTrigger, *, was_pending: bool,
+    ) -> bool:
+        """Offer one exact subscription without affecting sibling subscribers."""
+        if self.jobs is None:
+            return False
+        trigger_type = trigger.event_type
+        key = (trigger.job_id, trigger_type)
+        current_trigger = self.jobs.get_trigger(trigger.job_id, trigger_type)
+        if current_trigger is None or not current_trigger.enabled:
+            self._pending_job_triggers.discard(key)
+            return False
         job = self.jobs.get_job(trigger.job_id)
         if job is None or not job.enabled:
-            self._pending_job_triggers.discard(trigger_type)
+            self._pending_job_triggers.discard(key)
+            LOGGER.info("[JOBS] trigger=%s job=JOB%s activation=discarded reason=%s",
+                        trigger_type.value, trigger.job_id,
+                        "job_missing" if job is None else "job_disabled")
             return False
         active = next((run for run in self.jobs.list_runs(job.id)
                        if run.status in (JobRunStatus.PENDING, JobRunStatus.RUNNING)), None)
         live_same_job = next((context for context in self._job_execution_contexts.values()
                               if context.job_id == job.id), None)
         if active is not None or live_same_job is not None:
-            LOGGER.info("[JOBS] trigger=%s job=JOB%s action=coalesced active_run=RUN%s",
+            LOGGER.info("[JOBS] trigger=%s job=JOB%s activation=coalesced "
+                        "reason=active_occurrence active_run=RUN%s",
                         trigger_type.value, job.id,
                         active.id if active else live_same_job.run_id)
-            self._pending_job_triggers.discard(trigger_type)
+            self._pending_job_triggers.discard(key)
             return False
-        # Existing coordination remains authoritative. Retain exactly one activation bit.
+        # Existing coordination remains authoritative. Retain one bit per subscription.
         if (self._cognition_backend is None or self.job_work_slots_available <= 0
                 or self._standalone_execution_active()
                 or self.episode_coordinator.operator_waiting
                 or self.episode_coordinator.current_operator is not None
                 or self.episode_coordinator.general_autonomous_active):
-            already_pending = trigger_type in self._pending_job_triggers
-            self._pending_job_triggers.add(trigger_type)
-            LOGGER.info("[JOBS] trigger=%s job=JOB%s action=%s reason=busy",
+            already_pending = key in self._pending_job_triggers
+            self._pending_job_triggers.add(key)
+            reason = ("capacity" if self.job_work_slots_available <= 0 else
+                      "operator" if (self.episode_coordinator.operator_waiting or
+                                     self.episode_coordinator.current_operator is not None)
+                      else "busy")
+            LOGGER.info("[JOBS] trigger=%s job=JOB%s activation=%s reason=%s",
                         trigger_type.value, job.id,
-                        "coalesced" if already_pending else "deferred")
+                        "coalesced" if already_pending else "pending", reason)
             return False
         if (was_pending
                 and trigger_type is JobTriggerType.POWER_ATTENTION_REQUIRED
                 and self._runtime_state.power.condition is not PowerCondition.ATTENTION):
-            self._pending_job_triggers.discard(trigger_type)
+            self._pending_job_triggers.discard(key)
             LOGGER.info("[JOBS] trigger=%s job=JOB%s action=discarded "
                         "reason=condition_resolved", trigger_type.value, job.id)
             return False
@@ -1649,13 +1694,13 @@ class RobotApplication:
                 else self._platform_monitor.memory_pressure_active
             )
             if not condition_active:
-                self._pending_job_triggers.discard(trigger_type)
+                self._pending_job_triggers.discard(key)
                 LOGGER.info("[JOBS] trigger=%s job=JOB%s action=discarded "
                             "reason=condition_resolved", trigger_type.value, job.id)
                 return False
         run = self.jobs.create_triggered_run(job.id)
         if run is None:
-            self._pending_job_triggers.discard(trigger_type)
+            self._pending_job_triggers.discard(key)
             return False
         binding = self._start_job_occurrence(job, run)
         context = self._context_for_run(binding.run.id)
@@ -1668,8 +1713,9 @@ class RobotApplication:
             self._job_execution_context.reset(token)
         if episode is None:
             return False
-        self._pending_job_triggers.discard(trigger_type)
-        LOGGER.info("[JOBS] trigger=%s job=JOB%s action=start", trigger_type.value, job.id)
+        self._pending_job_triggers.discard(key)
+        LOGGER.info("[JOBS] trigger=%s job=JOB%s activation=started run=RUN%s",
+                    trigger_type.value, job.id, run.id)
         task = asyncio.create_task(self._run_triggered_initial_work(prepared, episode),
                                    name="job-triggered-initial-work")
         context.active_work_task = task
@@ -1677,9 +1723,21 @@ class RobotApplication:
 
     async def _offer_job_activations(self) -> None:
         """Retry volatile trigger activations before ordinary daily schedules."""
-        for trigger_type in tuple(self._pending_job_triggers):
-            if await self._activate_triggered_jobs(trigger_type):
-                return
+        if self.jobs is None:
+            return
+        for job_id, trigger_type in sorted(
+                tuple(self._pending_job_triggers),
+                key=lambda item: (item[0], item[1].value)):
+            trigger = self.jobs.get_trigger(job_id, trigger_type)
+            if trigger is None:
+                self._pending_job_triggers.discard((job_id, trigger_type))
+                continue
+            try:
+                self._activate_triggered_job(trigger, was_pending=True)
+            except Exception:
+                self._pending_job_triggers.discard((job_id, trigger_type))
+                LOGGER.exception("[JOBS] trigger=%s job=JOB%s activation=failed",
+                                 trigger_type.value, job_id)
         await self._offer_scheduled_job()
 
     async def _run_triggered_initial_work(self, prepared, episode) -> None:
@@ -1923,14 +1981,79 @@ class RobotApplication:
                 raise ValueError(
                     f"result_report must be at most {MAX_RUN_REPORT_CHARS} characters"
                 )
-        binding = self._current_job_run
-        if binding is None and self._parked_job_run is not None:
-            binding = self._restore_parked_job_run()
-        if binding is None:
+        context = self._job_execution_context.get()
+        if context is None:
+            contexts = tuple(self._job_execution_contexts.values())
+            if len(contexts) > 1:
+                raise RuntimeError(
+                    "multiple live JobRuns are ambiguous; specify RUN<n>")
+            context = contexts[0] if contexts else None
+        if context is None:
             raise RuntimeError("no current JobRun")
-        continuation = self._job_continuation
+        return self._finish_job_run_context(
+            context, status, summary, result_report=result_report)
+
+    async def finish_job_run_by_id(
+        self, run_id: int, status: JobRunStatus, summary: str | None = None,
+        *, result_report: str | None = None,
+    ) -> CurrentJobRun:
+        """Cancel and terminalize exactly one live occurrence by durable Run ID."""
+        if self.state is not LifecycleState.RUNNING:
+            raise RuntimeError("Finishing a Job requires a running application")
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+            raise ValueError("run ID must be a positive integer")
+        if not isinstance(status, JobRunStatus) or status not in (
+            JobRunStatus.COMPLETED, JobRunStatus.FAILED, JobRunStatus.STOPPED
+        ):
+            raise ValueError("status must be completed, failed, or stopped")
+        if summary is not None:
+            if not isinstance(summary, str) or not summary.strip():
+                raise ValueError("summary must be a non-empty string or None")
+            summary = summary.strip()
+            if len(summary) > MAX_RUN_SUMMARY_CHARS:
+                raise ValueError(
+                    f"summary must be at most {MAX_RUN_SUMMARY_CHARS} characters")
+        if result_report is not None:
+            if not isinstance(result_report, str) or not result_report.strip():
+                raise ValueError("result_report must be a non-empty string or None")
+            result_report = result_report.strip()
+            if len(result_report) > MAX_RUN_REPORT_CHARS:
+                raise ValueError(
+                    f"result_report must be at most {MAX_RUN_REPORT_CHARS} characters")
+        context = self._context_for_run(run_id)
+        if context is None:
+            raise RuntimeError(f"RUN{run_id} is not a live JobRun")
+        work = context.active_work_task
+        current = asyncio.current_task()
+        if work is not None and work is not current:
+            context.execution_state = "stopping"
+            context.continuation = None
+            work.cancel()
+            try:
+                await work
+            except asyncio.CancelledError:
+                pass
+        current_context = self._context_for_run(run_id)
+        if current_context is not context:
+            raise RuntimeError(f"RUN{run_id} changed while it was being stopped")
+        return self._finish_job_run_context(
+            context, status, summary, result_report=result_report)
+
+    def _finish_job_run_context(
+        self, context: JobExecutionContext, status: JobRunStatus,
+        summary: str | None, *, result_report: str | None,
+    ) -> CurrentJobRun:
+        """Apply a validated terminal decision to one exact context only."""
+        binding = context.binding
+        assert self.jobs is not None
+        durable = self.jobs.get_run(binding.run.id)
+        if durable is None or durable.job_id != context.job_id:
+            raise RuntimeError("JobRun context no longer matches durable ownership")
+        if (binding.run.id, binding.task.id) != (context.run_id, context.task_id):
+            raise RuntimeError("JobRun context Task identity is inconsistent")
+        continuation = context.continuation
         if continuation is not None and continuation.run_id == binding.run.id:
-            self._clear_job_continuation(status.value)
+            context.continuation = None
         task_status = TaskStatus(status.value)
         task = binding.task
         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED):
@@ -1941,14 +2064,26 @@ class RobotApplication:
             if self.current_task is not None:
                 raise RuntimeError("current JobRun Task binding is inconsistent")
         else:
-            current = self.current_task
-            if current is None or current.id != task.id:
+            task_binding = context.task_binding
+            if task_binding is None or task_binding.task.id != task.id:
                 raise RuntimeError("current JobRun Task binding is inconsistent")
-            task = self.finish_task(task_status)
+            token = self._job_execution_context.set(context)
+            try:
+                if (task.status is TaskStatus.PAUSED
+                        and context.execution_state == "parked"):
+                    task = task.transition_to(TaskStatus.RUNNING)
+                    goal = ActiveGoal(
+                        self._next_goal_id,
+                        validate_goal_description(task.goal.description),
+                    )
+                    self._next_goal_id += 1
+                    context.task_binding = _CurrentTaskBinding(task, goal)
+                    context.replace_binding(CurrentJobRun(binding.job, binding.run, task))
+                task = self.finish_task(task_status)
+            finally:
+                self._job_execution_context.reset(token)
             binding = CurrentJobRun(binding.job, binding.run, task)
-            self._current_job_run = binding
 
-        assert self.jobs is not None
         kwargs = (
             {"error_summary": summary}
             if status is JobRunStatus.FAILED
@@ -1965,7 +2100,6 @@ class RobotApplication:
         context.continuation = None
         context.progress = None
         context.execution_state = "terminal"
-        self._current_job_run = None
         self._remove_job_execution_context(binding.run.id)
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s task=%s status=%s result=persisted report_chars=%s",
@@ -2229,7 +2363,8 @@ class RobotApplication:
             return
         outcome_context = self._context_for_run(outcome.run_id)
         current = None if outcome_context is None else outcome_context.binding
-        if current is None or current.run.id != outcome.run_id:
+        if (current is None or current.run.id != outcome.run_id
+                or outcome_context.execution_state == "stopping"):
             return
         if outcome.readiness is None:
             self._await_operator_after_invalid_outcome(outcome)
@@ -2764,6 +2899,7 @@ class RobotApplication:
         return (
             self.state is LifecycleState.RUNNING
             and current is binding
+            and context.execution_state != "stopping"
             and current.job.id == binding.job.id
             and current.run.id == binding.run.id
             and current.run.status is JobRunStatus.RUNNING
