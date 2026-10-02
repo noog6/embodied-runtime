@@ -252,6 +252,37 @@ class SmsStateMachineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service._accept_validated_form(form("SM3")).reason, "duplicate")
         self.assertLessEqual(service._inbox.qsize(), 2)
 
+    async def test_only_accepted_operator_text_is_logged_safely(self):
+        service = self.service()
+        service._accepting = True
+        accepted_text = "Operator's first line\nsecond line\\end"
+        external_secret = "SECRET EXTERNAL PARTICIPANT TEXT"
+        rejected_secret = "SECRET WRONG DESTINATION TEXT"
+        with self.assertLogs("embodied_runtime.sms", level="INFO") as captured:
+            external = service._accept_validated_form(form(
+                "SM-EXTERNAL", sender="+15550000003", body=external_secret,
+            ))
+            rejected_form = form("SM-REJECTED", body=rejected_secret)
+            rejected_form["To"] = "+15550000009"
+            rejected = service._accept_validated_form(rejected_form)
+            accepted = service._accept_validated_form(form(
+                "SM-ACCEPTED", body=accepted_text,
+            ))
+
+        self.assertEqual(external.reason, "external_participant")
+        self.assertEqual(rejected.reason, "account_or_destination")
+        self.assertEqual(accepted.reason, "accepted")
+        rendered = "\n".join(captured.output)
+        self.assertNotIn(external_secret, rendered)
+        self.assertNotIn(rejected_secret, rendered)
+        expected = (
+            f"[SMS] inbound message_sid=SM-ACCEPTED media=0 "
+            f"chars={len(accepted_text)} text={accepted_text!r} "
+            "status=accepted sender=operator"
+        )
+        self.assertIn(expected, rendered)
+        self.assertNotIn("Operator's first line\nsecond line", rendered)
+
     async def test_media_count_rejects_negative_and_malformed_values(self):
         service = self.service()
         service._accepting = True
@@ -327,6 +358,10 @@ class SmsOperatorDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "body": "Power is low",
         }])
         rendered = "\n".join(captured.output)
+        self.assertIn(
+            "[SMS] operator_delivery chars=12 text='Power is low' status=sent",
+            rendered,
+        )
         self.assertNotIn(settings().twilio_number, rendered)
         self.assertNotIn(settings().operator_number, rendered)
 
@@ -345,13 +380,19 @@ class SmsOperatorDeliveryTests(unittest.IsolatedAsyncioTestCase):
         service = TwilioSmsService(settings(), cognition, gateway=gateway)
         service._accepting = True
         service._worker = asyncio.create_task(service._run_worker())
-        self.assertEqual(service._accept_validated_form(form("SM1")).status, 200)
-        await asyncio.wait_for(service._inbox.join(), timeout=1)
+        with self.assertLogs("embodied_runtime.sms", level="INFO") as captured:
+            self.assertEqual(service._accept_validated_form(form("SM1")).status, 200)
+            await asyncio.wait_for(service._inbox.join(), timeout=1)
         cognition.assert_awaited_once()
         gateway.send.assert_called_once_with(
             from_=settings().twilio_number,
             to=settings().operator_number,
             body="one ordinary reply",
+        )
+        self.assertIn(
+            "[SMS] reply message_sid=SM1 chars=18 "
+            "text='one ordinary reply' status=sent",
+            "\n".join(captured.output),
         )
         await service.stop()
 
@@ -938,8 +979,13 @@ class SmsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service._accepted, set())
 
     async def test_invalid_and_missing_signatures_fail_closed(self):
-        self.assertEqual((await self.post(form(), valid=False)).status, 403)
-        self.assertEqual((await self.post(form(), valid=None)).status, 403)
+        secret = "SECRET INVALID SIGNATURE TEXT"
+        with self.assertLogs("embodied_runtime.sms", level="INFO") as captured:
+            self.assertEqual((await self.post(
+                form(body=secret), valid=False,
+            )).status, 403)
+            self.assertEqual((await self.post(form(), valid=None)).status, 403)
+        self.assertNotIn(secret, "\n".join(captured.output))
         self.assertEqual(self.calls, [])
 
     async def test_unknown_sender_and_media_are_acknowledged_without_cognition(self):
@@ -978,9 +1024,13 @@ class SmsServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.start()
         port = self.service._runner.addresses[0][1]
         self.url = f"http://127.0.0.1:{port}/sms"
-        self.assertEqual((await self.post(form())).status, 200)
-        await self.service._inbox.join()
+        with self.assertLogs("embodied_runtime.sms", level="INFO") as captured:
+            self.assertEqual((await self.post(form())).status, 200)
+            await self.service._inbox.join()
         self.assertEqual(self.gateway.sent[-1]["body"], TOO_LONG_REPLY)
+        rendered = "\n".join(captured.output)
+        self.assertIn(f"text={TOO_LONG_REPLY!r} status=sent", rendered)
+        self.assertNotIn("x" * (MAX_SMS_BODY_CHARS + 1), rendered)
 
 
 class SmsAuthorityTests(unittest.TestCase):

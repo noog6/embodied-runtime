@@ -147,6 +147,12 @@ class RunHistoryReaderTests(unittest.TestCase):
                     '[VOICE] heard turn=1 text="SECRET OPERATOR WORDS"'))
                 output.write(self.log_line(
                     "[VOICE] wake_detected heard='SECRET WAKE BODY'"))
+                output.write(self.log_line(
+                    "[SMS] inbound message_sid=SM1 chars=21 "
+                    "text='SECRET SMS OPERATOR TEXT' status=accepted sender=operator"))
+                output.write(self.log_line(
+                    "[SMS] reply message_sid=SM1 chars=17 "
+                    "text='SECRET SMS REPLY' status=sent"))
                 output.write(self.log_line("[VOICE] listening turn=1"))
                 output.write(self.log_line("[VOICE] thinking turn=1"))
                 output.write(self.log_line("[VOICE] speaking turn=1"))
@@ -171,14 +177,20 @@ class RunHistoryReaderTests(unittest.TestCase):
                 self.assertEqual(hidden["matches"], [])
                 self.assertEqual(
                     reader.inspect("search", "R1", "SECRET WAKE BODY")["matches"], [])
+                self.assertEqual(
+                    reader.inspect("search", "R1", "SECRET SMS OPERATOR TEXT")["matches"],
+                    [],
+                )
+                self.assertEqual(
+                    reader.inspect("search", "R1", "SECRET SMS REPLY")["matches"], [])
                 matches = reader.inspect("search", "R1", "[cognition]")
                 self.assertEqual(len(matches["matches"]), 20)
                 self.assertTrue(matches["truncated"])
-                self.assertEqual(matches["matches"][0]["line_number"], 9)
+                self.assertEqual(matches["matches"][0]["line_number"], 11)
                 output.write("\n" + self.log_line("[CAMERA] complete"))
                 output.flush()
                 later = reader.inspect("search", "current", "camera")
-                self.assertEqual([item["line_number"] for item in later["matches"]], [31, 32])
+                self.assertEqual([item["line_number"] for item in later["matches"]], [33, 34])
 
     def test_cognition_overview_deduplicates_first_and_last_windows(self):
         with tempfile.TemporaryDirectory() as temporary:
