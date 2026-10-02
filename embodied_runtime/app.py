@@ -41,6 +41,9 @@ from embodied_runtime.cognition import (
     compose_cognition_instructions,
     validate_goal_description,
 )
+from embodied_runtime.cognition.finding_context import (
+    FindingContextSelector, render_finding_context,
+)
 from embodied_runtime.events import (
     ApplicationStarted,
     BodyOrientationChanged,
@@ -889,6 +892,7 @@ class ApplicationOptions:
     camera_backend: str = "none"
     diagnostics_enabled: bool = False
     runtime_mode: str = "unknown"
+    findings_context_selection_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -4105,6 +4109,7 @@ class RobotApplication:
     ) -> str:
         """Execute an episode while retaining its interaction-layer identity."""
         prior_memory = self.working_memory.snapshot()
+        finding_context = self._select_operator_finding_context(message, episode.id)
         tool_outcomes: list[WorkingMemoryToolOutcome] = []
         acquisitions: list[InitiativeAcquisitionOutcome] = []
         acquisition_requests: dict[tuple[str, str], CognitionToolResult] = {}
@@ -4266,12 +4271,14 @@ class RobotApplication:
                     instructions=self._operator_episode_instructions(
                         episode, message, prior_memory, acquisitions, interaction,
                         delivery_destinations, has_image_attachment=bool(image_attachments),
+                        finding_context=finding_context,
                     ),
                     tools=tools,
                     tool_executor=execute_tool if tools else None,
                     refreshed_instructions=lambda: self._operator_episode_instructions(
                         episode, message, prior_memory, acquisitions, interaction,
                         delivery_destinations, has_image_attachment=bool(image_attachments),
+                        finding_context=finding_context,
                     ),
                 )
                 if image_attachments:
@@ -4377,6 +4384,7 @@ class RobotApplication:
         interaction: InteractionContext | None,
         delivery_destinations: Sequence[OperatorDeliveryDestination] = (),
         has_image_attachment: bool = False,
+        finding_context: str = "",
     ) -> str:
         remaining = 2 - len(acquisitions)
         lines = [
@@ -4384,6 +4392,7 @@ class RobotApplication:
                 self.cognition_context(), self.temporal_context(), self.temporal_situation(),
                 self.options.startup_prompt,
                 working_memory, self._active_goal,
+                selected_historical_context=finding_context,
             ),
         ]
         if interaction is not None:
@@ -4509,6 +4518,26 @@ class RobotApplication:
         if remaining == 0:
             lines.append("No further read-only acquisition is available.")
         return "\n\n".join(lines)
+
+    def _select_operator_finding_context(self, message: str, episode_id: int) -> str:
+        if not self.options.findings_context_selection_enabled:
+            LOGGER.info(
+                "[CONTEXT] episode=E%s source=findings status=skipped reason=disabled",
+                episode_id,
+            )
+            return ""
+        try:
+            selection = FindingContextSelector(self.jobs).select(message)
+            LOGGER.info(
+                "[CONTEXT] episode=E%s source=findings status=%s reason=%s query_chars=%s matches=%s selected=%s",
+                episode_id, selection.status, selection.reason, len(selection.query),
+                selection.matches, len(selection.findings),
+            )
+            return render_finding_context(selection, self._finding_projection)
+        except Exception as error:
+            LOGGER.warning("[CONTEXT] episode=E%s source=findings status=failed error=%s",
+                           episode_id, type(error).__name__)
+            return ""
 
     def _cognition_instructions(self, working_memory=None) -> str:
         if working_memory is None:

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 from embodied_runtime.app import (
     INSPECT_SELF_TOOL, OBSERVE_SCENE_TOOL, PUBLISH_FINDING_TOOL,
@@ -12,11 +13,13 @@ from embodied_runtime.app import (
     SEARCH_FINDINGS_TOOL, JOB_OUTCOME_EVALUATION_REQUEST,
     ApplicationOptions, RobotApplication,
 )
+from embodied_runtime.attention import AttentionStimulus
 from embodied_runtime.cognition import (
     CognitionToolCall, InitiativeAcquisitionOutcome, TextCognitionBackend,
 )
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.jobs import (
+    FindingEvidence, FindingEvidenceClass, FindingKind,
     FilesystemJobWorkspaceStore, JobRunStatus, SQLiteJobStore,
 )
 from embodied_runtime.memory import SQLiteMemoryStore
@@ -105,6 +108,38 @@ class SearchingBackend(TextCognitionBackend):
                 SEARCH_FINDINGS_TOOL.name, json.dumps({"query": "camera"})))
             self.result = json.loads(result.output)
         return "A prior Job reported a historical, non-authoritative camera finding."
+
+
+class PassiveBackend(TextCognitionBackend):
+    identifier = "passive"
+    def __init__(self): self.requests = []
+    async def respond(self, message, *, instructions=None, tools=(), tool_executor=None,
+                      refreshed_instructions=None):
+        self.requests.append((instructions, tuple(tool.name for tool in tools)))
+        return "grounded answer"
+
+
+class SnapshotBackend(TextCognitionBackend):
+    identifier = "snapshot"
+    def __init__(self):
+        self.initial = None
+        self.refreshed = None
+        self.requests = []
+        self.acquired = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def respond(self, message, *, instructions=None, tools=(), tool_executor=None,
+                      refreshed_instructions=None):
+        self.requests.append(instructions)
+        if self.initial is None:
+            self.initial = instructions
+            await tool_executor(CognitionToolCall(INSPECT_SELF_TOOL.name,
+                                                  '{"area":"runtime"}'))
+            self.acquired.set()
+            await self.release.wait()
+            self.refreshed = refreshed_instructions()
+            return "inspected"
+        return "comparison complete"
 
 
 class AcquisitionPublishingBackend(PublishingBackend):
@@ -202,7 +237,8 @@ class FindingCognitionTests(unittest.IsolatedAsyncioTestCase):
             ApplicationOptions(initiative_enabled=True,
                                initiative_goal_closure_enabled=True,
                                diagnostics_enabled=True,
-                               jobs_max_concurrent_work=2),
+                               jobs_max_concurrent_work=2,
+                               findings_context_selection_enabled=True),
             platform_provider=Platform(), cognition_backend=backend,
             job_store=self.store,
             persistent_memory_store=self.memory_store,
@@ -289,11 +325,149 @@ class FindingCognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("historical, non-authoritative", answer)
         self.assertEqual(searcher.result["findings"][0]["id"], f"FIND{finding.id}")
         self.assertIn("search_findings", searcher.requests[0][1])
+        self.assertIn("Selected historical context", searcher.requests[0][0])
+        self.assertIn("acquisitions_used: 0", searcher.requests[0][0])
         self.assertIn("acquisitions_used: 1", searcher.requests[1][0])
         # Only the ordinary operator request/response turn is added; no synthetic Finding turn.
         self.assertEqual(len(app.working_memory.snapshot()), len(before) + 1)
         self.assertEqual(self.memory_store.list_memories_for_entity(self.entity.id),
                          persistent_before)
+        await app.stop()
+
+    async def test_operator_initial_request_contains_context_without_acquisition(self):
+        evidence = (FindingEvidence(1, "inspect_self", "applied",
+                    FindingEvidenceClass.RUNTIME_INSPECTION),)
+        ids = []
+        for index in range(2):
+            job = self.store.create_job(f"Capability research {index}")
+            run = self.store.create_run(job.id)
+            self.store.transition_run(run.id, JobRunStatus.RUNNING)
+            finding = self.store.create_finding(
+                job.id, run.id, f"task-{index}", index + 1, "capability",
+                FindingKind.SYNTHESIS, f"Capability claim {index}", evidence)
+            self.store.transition_run(run.id, JobRunStatus.COMPLETED)
+            ids.append(f"FIND{finding.id}")
+        backend = PassiveBackend()
+        app = self.app(backend)
+        await app.start()
+        working_before = app.working_memory.snapshot()
+        persistent_before = self.memory_store.list_memories_for_entity(self.entity.id)
+        self.assertEqual(await app.request_cognition(
+            "What have your Jobs learned about your capabilities?"), "grounded answer")
+        self.assertEqual(len(backend.requests), 1)  # no selector provider call
+        instructions, tools = backend.requests[0]
+        self.assertIn("Selected historical context", instructions)
+        for finding_id in ids:
+            self.assertIn(finding_id, instructions)
+        self.assertIn("acquisitions_used: 0", instructions)
+        self.assertIn("search_findings", tools)
+        self.assertEqual(len(app.working_memory.snapshot()), len(working_before) + 1)
+        self.assertEqual(self.memory_store.list_memories_for_entity(self.entity.id),
+                         persistent_before)
+        await app.stop()
+
+    async def test_current_state_request_does_not_inject_historical_context(self):
+        publisher = PublishingBackend()
+        app = self.app(publisher)
+        await app.start()
+        await self.publish_completed(app, self.store.create_job("Voltage capability").id)
+        backend = PassiveBackend()
+        app._cognition_backend = backend
+        await app.request_cognition("What's your current voltage right now?")
+        self.assertNotIn("Selected historical context", backend.requests[0][0])
+        await app.stop()
+
+    async def test_selection_snapshot_excludes_mid_episode_finding(self):
+        evidence = (FindingEvidence(1, "inspect_self", "applied",
+                    FindingEvidenceClass.RUNTIME_INSPECTION),)
+        job1 = self.store.create_job("Camera baseline")
+        run1 = self.store.create_run(job1.id)
+        self.store.transition_run(run1.id, JobRunStatus.RUNNING)
+        find1 = self.store.create_finding(
+            job1.id, run1.id, "task-1", 1, "camera", FindingKind.SYNTHESIS,
+            "First camera baseline.", evidence)
+        self.store.transition_run(run1.id, JobRunStatus.COMPLETED)
+        backend = SnapshotBackend()
+        app = self.app(backend)
+        await app.start()
+        job2 = self.store.create_job("Camera update")
+        run2 = self.store.create_run(job2.id)
+        self.store.transition_run(run2.id, JobRunStatus.RUNNING)
+        find2 = self.store.create_finding(
+            job2.id, run2.id, "task-2", 2, "camera", FindingKind.SYNTHESIS,
+            "Second camera baseline.", evidence)
+        search = Mock(wraps=self.store.search_findings)
+        self.store.search_findings = search
+        task = asyncio.create_task(app.request_cognition(
+            "Has your camera changed since the last review?"))
+        await backend.acquired.wait()
+        self.assertIn(f"FIND{find1.id}", backend.initial)
+        self.assertNotIn(f"FIND{find2.id}", backend.initial)
+        self.store.transition_run(run2.id, JobRunStatus.COMPLETED)
+        backend.release.set()
+        self.assertEqual(await task, "comparison complete")
+        self.assertIn("acquisitions_used: 1", backend.refreshed)
+        self.assertIn(f"FIND{find1.id}", backend.refreshed)
+        self.assertNotIn(f"FIND{find2.id}", backend.refreshed)
+        initial_context = backend.initial.split("Selected historical context", 1)[1].split(
+            "\n\nWorking memory", 1)[0]
+        refreshed_context = backend.refreshed.split("Selected historical context", 1)[1].split(
+            "\n\nWorking memory", 1)[0]
+        self.assertEqual(initial_context, refreshed_context)
+        self.assertEqual(search.call_count, 1)
+        later = PassiveBackend()
+        app._cognition_backend = later
+        await app.request_cognition("Has your camera changed since the last review?")
+        self.assertIn(f"FIND{find2.id}", later.requests[0][0])
+        self.assertEqual(search.call_count, 2)
+        await app.stop()
+
+    async def test_librarian_search_and_projection_fail_open(self):
+        app = self.app(PassiveBackend())
+        await app.start()
+        original_search = self.store.search_findings
+        original_projection = app._finding_projection
+        for failure in ("search", "projection"):
+            with self.subTest(failure=failure):
+                backend = PassiveBackend()
+                app._cognition_backend = backend
+                if failure == "search":
+                    self.store.search_findings = Mock(side_effect=RuntimeError("injected"))
+                    app._finding_projection = original_projection
+                else:
+                    self.store.search_findings = Mock(return_value=(object(),))
+                    app._finding_projection = Mock(side_effect=ValueError("injected"))
+                before = app.working_memory.snapshot()
+                with self.assertLogs("embodied_runtime.app", level="WARNING") as logs:
+                    answer = await app.request_cognition(
+                        "What have your Jobs learned about capabilities?")
+                self.assertEqual(answer, "grounded answer")
+                self.assertIn("status=failed", "\n".join(logs.output))
+                self.assertNotIn("Selected historical context", backend.requests[0][0])
+                self.assertIn("acquisitions_used: 0", backend.requests[0][0])
+                self.assertEqual(len(app.working_memory.snapshot()), len(before) + 1)
+                self.store.search_findings = original_search
+        app._finding_projection = original_projection
+        await app.stop()
+
+    async def test_automatic_context_is_absent_from_non_operator_cognition(self):
+        backend = PassiveBackend()
+        app = self.app(backend)
+        await app.start()
+        job = self.store.create_job("Camera historical work")
+        app.start_job_run(job.id)
+        await app.work_current_job_once()
+        self.assertTrue(backend.requests)
+        self.assertTrue(all("Selected historical context" not in instructions
+                            for instructions, _ in backend.requests))
+        app.finish_job_run(JobRunStatus.STOPPED, "test cleanup")
+        backend.requests.clear()
+        app.set_goal("consider camera history")
+        await app._request_initiative(AttentionStimulus(
+            "generic", "test", 1, 0, 0, 0))
+        self.assertTrue(backend.requests)
+        self.assertTrue(all("Selected historical context" not in instructions
+                            for instructions, _ in backend.requests))
         await app.stop()
 
     async def test_projection_boundaries(self):

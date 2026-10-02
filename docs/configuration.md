@@ -324,3 +324,10 @@ hardware tuning does not require Python changes. Values must be finite, the inte
 must be positive, and recovery must exceed attention; omitted values keep the
 defaults. The separated thresholds provide hysteresis. Sampling never invokes
 cognition, and deterministic hardware/BMS protection remains outside Jobs.
+
+# Finding context selection
+
+`jobs.findings_context_selection_enabled` controls the deterministic,
+operator-only historical Finding selector. It defaults to `false`, independently
+of deliberate `search_findings` availability. The checked-in Mira agentic
+configuration enables it for physical validation. See [Findings](findings.md).

@@ -72,6 +72,7 @@ class ConfigurationTests(unittest.TestCase):
                 "jobs_database_path": Path("data/jobs.sqlite3").resolve(),
                 "jobs_auto_continue": True,
                 "jobs_max_concurrent_work": 4,
+                "findings_context_selection_enabled": True,
             }),
         )
 
