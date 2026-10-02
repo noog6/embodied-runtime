@@ -542,14 +542,18 @@ WORKSPACE_ACQUISITION_TOOLS = (WORKSPACE_LIST_TOOL, WORKSPACE_READ_TOOL)
 
 WORKSPACE_WRITE_TOOL = CognitionToolDefinition(
     name="workspace_write",
-    description=("Create, replace, or append one bounded UTF-8 text artifact in an "
-                 "exact Job's durable Workspace when the operator authorizes it."),
+    description=("Write one bounded UTF-8 text artifact in an exact Job's durable "
+                 "Workspace when the operator authorizes it. Use create when absence "
+                 "is required, replace when prior existence is required, append to "
+                 "extend an existing artifact, or upsert for a complete artifact that "
+                 "may or may not exist, such as a durable baseline or current-state "
+                 "summary rewritten across runs."),
     parameters={
         "type": "object",
         "properties": {
             "job": {"type": "string", "minLength": 1, "maxLength": 200},
             "path": {"type": "string", "minLength": 1, "maxLength": 240},
-            "mode": {"type": "string", "enum": ["create", "replace", "append"]},
+            "mode": {"type": "string", "enum": ["create", "replace", "append", "upsert"]},
             "content": {"type": "string", "maxLength": MAX_WORKSPACE_COGNITION_WRITE_CHARS},
         },
         "required": ["job", "path", "mode", "content"],
@@ -594,13 +598,17 @@ JOB_WORKSPACE_ACQUISITION_TOOLS = (
 
 JOB_WORKSPACE_WRITE_TOOL = CognitionToolDefinition(
     name="workspace_write",
-    description=("Create, replace, or append one bounded UTF-8 text artifact in the "
-                 "current Job's durable Workspace. The runtime supplies the owner."),
+    description=("Write one bounded UTF-8 text artifact in the current Job's durable "
+                 "Workspace. Use create when absence is required, replace when prior "
+                 "existence is required, append to extend an existing artifact, or "
+                 "upsert for a complete artifact that may or may not exist, such as a "
+                 "durable baseline or current-state summary rewritten across runs. "
+                 "The runtime supplies the owner."),
     parameters={
         "type": "object",
         "properties": {
             "path": {"type": "string", "minLength": 1, "maxLength": 240},
-            "mode": {"type": "string", "enum": ["create", "replace", "append"]},
+            "mode": {"type": "string", "enum": ["create", "replace", "append", "upsert"]},
             "content": {"type": "string", "maxLength": MAX_WORKSPACE_COGNITION_WRITE_CHARS},
         },
         "required": ["path", "mode", "content"],
@@ -4509,7 +4517,11 @@ class RobotApplication:
                 "success. Attempted text, operator intent, and WorkingMemory are not proof. "
                 "Workspace prose remains non-authoritative authored working material; a "
                 "Workspace write is not persistent memory and does not alter a JobRun result. "
-                "Durability certifies neither truth nor freshness."
+                "Durability certifies neither truth nor freshness. Select create when "
+                "absence is required, replace when prior existence is required, append "
+                "to extend an existing artifact, and upsert to write a complete artifact "
+                "that may or may not exist. Upsert suits durable baselines and current-state "
+                "summaries rewritten across runs, including their first run."
             )
         if acquisitions:
             lines.append("Ordered acquisition evidence:")
@@ -6074,7 +6086,7 @@ class RobotApplication:
                         unicodedata.category(character) == "Cc"
                         for character in selector)):
                     raise ValueError("invalid selector")
-                if mode not in ("create", "replace", "append"):
+                if mode not in ("create", "replace", "append", "upsert"):
                     raise ValueError("invalid mode")
                 if len(content) > MAX_WORKSPACE_COGNITION_WRITE_CHARS:
                     raise ValueError("content too large")
@@ -6408,7 +6420,7 @@ class RobotApplication:
                                    arguments["content"])
             if any(type(value) is not str for value in (path, mode, content)):
                 raise ValueError("invalid arguments")
-            if mode not in ("create", "replace", "append"):
+            if mode not in ("create", "replace", "append", "upsert"):
                 raise ValueError("invalid mode")
             if len(content) > MAX_WORKSPACE_COGNITION_WRITE_CHARS:
                 raise ValueError("content too large")

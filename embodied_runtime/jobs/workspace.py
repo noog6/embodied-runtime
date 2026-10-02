@@ -102,7 +102,7 @@ class WorkspaceRead:
 @dataclass(frozen=True, slots=True)
 class WorkspaceWrite:
     path: str
-    mode: Literal["create", "replace", "append"]
+    mode: Literal["create", "replace", "append", "upsert"]
     size_bytes: int
     content_version: str
     published: bool = True
@@ -454,7 +454,7 @@ class FilesystemJobWorkspaceStore:
 
     def write(self, job_id: int, path: str, mode: str, content: str) -> WorkspaceWrite:
         parts = _components(path)
-        if mode not in ("create", "replace", "append"):
+        if mode not in ("create", "replace", "append", "upsert"):
             raise WorkspaceValidationError("invalid write mode")
         if type(content) is not str or "\0" in content:
             raise WorkspaceValidationError("invalid artifact text")
@@ -468,7 +468,8 @@ class FilesystemJobWorkspaceStore:
         created_directories: list[tuple[str, ...]] = []
         try:
             job_fd = self._open_job(
-                job_id, create=(mode == "create"), created=job_creation,
+                job_id, create=(mode in ("create", "upsert")),
+                created=job_creation,
             )
         except BaseException:
             if job_creation:
@@ -481,7 +482,7 @@ class FilesystemJobWorkspaceStore:
         published = False
         try:
             parent = self._walk(
-                job_fd, parts[:-1], create=(mode == "create"),
+                job_fd, parts[:-1], create=(mode in ("create", "upsert")),
                 created=created_directories,
             )
             old = b""
@@ -493,7 +494,7 @@ class FilesystemJobWorkspaceStore:
                 old_info = None
             if mode == "create" and exists:
                 raise WorkspaceConflictError("artifact already exists")
-            if mode != "create" and not exists:
+            if mode in ("replace", "append") and not exists:
                 raise WorkspaceNotFoundError("artifact not found")
             data = old + supplied if mode == "append" else supplied
             if len(data) > MAX_ARTIFACT_BYTES:
@@ -517,7 +518,7 @@ class FilesystemJobWorkspaceStore:
             finally:
                 os.close(fd)
             # Revalidate the existing destination immediately before publication.
-            if mode != "create":
+            if exists:
                 _, current = self._read_file(parent, parts[-1])
                 if old_info is None or (current.st_dev, current.st_ino, current.st_size) != (old_info.st_dev, old_info.st_ino, old_info.st_size):
                     raise WorkspaceConflictError("artifact changed during write")

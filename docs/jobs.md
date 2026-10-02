@@ -132,7 +132,13 @@ metadata is authoritative for the retrieved storage snapshot; artifact prose is
 authored non-authoritative working material, not a JobRun result, persistent
 memory, progress evidence, or fresh current-world evidence. The separate
 `workspace_write(job, path, mode, content)` operator effect permits one
-explicitly authorized bounded create, replace, or append per dialogue episode.
+explicitly authorized bounded create, replace, append, or complete
+create-or-replace `upsert` per dialogue episode. `create` requires absence;
+`replace` and `append` require presence; `upsert` is for a complete artifact
+whose prior existence is unknown. In particular, durable baselines and
+current-state summaries rewritten across runs can use `upsert` so cognition
+avoids spending an acquisition merely to discover whether the working artifact
+has already been initialized.
 It is not projected into general autonomous initiative or continuation and
 does not create a run or alter Tasks, progress, persistent memory, or immutable
 JobRun results. There is no model-facing delete/move or `expected_version` in

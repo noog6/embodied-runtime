@@ -314,6 +314,33 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
                          ["path", "offset_chars"])
         self.assertEqual(JOB_WORKSPACE_WRITE_TOOL.parameters["required"],
                          ["path", "mode", "content"])
+        self.assertEqual(JOB_WORKSPACE_WRITE_TOOL.parameters["properties"]["mode"]["enum"],
+                         ["create", "replace", "append", "upsert"])
+
+    async def test_job_work_upsert_initializes_and_replaces_without_acquisition(self):
+        job = self.jobs.create_job("Baseline Steward")
+        app = self.app(initiative=True)
+        await app.start()
+        binding = app.start_job_run(job.id)
+        authority = (binding, app._current_task_binding, app.active_goal)
+
+        versions = []
+        for content in ("first baseline", "current baseline"):
+            result = json.loads(app._execute_job_workspace_write(CognitionToolCall(
+                "workspace_write", json.dumps({
+                    "path": "baselines/current.txt", "mode": "upsert",
+                    "content": content,
+                })), job_binding=authority,
+                expected_goal=authority[2]).output)
+            self.assertEqual(result["status"], "applied")
+            self.assertTrue(result["published"])
+            self.assertTrue(result["durability_confirmed"])
+            self.assertEqual(result["artifact"]["mode"], "upsert")
+            versions.append(result["artifact"]["content_version"])
+
+        self.assertNotEqual(*versions)
+        self.assertEqual(self.workspaces.read(
+            job.id, "baselines/current.txt").content, "current baseline")
 
     async def test_job_work_uses_own_workspace_and_two_acquisitions_then_write(self):
         job_a = self.jobs.create_job("Nightly Self Log Reviewer")
@@ -588,7 +615,7 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(schema["required"], ["job", "path", "mode", "content"])
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(schema["properties"]["mode"]["enum"],
-                         ["create", "replace", "append"])
+                         ["create", "replace", "append", "upsert"])
         self.assertEqual(schema["properties"]["content"]["maxLength"],
                          MAX_WORKSPACE_COGNITION_WRITE_CHARS)
         job = self.jobs.create_job("Schema")
@@ -596,7 +623,7 @@ class WorkspaceCognitionTests(unittest.IsolatedAsyncioTestCase):
         invalid = []
         for key in base:
             value = dict(base); value.pop(key); invalid.append(value)
-        invalid.extend((dict(base, extra=True), dict(base, mode="upsert"),
+        invalid.extend((dict(base, extra=True), dict(base, mode="merge"),
                         dict(base, job=1), dict(base, path=1), dict(base, content=1),
                         dict(base, content="x" * (MAX_WORKSPACE_COGNITION_WRITE_CHARS + 1))))
         for arguments in invalid:

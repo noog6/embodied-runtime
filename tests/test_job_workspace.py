@@ -61,6 +61,41 @@ class JobWorkspaceTests(unittest.TestCase):
         self.assertEqual(result.content, text)
         self.assertEqual(result.content_version, created.content_version)
 
+    def test_upsert_creates_nested_artifact_then_replaces_it(self):
+        first = self.store.write(
+            6, "baselines/current/state.txt", "upsert", "first",
+        )
+        self.assertEqual(first.mode, "upsert")
+        self.assertEqual(first.size_bytes, len(b"first"))
+        self.assertEqual(first.content_version,
+                         hashlib.sha256(b"first").hexdigest())
+        self.assertEqual(
+            self.store.read(6, "baselines/current/state.txt").content, "first",
+        )
+        self.assertTrue((self.root / "JOB6" / "baselines" / "current").is_dir())
+        job_fd = self.store._open_job(6)
+        assert job_fd is not None
+        try:
+            files_before = self.store._usage(job_fd)[0]
+        finally:
+            os.close(job_fd)
+
+        second = self.store.write(
+            6, "baselines/current/state.txt", "upsert", "new",
+        )
+
+        self.assertEqual(second.mode, "upsert")
+        self.assertNotEqual(second.content_version, first.content_version)
+        self.assertEqual(
+            self.store.read(6, "baselines/current/state.txt").content, "new",
+        )
+        job_fd = self.store._open_job(6)
+        assert job_fd is not None
+        try:
+            self.assertEqual(self.store._usage(job_fd), (files_before, len(b"new")))
+        finally:
+            os.close(job_fd)
+
     def test_text_rejections_and_empty_content(self):
         for text in ("bad\0text", "\ud800"):
             with self.assertRaises(WorkspaceValidationError):
@@ -121,10 +156,19 @@ class JobWorkspaceTests(unittest.TestCase):
         self.assertFalse((self.root / "JOB2").exists())
         with self.assertRaises(WorkspaceNotFoundError):
             self.store.write(2, "missing", "append", "x")
+        self.store.write(2, "existing", "create", "original")
+        with self.assertRaises(WorkspaceConflictError):
+            self.store.write(2, "existing", "create", "replacement")
         for index in range(MAX_WORKSPACE_FILES):
             self.store.write(3, str(index), "create", "")
         with self.assertRaises(WorkspaceQuotaError):
             self.store.write(3, "overflow", "create", "")
+        with self.assertRaises(WorkspaceQuotaError):
+            self.store.write(3, "upsert-overflow", "upsert", "")
+
+        with self.assertRaises(WorkspaceQuotaError):
+            self.store.write(6, "too-large-upsert", "upsert",
+                             "x" * (MAX_WRITE_REQUEST_BYTES + 1))
 
         self.store.write(4, "artifact", "create", "")
         chunk = "x" * MAX_WRITE_REQUEST_BYTES
@@ -228,6 +272,39 @@ class JobWorkspaceTests(unittest.TestCase):
                 self.store.write(8, "new/parents/file", "create", "content")
         self.assertFalse((self.root / "JOB8").exists())
 
+    def test_failed_nested_upsert_removes_only_new_empty_directories(self):
+        real_open = os.open
+
+        def fail_temporary(path, flags, *args, **kwargs):
+            if isinstance(path, str) and path.startswith(".workspace-tmp-"):
+                raise OSError("injected temporary creation failure")
+            return real_open(path, flags, *args, **kwargs)
+        with mock.patch(
+            "embodied_runtime.jobs.workspace.os.open", side_effect=fail_temporary,
+        ):
+            with self.assertRaises(WorkspaceBackendError):
+                self.store.write(9, "new/parents/file", "upsert", "content")
+        self.assertFalse((self.root / "JOB9").exists())
+
+    def test_missing_upsert_conflicts_if_destination_appears_at_publication(self):
+        real_publish = self.store._publish_create
+
+        def concurrent_create(parent, temporary, destination):
+            fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                         0o600, dir_fd=parent)
+            try:
+                os.write(fd, b"concurrent")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return real_publish(parent, temporary, destination)
+
+        with mock.patch.object(
+            self.store, "_publish_create", side_effect=concurrent_create,
+        ), self.assertRaises(WorkspaceConflictError):
+            self.store.write(10, "state.txt", "upsert", "ours")
+        self.assertEqual(self.store.read(10, "state.txt").content, "concurrent")
+
     def test_directory_fsync_failure_reports_published(self):
         self.store.write(1, "file", "create", "old")
         real_fsync = os.fsync
@@ -244,6 +321,25 @@ class JobWorkspaceTests(unittest.TestCase):
         self.assertTrue(caught.exception.published)
         self.assertFalse(caught.exception.durability_confirmed)
         self.assertEqual(self.store.read(1, "file").content, "new")
+
+    def test_missing_upsert_directory_fsync_failure_reports_published(self):
+        (self.root / "JOB11").mkdir()
+        real_fsync = os.fsync
+        calls = 0
+
+        def fail_directory(fd):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected")
+            return real_fsync(fd)
+        with mock.patch("embodied_runtime.jobs.workspace.os.fsync",
+                        side_effect=fail_directory):
+            with self.assertRaises(WorkspaceDurabilityError) as caught:
+                self.store.write(11, "file", "upsert", "new")
+        self.assertTrue(caught.exception.published)
+        self.assertFalse(caught.exception.durability_confirmed)
+        self.assertEqual(self.store.read(11, "file").content, "new")
 
     def test_file_fsync_failure_leaves_destination_unchanged(self):
         self.store.write(1, "file", "create", "old")

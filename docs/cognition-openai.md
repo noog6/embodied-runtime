@@ -225,9 +225,15 @@ any active or completed JobRun.
 
 Explicit operator dialogue also receives `workspace_write(job, path, mode,
 content)` when both stores are available. All four non-null arguments are
-required; mode is exactly `create`, `replace`, or `append`, and content has an
-8,000-character cognition ceiling beneath the storage byte and quota limits.
-It shares the exact Job resolver used by reads.
+required; mode is exactly `create`, `replace`, `append`, or `upsert`, and
+content has an 8,000-character cognition ceiling beneath the storage byte and
+quota limits. `create` requires absence, `replace` requires presence, `append`
+extends an existing artifact, and `upsert` writes a complete artifact whether
+it is absent or present. `upsert` is appropriate for durable baselines and
+current-state summaries rewritten across runs but potentially absent on their
+first run. It avoids spending an acquisition merely to discover whether a
+complete durable working artifact has already been initialized. It shares the
+exact Job resolver used by reads.
 
 This operator effect is absent from acquisitions, diagnostics, and general
 autonomous initiative or continuation. It may be
