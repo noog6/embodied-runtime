@@ -104,6 +104,10 @@ class RuntimeConsole:
             return self._memory(), False
         if vocabulary == ["jobs"]:
             return self._jobs(), False
+        if vocabulary and vocabulary[0] == "findings":
+            return self._findings(" ".join(words[1:])), False
+        if vocabulary[:2] == ["finding", "show"]:
+            return self._finding_show(words), False
         if vocabulary[:2] == ["job", "show"]:
             return self._job_show(words), False
         if vocabulary[:2] == ["job", "runs"]:
@@ -294,6 +298,8 @@ class RuntimeConsole:
                 "  voice                          Start one bounded voice session",
                 "  memory                         Show working-memory metadata",
                 "  jobs                           List the entire durable Job catalog",
+                "  findings [query]               List or search durable Findings",
+                "  finding show FIND<n>           Show one Finding and its provenance",
                 "  job show JOB<n>                Show one Job and its assignment",
                 "  job runs JOB<n>                List durable occurrences of one Job",
                 "  job files JOB<n> [directory]   List one Workspace directory level",
@@ -346,6 +352,53 @@ class RuntimeConsole:
             target = "unassigned" if job.target is None else str(job.target)
             state = "enabled" if job.enabled else "disabled"
             lines.append(f"  JOB{job.id:<5} {state:<8} {target:<20} {job.name}")
+        return "\n".join(lines)
+
+    def _findings(self, query: str) -> str:
+        store = self._application.jobs
+        if store is None:
+            return "Findings\n  persistence:   disabled"
+        try:
+            findings = (store.search_findings(query, limit=10) if query
+                        else store.list_findings(limit=20))
+        except ValueError as error:
+            return f"Invalid Finding search: {error}."
+        lines = ["Findings"]
+        if not findings:
+            lines.append("  none")
+        for finding in findings:
+            run = store.get_run(finding.run_id)
+            status = "unknown" if run is None else run.status.value
+            visible = status == "completed"
+            claim = finding.claim if len(finding.claim) <= 100 else finding.claim[:97] + "..."
+            lines.append(f"  FIND{finding.id} {finding.topic} {finding.kind.value} "
+                         f"JOB{finding.job_id}/RUN{finding.run_id} {status} "
+                         f"visible={'yes' if visible else 'no'} "
+                         f"{finding.published_at.isoformat()} {claim}")
+        return "\n".join(lines)
+
+    def _finding_show(self, words: list[str]) -> str:
+        if len(words) != 3 or (finding_id := _catalog_id(words[2], "FIND")) is None:
+            return "Usage: finding show FIND<n>."
+        store = self._application.jobs
+        if store is None:
+            return "Findings persistence is disabled."
+        finding = store.get_finding(finding_id)
+        if finding is None:
+            return f"Finding not found: FIND{finding_id}."
+        run = store.get_run(finding.run_id)
+        status = "unknown" if run is None else run.status.value
+        lines = ["Finding", f"  id: FIND{finding.id}", f"  topic: {finding.topic}",
+                 f"  kind: {finding.kind.value}", f"  source: JOB{finding.job_id}/RUN{finding.run_id}",
+                 f"  task: {finding.task_id}", f"  episode: E{finding.episode_id}",
+                 f"  source_run_status: {status}",
+                 f"  search_visible: {'yes' if status == 'completed' else 'no'}",
+                 f"  published_at: {finding.published_at.isoformat()}",
+                 "  content_authority: job_authored_non_authoritative",
+                 f"  claim: {finding.claim}", "  evidence_basis:"]
+        lines.extend(f"    {item.ordinal}. {item.capability} / {item.evidence_class.value} / {item.status}"
+                     for item in finding.evidence_basis)
+        lines.append("  authority: historical Job-authored claim; re-check current evidence.")
         return "\n".join(lines)
 
     def _job_show(self, words: list[str]) -> str:

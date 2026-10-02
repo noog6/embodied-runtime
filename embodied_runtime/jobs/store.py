@@ -2,7 +2,8 @@
 
 from typing import Protocol
 
-from .model import Job, JobRun, JobRunStatus, JobSchedule, JobTarget, JobTrigger, JobTriggerType
+from .model import (Finding, FindingEvidence, FindingKind, Job, JobRun, JobRunStatus,
+                    JobSchedule, JobTarget, JobTrigger, JobTriggerType)
 
 
 class JobStore(Protocol):
@@ -31,4 +32,10 @@ class JobStore(Protocol):
                        outcome_summary: str | None = None,
                        error_summary: str | None = None,
                        result_report: str | None = None) -> JobRun: ...
+    def create_finding(self, job_id: int, run_id: int, task_id: str, episode_id: int,
+                       topic: str, kind: FindingKind, claim: str,
+                       evidence_basis: tuple[FindingEvidence, ...]) -> Finding: ...
+    def get_finding(self, finding_id: int) -> Finding | None: ...
+    def list_findings(self, *, limit: int = 20) -> tuple[Finding, ...]: ...
+    def search_findings(self, query: str, *, limit: int = 5) -> tuple[Finding, ...]: ...
     def close(self) -> None: ...

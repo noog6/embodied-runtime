@@ -1,5 +1,9 @@
 # Jobs
 
+See [Findings and deliberate search](findings.md) for reusable, provenance-bearing
+claims published by completed JobRuns. Findings complement rather than replace
+JobRun result reports and private Job Workspaces.
+
 ## Retained report retrieval and delivery
 
 Storage, retrieval, and delivery are separate runtime operations. A JobRun's

@@ -65,6 +65,8 @@ from embodied_runtime.interaction import (
     render_interaction_environment, resolve_notification_route,
 )
 from embodied_runtime.jobs import (
+    Finding, FindingEvidence, FindingEvidenceClass, FindingKind,
+    MAX_FINDING_CLAIM_CHARS, MAX_FINDING_QUERY_CHARS, MAX_FINDING_SEARCH_LIMIT,
     Job, JobContinuation, JobContinuationController, JobContinuationReadiness,
     JobContinuationState, JobReadinessEventType, JobWakeEvent,
     MAX_JOB_CONTINUATION_DELAY_SECONDS,
@@ -468,6 +470,18 @@ INSPECT_JOB_RESULT_TOOL = CognitionToolDefinition(
     },
 )
 
+SEARCH_FINDINGS_TOOL = CognitionToolDefinition(
+    name="search_findings",
+    description=("Search completed JobRuns' historical Job-authored Findings. Results "
+                 "are non-authoritative and may be stale; inspect current evidence when needed."),
+    parameters={"type": "object", "properties": {
+        "query": {"type": "string", "minLength": 1,
+                  "maxLength": MAX_FINDING_QUERY_CHARS},
+        "limit": {"type": ["integer", "null"], "minimum": 1,
+                  "maximum": MAX_FINDING_SEARCH_LIMIT},
+    }, "required": ["query"], "additionalProperties": False},
+)
+
 RETRIEVE_REPORT_TOOL = CognitionToolDefinition(
     name="retrieve_report",
     description=(
@@ -589,6 +603,18 @@ JOB_WORKSPACE_WRITE_TOOL = CognitionToolDefinition(
         "required": ["path", "mode", "content"],
         "additionalProperties": False,
     },
+)
+
+PUBLISH_FINDING_TOOL = CognitionToolDefinition(
+    name="publish_finding",
+    description=("Publish one bounded reusable historical claim from this exact Job episode. "
+                 "The runtime attaches provenance; this is not persistent memory or truth."),
+    parameters={"type": "object", "properties": {
+        "topic": {"type": "string", "minLength": 1, "maxLength": 120},
+        "kind": {"type": "string", "enum": ["observation", "synthesis"]},
+        "claim": {"type": "string", "minLength": 1,
+                  "maxLength": MAX_FINDING_CLAIM_CHARS},
+    }, "required": ["topic", "kind", "claim"], "additionalProperties": False},
 )
 
 DIAGNOSTIC_TOOLS = (
@@ -4168,6 +4194,10 @@ class RobotApplication:
                             result = self._execute_report_retrieval(
                                 call, report_references, episode_id=episode.id)
                             inspection = perception = None
+                        elif call.name == SEARCH_FINDINGS_TOOL.name:
+                            result = self._execute_finding_search(
+                                call, episode_id=episode.id)
+                            inspection = perception = None
                         elif call.name in {tool.name for tool in WORKSPACE_ACQUISITION_TOOLS}:
                             result = self._execute_workspace_acquisition(
                                 call, episode_id=episode.id)
@@ -4483,11 +4513,17 @@ class RobotApplication:
     def _cognition_instructions(self, working_memory=None) -> str:
         if working_memory is None:
             working_memory = self.working_memory.snapshot()
-        return compose_cognition_instructions(
+        instructions = compose_cognition_instructions(
             self.cognition_context(), self.temporal_context(), self.temporal_situation(),
             self.options.startup_prompt, working_memory,
             self._active_goal,
         )
+        if self.jobs is not None:
+            instructions += ("\n\nFor questions about what Jobs previously learned, discovered, "
+                "or observed, search_findings may discover relevant historical claims without "
+                "an exact Job selector. Findings may be stale and are non-authoritative. Prefer "
+                "fresh runtime inspection for current-state questions.")
+        return instructions
 
     def _attention_instructions(
         self, stimulus: AttentionStimulus, episode: AttentionEpisode, working_memory, *, capabilities_available: bool,
@@ -4532,11 +4568,21 @@ class RobotApplication:
             f"\n\n{progress.render()}" if progress is not None
             and stimulus.kind == "job_run_work" else ""
         )
+        finding_guidance = (
+            "\n\nFindings are historical, potentially stale, non-authoritative Job claims. "
+            "search_findings consumes an acquisition and does not grant another Job's Workspace "
+            "authority; verify current decisions with fresh evidence. publish_finding consumes a "
+            "normal effect and publishes only one useful bounded claim, not persistent memory. "
+            "The runtime supplies provenance. Use observation only with this episode's fresh "
+            "runtime/sensor evidence and synthesis for historical/material combinations. "
+            "Publishing nothing is valid."
+            if any(tool.name in {SEARCH_FINDINGS_TOOL.name, PUBLISH_FINDING_TOOL.name}
+                   for tool in tools) else "")
         return (
             f"{context}{notification}\n\n{episode.render()}\n\n"
             f"{stimulus.render(actions_enabled=capabilities_available)}"
             f"{continuity_section}{progress_section}{inspection_guidance}"
-            f"{history_guidance}{sequencing}"
+            f"{history_guidance}{finding_guidance}{sequencing}"
         )
 
     @staticmethod
@@ -4651,6 +4697,8 @@ class RobotApplication:
                 result = self._execute_run_history_inspection(
                     call, expected_goal=expected_goal, autonomous=True,
                     episode_id=episode.id)
+            elif call.name == SEARCH_FINDINGS_TOOL.name:
+                result = self._execute_finding_search(call, episode_id=episode.id)
             elif call.name in {tool.name for tool in JOB_WORKSPACE_ACQUISITION_TOOLS}:
                 result = self._execute_job_workspace_acquisition(
                     call, job_binding=job_binding, expected_goal=expected_goal,
@@ -4674,6 +4722,7 @@ class RobotApplication:
                         ), notification_interaction=notification_interaction,
                         job_binding=job_binding, expected_goal=expected_goal,
                         episode_id=episode.id,
+                        acquisitions=tuple(acquisitions),
                     )
             try:
                 result_status = json.loads(result.output).get("status", "rejected")
@@ -4894,6 +4943,8 @@ class RobotApplication:
                     result = self._execute_run_history_inspection(
                         call, expected_goal=expected_goal, autonomous=True,
                         episode_id=episode.id)
+                elif call.name == SEARCH_FINDINGS_TOOL.name:
+                    result = self._execute_finding_search(call, episode_id=episode.id)
                 elif call.name in {tool.name for tool in JOB_WORKSPACE_ACQUISITION_TOOLS}:
                     result = self._execute_job_workspace_acquisition(
                         call, job_binding=job_binding, expected_goal=expected_goal,
@@ -4914,6 +4965,7 @@ class RobotApplication:
                     notification_interaction=notification_interaction,
                     job_binding=job_binding, expected_goal=expected_goal,
                     episode_id=episode.id,
+                    acquisitions=tuple(acquisitions),
                 )
             result_text = result.output
             try:
@@ -5025,6 +5077,7 @@ class RobotApplication:
                     notification_interaction=notification_interaction,
                     job_binding=job_binding, expected_goal=expected_goal,
                     episode_id=episode.id,
+                    acquisitions=tuple(acquisitions),
                 )
             result_text = result.output
             try:
@@ -5155,6 +5208,7 @@ class RobotApplication:
                     notification_interaction=notification_interaction,
                     job_binding=job_binding, expected_goal=expected_goal,
                     episode_id=episode.id,
+                    acquisitions=acquisitions,
                 )
             result_text = result.output
             try:
@@ -5349,6 +5403,8 @@ class RobotApplication:
         self, *, job_work: bool
     ) -> tuple[CognitionToolDefinition, ...]:
         tools = self.acquisition_tools()
+        if job_work and self.jobs is not None:
+            tools = (*tools, SEARCH_FINDINGS_TOOL)
         if job_work and self._job_workspace_tools_available():
             return (*tools, *JOB_WORKSPACE_ACQUISITION_TOOLS)
         return tools
@@ -5372,7 +5428,9 @@ class RobotApplication:
             tool for tool in tools if tool.name != SCHEDULE_FOLLOWUP_TOOL.name
         )
         if self._job_workspace_tools_available():
-            return (*projected, JOB_WORKSPACE_WRITE_TOOL)
+            projected = (*projected, JOB_WORKSPACE_WRITE_TOOL)
+        if self.jobs is not None:
+            projected = (*projected, PUBLISH_FINDING_TOOL)
         return projected
 
     def _continuation_tools_for_episode(
@@ -5405,6 +5463,7 @@ class RobotApplication:
                 OBSERVE_SCENE_TOOL.name,
                 RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name,
                 INSPECT_JOB_RESULT_TOOL.name, RETRIEVE_REPORT_TOOL.name,
+                SEARCH_FINDINGS_TOOL.name,
                 *(tool.name for tool in WORKSPACE_ACQUISITION_TOOLS))
 
     def effect_tools(self) -> tuple[CognitionToolDefinition, ...]:
@@ -5470,6 +5529,7 @@ class RobotApplication:
         if self._run_history_evidence is not None:
             tools.append(INSPECT_RUN_HISTORY_TOOL)
         if self.jobs is not None:
+            tools.append(SEARCH_FINDINGS_TOOL)
             tools.append(INSPECT_JOB_RESULT_TOOL)
             tools.append(RETRIEVE_REPORT_TOOL)
             if self.job_workspaces is not None:
@@ -5572,6 +5632,8 @@ class RobotApplication:
             return self._execute_run_history_inspection(call)
         if call.name == INSPECT_JOB_RESULT_TOOL.name:
             return self._execute_job_result_inspection(call)
+        if call.name == SEARCH_FINDINGS_TOOL.name:
+            return self._execute_finding_search(call)
         if call.name in {tool.name for tool in WORKSPACE_ACQUISITION_TOOLS}:
             return self._execute_workspace_acquisition(call)
         return self._rejected_tool(call.name, "tool is not available")
@@ -5638,6 +5700,68 @@ class RobotApplication:
             f"RUN{resolved_run.id}" if resolved_run is not None else "none",
             result["status"],
         )
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _finding_projection(self, finding: Finding) -> dict[str, object]:
+        assert self.jobs is not None
+        job = self.jobs.get_job(finding.job_id)
+        run = self.jobs.get_run(finding.run_id)
+        return {
+            "id": f"FIND{finding.id}", "topic": finding.topic,
+            "kind": finding.kind.value, "claim": finding.claim,
+            "source_job": ({"id": f"JOB{job.id}", "name": job.name}
+                           if job is not None else {"id": f"JOB{finding.job_id}"}),
+            "source_run": f"RUN{finding.run_id}",
+            "source_task": finding.task_id,
+            "source_episode": f"E{finding.episode_id}",
+            "source_run_status": run.status.value if run is not None else "unknown",
+            "run_finished_at": (run.finished_at.isoformat() if run is not None
+                                and run.finished_at is not None else None),
+            "published_at": finding.published_at.isoformat(),
+            "evidence_basis": [{"ordinal": item.ordinal,
+                                "capability": item.capability,
+                                "status": item.status,
+                                "class": item.evidence_class.value}
+                               for item in finding.evidence_basis],
+            "content_authority": "job_authored_non_authoritative",
+            "authority_statement": (
+                "This is a historical Job-authored claim with runtime-recorded provenance. "
+                "It is not current RuntimeState, sensor truth, or persistent memory. "
+                "Re-check authoritative current evidence when current state matters."),
+        }
+
+    def _execute_finding_search(
+        self, call: CognitionToolCall, *, episode_id: int | None = None,
+    ) -> CognitionToolResult:
+        if self.state is not LifecycleState.RUNNING:
+            result: dict[str, object] = {"status": "unavailable",
+                                         "reason": "application_not_running"}
+        elif self.jobs is None:
+            result = {"status": "unavailable", "reason": "jobs_persistence_unavailable"}
+        else:
+            try:
+                arguments = json.loads(call.arguments)
+                if (not isinstance(arguments, dict) or "query" not in arguments
+                        or not set(arguments) <= {"query", "limit"}):
+                    raise ValueError("invalid arguments")
+                limit = 5 if arguments.get("limit") is None else arguments["limit"]
+                findings = self.jobs.search_findings(arguments["query"], limit=limit)
+                result = {"status": "ok", "source": "job_findings",
+                          "content_authority": "job_authored_non_authoritative",
+                          "findings": [self._finding_projection(item) for item in findings]}
+            except (json.JSONDecodeError, TypeError, ValueError):
+                result = {"status": "rejected", "reason": "invalid_tool_arguments"}
+        query_chars = 0
+        try:
+            parsed = json.loads(call.arguments)
+            if isinstance(parsed, dict) and isinstance(parsed.get("query"), str):
+                query_chars = len(parsed["query"])
+        except json.JSONDecodeError:
+            pass
+        LOGGER.info(
+            "[FINDINGS] episode=%s op=search query_chars=%s matches=%s status=%s",
+            "none" if episode_id is None else f"E{episode_id}", query_chars,
+            len(result.get("findings", [])), result["status"])
         return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
     def _resolve_exact_job_selector(
@@ -6139,6 +6263,97 @@ class RobotApplication:
             "directory" if operation == "list" else "path", detail_chars,
             result["status"],
         )
+        return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _current_job_finding_authority(
+        self, job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None,
+        expected_goal: ActiveGoal | None,
+    ) -> CurrentJobRun:
+        if self.state is not LifecycleState.RUNNING or self.jobs is None:
+            raise RuntimeError("jobs_persistence_unavailable")
+        if job_binding is None:
+            raise RuntimeError("stale_job_work_binding")
+        binding, task_binding, goal = job_binding
+        context = self._context_for_run(binding.run.id)
+        if context is None or context.binding is not binding:
+            raise RuntimeError("stale_job_work_binding")
+        try:
+            current = self._validate_job_work_preconditions(context)
+        except RuntimeError as error:
+            raise RuntimeError("stale_job_work_binding") from error
+        if (current[0] is not binding or current[1] is not task_binding
+                or current[2] is not goal or expected_goal is not goal
+                or not self._job_work_binding_matches(binding, task_binding, goal)):
+            raise RuntimeError("stale_job_work_binding")
+        durable = self.jobs.get_run(binding.run.id)
+        if durable is None or durable.job_id != binding.job.id or durable.status is not JobRunStatus.RUNNING:
+            raise RuntimeError("stale_job_work_binding")
+        return binding
+
+    @staticmethod
+    def _finding_evidence_class(capability: str) -> FindingEvidenceClass:
+        if capability in (INSPECT_SELF_TOOL.name, *(tool.name for tool in DIAGNOSTIC_TOOLS)):
+            return FindingEvidenceClass.RUNTIME_INSPECTION
+        if capability == OBSERVE_SCENE_TOOL.name:
+            return FindingEvidenceClass.SENSOR_OBSERVATION
+        if capability in {tool.name for tool in JOB_WORKSPACE_ACQUISITION_TOOLS}:
+            return FindingEvidenceClass.JOB_WORKSPACE_HISTORICAL
+        if capability == SEARCH_FINDINGS_TOOL.name:
+            return FindingEvidenceClass.HISTORICAL_FINDING
+        if capability == RECALL_MEMORY_TOOL.name:
+            return FindingEvidenceClass.PERSISTENT_MEMORY
+        if capability == INSPECT_RUN_HISTORY_TOOL.name:
+            return FindingEvidenceClass.RUN_HISTORY
+        return FindingEvidenceClass.OTHER_RUNTIME_ACQUISITION
+
+    def _execute_publish_finding(
+        self, call: CognitionToolCall, *,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None,
+        expected_goal: ActiveGoal | None, episode_id: int | None,
+        acquisitions: tuple[InitiativeAcquisitionOutcome, ...],
+    ) -> CognitionToolResult:
+        try:
+            if episode_id is None or episode_id < 1:
+                raise RuntimeError("invalid_publishing_episode")
+            binding = self._current_job_finding_authority(job_binding, expected_goal)
+            arguments = json.loads(call.arguments)
+            if not isinstance(arguments, dict) or set(arguments) != {"topic", "kind", "claim"}:
+                raise ValueError("invalid arguments")
+            kind = FindingKind(arguments["kind"])
+            successful = tuple((index, item) for index, item in enumerate(acquisitions, 1)
+                               if item.status in {"ok", "applied"})
+            if not successful:
+                raise ValueError("publication requires a successful prior acquisition")
+            evidence = tuple(FindingEvidence(
+                index, item.capability, item.status,
+                self._finding_evidence_class(item.capability)) for index, item in successful)
+            if kind is FindingKind.OBSERVATION and not any(
+                item.evidence_class in {FindingEvidenceClass.RUNTIME_INSPECTION,
+                                        FindingEvidenceClass.SENSOR_OBSERVATION}
+                for item in evidence):
+                raise ValueError("observation requires fresh runtime or sensor evidence")
+            assert self.jobs is not None
+            finding = self.jobs.create_finding(
+                binding.job.id, binding.run.id, str(binding.task.id), episode_id,
+                arguments["topic"], kind, arguments["claim"], evidence)
+            result: dict[str, object] = {"status": "applied", "finding": f"FIND{finding.id}",
+                "content_authority": "job_authored_non_authoritative",
+                "search_visible": False,
+                "authority_statement": "Historical Job-authored claim; re-check current evidence."}
+            LOGGER.info(
+                "[FINDINGS] episode=E%s job=JOB%s run=RUN%s op=publish "
+                "finding=FIND%s topic=%s kind=%s status=applied",
+                episode_id, binding.job.id, binding.run.id, finding.id,
+                finding.topic, finding.kind.value)
+        except RuntimeError as error:
+            result = {"status": "rejected", "reason": str(error)}
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            result = {"status": "rejected", "reason": "invalid_publication",
+                      "error": str(error)}
+        if result["status"] != "applied":
+            LOGGER.info(
+                "[FINDINGS] episode=%s op=publish finding=none status=%s",
+                "none" if episode_id is None else f"E{episode_id}", result["status"])
         return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
     def _execute_job_workspace_write(
@@ -6828,6 +7043,7 @@ class RobotApplication:
         job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
         expected_goal: ActiveGoal | None = None,
         episode_id: int | None = None,
+        acquisitions: tuple[InitiativeAcquisitionOutcome, ...] = (),
     ) -> CognitionToolResult:
         projected = self.initiative_tools() if available is None else available
         if call.name == ORIENT_BODY_TOOL.name:
@@ -6851,6 +7067,12 @@ class RobotApplication:
                 call, job_binding=job_binding, expected_goal=expected_goal,
                 episode_id=episode_id,
             )
+        if call.name == PUBLISH_FINDING_TOOL.name and any(
+            tool is PUBLISH_FINDING_TOOL for tool in projected
+        ):
+            return self._execute_publish_finding(
+                call, job_binding=job_binding, expected_goal=expected_goal,
+                episode_id=episode_id, acquisitions=acquisitions)
         return self._rejected_tool(
             call.name, "tool is not available", log_prefix=log_prefix
         )
