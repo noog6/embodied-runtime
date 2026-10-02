@@ -337,7 +337,8 @@ class TwilioSmsService(OperatorMessageSink):
         except Exception:
             LOGGER.error("[SMS] operator_delivery status=failed reason=provider_error")
             raise
-        LOGGER.info("[SMS] operator_delivery chars=%s status=sent", len(body))
+        LOGGER.info("[SMS] operator_delivery chars=%s text=%r status=sent",
+                    len(body), body)
 
     @property
     def diagnostics(self) -> dict[str, object]:
@@ -494,8 +495,11 @@ class TwilioSmsService(OperatorMessageSink):
             LOGGER.info("[SMS] inbound status=rejected reason=queue_full")
             return _Acceptance(503, "queue_full")
         self._remember(sid)
-        LOGGER.info("[SMS] inbound message_sid=%s media=%s status=accepted sender=operator",
-                    sid, media_count)
+        LOGGER.info(
+            "[SMS] inbound message_sid=%s media=%s chars=%s text=%r "
+            "status=accepted sender=operator",
+            sid, media_count, len(message.body), message.body,
+        )
         return _Acceptance(200, "accepted")
 
     @staticmethod
@@ -570,5 +574,5 @@ class TwilioSmsService(OperatorMessageSink):
         except Exception:
             LOGGER.error("[SMS] reply status=failed reason=provider_error")
         else:
-            LOGGER.info("[SMS] reply message_sid=%s chars=%s status=sent",
-                        message.message_sid, len(body))
+            LOGGER.info("[SMS] reply message_sid=%s chars=%s text=%r status=sent",
+                        message.message_sid, len(body), body)

@@ -59,7 +59,13 @@ short deterministic explanation. Empty responses are not sent. Cognition failure
 gets no SMS response. Provider sending runs off the asyncio event loop, has one
 attempt, and has no retry queue, delivery callback, or receipt persistence.
 
-Logs contain bounded status/reason fields and may contain `MessageSid`, but never
-message bodies, response bodies, credentials, full phone numbers, headers, forms,
-or the configured public URL. Effective diagnostics expose structural listener
-settings and booleans for private-value availability, never those values.
+Raw runtime logs intentionally contain the text of accepted configured-operator
+messages and successfully sent replies, notifications, and operator deliveries for
+development observability. Text uses an escaped, single-record `text=` representation.
+Bodies from rejected requests and external participants are not logged. Credentials,
+full phone numbers, headers, forms, media URLs, and the configured public URL remain
+excluded. Effective diagnostics expose structural listener settings and booleans for
+private-value availability, never those values. Cognition-facing
+`inspect_run_history` withholds content-bearing `text=` lines before matching, so the
+raw logging does not create a conversation-history retrieval path; run history remains
+operational evidence rather than a conversation replay or archive.
