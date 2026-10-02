@@ -327,6 +327,39 @@ class JobReadinessTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(backend.requests), request_count)
         await app.stop()
 
+    async def test_exact_terminal_commands_handle_parked_run_without_new_work(self):
+        proposals = tuple(
+            {"disposition": "continue", "summary": "parked",
+             "readiness": "wait_for_operator", "delay_seconds": None}
+            for _ in range(3)
+        )
+        backend = ReadinessBackend(proposals)
+        app = self.app(backend)
+        await app.start()
+        job = self.store.create_job("Parked terminal control")
+        console = RuntimeConsole(app)
+        for action, expected, summary in (
+            ("stop", JobRunStatus.STOPPED, "operator stopped"),
+            ("complete", JobRunStatus.COMPLETED, "operator completed"),
+            ("fail", JobRunStatus.FAILED, "operator failed"),
+        ):
+            with self.subTest(action=action):
+                binding = app.start_job_run(job.id)
+                await app.work_job_run_once(binding.run.id)
+                context = app._context_for_run(binding.run.id)
+                self.assertEqual(context.execution_state, "parked")
+                self.assertIs(context.binding.task.status, TaskStatus.PAUSED)
+                requests = len(backend.requests)
+
+                report, _ = await console.execute_async(
+                    f"job {action} RUN{binding.run.id} {summary}")
+
+                self.assertIn(expected.value, report)
+                self.assertEqual(len(backend.requests), requests)
+                self.assertIs(self.store.get_run(binding.run.id).status, expected)
+                self.assertIsNone(app._context_for_run(binding.run.id))
+        await app.stop()
+
     async def test_new_run_does_not_inherit_readiness_or_continuity(self):
         backend = ReadinessBackend((
             {"disposition": "continue", "summary": "summary A",

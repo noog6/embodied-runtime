@@ -84,7 +84,7 @@ class HealthJobActivationTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         await app._platform_monitor.sample_platform_once()
         await self.drain()
-        self.assertEqual(app._pending_job_triggers, {trigger_type})
+        self.assertEqual(app._pending_job_triggers, {(job.id, trigger_type)})
         await app._platform_monitor.sample_platform_once()
         # Retry before queued clear-event delivery: monitor hysteresis is authoritative.
         app.episode_coordinator._operator_waiters = 0

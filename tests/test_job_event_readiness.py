@@ -279,7 +279,8 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("delay_remaining:", output)
         self.assertIs(app.job_continuation, continuation)
 
-        app.finish_job_run(JobRunStatus.STOPPED, "unrelated finished")
+        await app.finish_job_run_by_id(
+            active.run.id, JobRunStatus.STOPPED, "unrelated finished")
         output = RuntimeConsole(app).execute("job current")[0]
         self.assertIn(f"job:           JOB{parked.job.id}", output)
         self.assertIn(f"run:           RUN{parked.run.id}", output)

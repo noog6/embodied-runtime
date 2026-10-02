@@ -116,6 +116,10 @@ class RuntimeConsole:
             return self._job_result(words), False
         if vocabulary[:2] == ["job", "latest-result"]:
             return self._job_latest_result(words), False
+        if (len(words) > 2 and vocabulary[:2] in (
+                ["job", "complete"], ["job", "fail"], ["job", "stop"])
+                and _catalog_id(words[2], "RUN") is not None):
+            return "This command requires an active asynchronous console session.", False
         if vocabulary and vocabulary[0] == "job":
             return self._job_command(words), False
         if vocabulary and vocabulary[0] == "memory" and vocabulary != ["memory", "clear"]:
@@ -174,6 +178,26 @@ class RuntimeConsole:
         except ValueError as error:
             return f"Unable to parse command: {error}.", False
         lowered = [word.lower() for word in words]
+        terminal = {
+            "complete": JobRunStatus.COMPLETED,
+            "fail": JobRunStatus.FAILED,
+            "stop": JobRunStatus.STOPPED,
+        }.get(lowered[1] if len(lowered) > 1 and lowered[0] == "job" else "")
+        if terminal is not None and len(words) > 2:
+            run_id = _catalog_id(words[2], "RUN")
+            if run_id is not None:
+                action = lowered[1]
+                summary = " ".join(words[3:]) or None
+                if action == "fail" and summary is None:
+                    return self._job_terminal_usage(action), False
+                try:
+                    binding = await self._application.finish_job_run_by_id(
+                        run_id, terminal, summary)
+                except (KeyError, RuntimeError, TypeError, ValueError) as error:
+                    return f"Unable to {action} Job: {error}.", False
+                except Exception:
+                    return f"Unable to {action} Job: persistence operation failed.", False
+                return f"Job RUN{binding.run.id} {binding.run.status.value}.", False
         if lowered[:2] == ["job", "work"]:
             if len(words) not in (2, 3):
                 return "Usage: job work [RUN<n>].", False
@@ -284,9 +308,9 @@ class RuntimeConsole:
                 "  job unschedule JOB<n>          Remove a Job's daily schedule",
                 "  job work [RUN<n>]              Perform one bounded Job work episode",
                 "  job current                    Show current JobRun and Task",
-                "  job complete [summary]         Complete current JobRun",
-                "  job fail <error-summary>       Fail current JobRun",
-                "  job stop [summary]             Stop current JobRun",
+                "  job complete [RUN<n>] [summary] Complete one exact JobRun",
+                "  job fail [RUN<n>] <error-summary> Fail one exact JobRun",
+                "  job stop [RUN<n>] [summary]    Stop one exact JobRun",
                 "  memory clear                   Clear session working memory",
                 "  memory persistent              Show persistent-memory state",
                 "  memory entity add <entity_type> <canonical_name> Create a durable entity",
@@ -532,6 +556,8 @@ class RuntimeConsole:
             event_type = JobTriggerType(words[3].lower())
             if remove:
                 removed = store.remove_trigger(job_id, event_type)
+                if removed:
+                    self._application.discard_pending_job_trigger(job_id, event_type)
                 return (f"Removed {event_type.value} trigger from JOB{job_id}." if removed
                         else f"JOB{job_id} has no {event_type.value} trigger.")
             store.set_trigger(job_id, event_type)
@@ -581,8 +607,8 @@ class RuntimeConsole:
     @staticmethod
     def _job_terminal_usage(action: str) -> str:
         if action == "fail":
-            return "Usage: job fail <error-summary>."
-        return f"Usage: job {action} [summary]."
+            return "Usage: job fail [RUN<n>] <error-summary>."
+        return f"Usage: job {action} [RUN<n>] [summary]."
 
     def _job_add(self, words: list[str]) -> str:
         if len(words) < 3:
@@ -630,6 +656,8 @@ class RuntimeConsole:
             return f"Unable to {action} JOB{job_id}."
         except Exception:
             return f"Unable to {action} JOB{job_id}: persistence operation failed."
+        if not enabled:
+            self._application.discard_pending_job_activations(job_id)
         return f"JOB{job.id} {'enabled' if enabled else 'disabled'}."
 
     def _job_update(self, words: list[str]) -> str:

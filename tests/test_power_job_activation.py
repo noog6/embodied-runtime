@@ -90,7 +90,7 @@ class PowerJobActivationTests(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.store.list_runs(job.id), ())
         self.assertEqual(app._pending_job_triggers,
-                         {JobTriggerType.POWER_ATTENTION_REQUIRED})
+                         {(job.id, JobTriggerType.POWER_ATTENTION_REQUIRED)})
         app.episode_coordinator._operator_waiters = 0
         await app._offer_job_activations()
         await app._active_job_work_task
@@ -110,7 +110,7 @@ class PowerJobActivationTests(unittest.IsolatedAsyncioTestCase):
             source="test", battery_voltage_v=7.3))
         await self.drain()
         self.assertEqual(app._pending_job_triggers,
-                         {JobTriggerType.POWER_ATTENTION_REQUIRED})
+                         {(job.id, JobTriggerType.POWER_ATTENTION_REQUIRED)})
         self.assertEqual(self.store.list_runs(job.id), ())
 
         app._replace_power_state(PowerState(
