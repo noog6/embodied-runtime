@@ -284,6 +284,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  voice                          Start one bounded voice session\n"
             "  memory                         Show working-memory metadata\n"
             "  jobs                           List the entire durable Job catalog\n"
+            "  findings [query]               List or search durable Findings\n"
+            "  finding show FIND<n>           Show one Finding and its provenance\n"
             "  job show JOB<n>                Show one Job and its assignment\n"
             "  job runs JOB<n>                List durable occurrences of one Job\n"
             "  job files JOB<n> [directory]   List one Workspace directory level\n"

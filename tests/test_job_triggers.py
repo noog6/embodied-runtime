@@ -29,7 +29,7 @@ class JobTriggerStoreTests(unittest.TestCase):
             trigger = store.set_trigger(job.id, JobTriggerType.RUNTIME_READY)
             self.assertEqual(store.get_trigger(job.id, JobTriggerType.RUNTIME_READY), trigger)
             self.assertEqual(store._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 8)
+                "PRAGMA user_version").fetchone()[0], 9)
             store.close()
 
     def test_unsupported_trigger_fails_closed(self):
@@ -95,7 +95,7 @@ class JobTriggerStoreTests(unittest.TestCase):
             self.assertEqual(store.get_job(1).description, "preserved")
             self.assertEqual(store.get_schedule(1).local_time, "02:00")
             self.assertEqual(store._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 8)
+                "PRAGMA user_version").fetchone()[0], 9)
             store.close()
             reopened = SQLiteJobStore(path)
             self.assertEqual(reopened.list_triggers(), ())
@@ -139,7 +139,7 @@ class JobTriggerStoreTests(unittest.TestCase):
             self.assertTrue(expected.enabled)
             self.assertEqual(expected.job_id, 12)
             self.assertEqual(store._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 8)
+                "PRAGMA user_version").fetchone()[0], 9)
             other = store.create_job("Other")
             store.set_trigger(other.id, JobTriggerType.POWER_ATTENTION_REQUIRED)
             store.set_trigger(12, JobTriggerType.THERMAL_WARNING_RAISED)
@@ -177,7 +177,7 @@ class JobTriggerStoreTests(unittest.TestCase):
             second = migrated.create_job("Capabilities")
             migrated.set_trigger(second.id, JobTriggerType.RUNTIME_READY)
             self.assertEqual(migrated._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 8)
+                "PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(len(migrated.list_triggers()), 2)
             migrated.close()
 
@@ -198,7 +198,7 @@ class JobTriggerStoreTests(unittest.TestCase):
             self.assertEqual(migrated.get_trigger(
                 first.id, JobTriggerType.RUNTIME_READY), expected)
             self.assertEqual(migrated._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 8)
+                "PRAGMA user_version").fetchone()[0], 9)
             self.assertIsNone(migrated._connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='index' AND "
                 "name='idx_job_triggers_enabled_event'").fetchone())
@@ -211,5 +211,5 @@ class JobTriggerStoreTests(unittest.TestCase):
             self.assertEqual(len(reopened.list_triggers(
                 JobTriggerType.RUNTIME_READY)), 2)
             self.assertEqual(reopened._connection.execute(
-                "PRAGMA user_version").fetchone()[0], 8)
+                "PRAGMA user_version").fetchone()[0], 9)
             reopened.close()

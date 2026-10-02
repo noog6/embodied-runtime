@@ -256,16 +256,28 @@ class OpenAIResponsesBackend(TextCognitionBackend):
             tool.parameters.get("type") != "object"
             or not isinstance(properties, dict)
             or not isinstance(required, list)
-            or set(properties) != set(required)
+            or not set(required) <= set(properties)
             or tool.parameters.get("additionalProperties") is not False
         ):
             raise CognitionError(
                 f"Strict cognition tool schema is incompatible: {tool.name}"
             )
+        optional = set(properties) - set(required)
+        if any("null" not in definition.get("type", ())
+               for name, definition in properties.items() if name in optional):
+            raise CognitionError(
+                f"Strict cognition tool optional fields must accept null: {tool.name}"
+            )
+        # OpenAI strict schemas require every property in ``required``. Runtime tool
+        # definitions may nevertheless express genuinely optional nullable fields;
+        # normalize those only at the provider boundary while the local executor
+        # continues to accept omission as well as explicit null.
+        parameters = dict(tool.parameters)
+        parameters["required"] = list(properties)
         return {
             "type": "function",
             "name": tool.name,
             "description": tool.description,
-            "parameters": dict(tool.parameters),
+            "parameters": parameters,
             "strict": True,
         }

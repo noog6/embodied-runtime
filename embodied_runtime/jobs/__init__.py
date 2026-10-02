@@ -1,7 +1,9 @@
 """Durable Job domain and persistence APIs."""
 
 from .model import (
-    MAX_RUN_REPORT_CHARS, InvalidJobRunTransitionError, Job, JobRun, JobRunStatus,
+    MAX_RUN_REPORT_CHARS, MAX_FINDING_CLAIM_CHARS, MAX_FINDING_QUERY_CHARS,
+    MAX_FINDING_SEARCH_LIMIT, MAX_FINDING_TOPIC_CHARS, Finding, FindingEvidence,
+    FindingEvidenceClass, FindingKind, InvalidJobRunTransitionError, Job, JobRun, JobRunStatus,
     JobSchedule, JobTarget, JobTrigger, JobTriggerType,
 )
 from .execution import JobWorkDisposition, JobWorkOutcome
@@ -43,6 +45,9 @@ __all__ = ["InvalidJobRunTransitionError", "Job", "JobRun", "JobRunStatus", "Job
            "project_job_continuity_summary", "render_job_continuity",
            "ScheduledJobController", "STATE_TENDING_CONDITIONS",
            "StateTendingCondition"]
+__all__ += ["Finding", "FindingEvidence", "FindingEvidenceClass", "FindingKind",
+            "MAX_FINDING_TOPIC_CHARS", "MAX_FINDING_CLAIM_CHARS",
+            "MAX_FINDING_QUERY_CHARS", "MAX_FINDING_SEARCH_LIMIT"]
 __all__.append("MAX_RUN_REPORT_CHARS")
 __all__ += [
     "FilesystemJobWorkspaceStore", "JobWorkspaceStore", "WorkspaceError",

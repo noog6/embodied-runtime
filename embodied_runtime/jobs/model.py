@@ -11,6 +11,10 @@ MAX_JOB_NAME_CHARS = 200
 MAX_JOB_DESCRIPTION_CHARS = 2000
 MAX_RUN_SUMMARY_CHARS = 2000
 MAX_RUN_REPORT_CHARS = 8_000
+MAX_FINDING_TOPIC_CHARS = 120
+MAX_FINDING_CLAIM_CHARS = 2_000
+MAX_FINDING_QUERY_CHARS = 200
+MAX_FINDING_SEARCH_LIMIT = 10
 _TOKEN = re.compile(r"^[^\W\d][\w-]*$", re.UNICODE)
 _LOCAL_TIME = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 
@@ -161,6 +165,74 @@ RUN_TRANSITIONS = {
 
 class InvalidJobRunTransitionError(ValueError):
     """Raised when a durable run transition is not in the lifecycle contract."""
+
+
+class FindingKind(StrEnum):
+    OBSERVATION = "observation"
+    SYNTHESIS = "synthesis"
+
+
+class FindingEvidenceClass(StrEnum):
+    RUNTIME_INSPECTION = "runtime_inspection"
+    SENSOR_OBSERVATION = "sensor_observation"
+    JOB_WORKSPACE_HISTORICAL = "job_workspace_historical"
+    HISTORICAL_FINDING = "historical_finding"
+    PERSISTENT_MEMORY = "persistent_memory"
+    RUN_HISTORY = "run_history"
+    OTHER_RUNTIME_ACQUISITION = "other_runtime_acquisition"
+
+
+@dataclass(frozen=True, slots=True)
+class FindingEvidence:
+    ordinal: int
+    capability: str
+    status: str
+    evidence_class: FindingEvidenceClass
+
+    def __post_init__(self) -> None:
+        _positive_id(self.ordinal, "evidence ordinal")
+        object.__setattr__(self, "capability", _text(self.capability, "capability", 100))
+        object.__setattr__(self, "status", _text(self.status, "status", 30))
+        if not isinstance(self.evidence_class, FindingEvidenceClass):
+            raise TypeError("evidence_class must be a FindingEvidenceClass")
+
+
+@dataclass(frozen=True, slots=True)
+class Finding:
+    """One immutable, non-authoritative claim published by an exact JobRun."""
+
+    id: int
+    job_id: int
+    run_id: int
+    task_id: str
+    episode_id: int
+    topic: str
+    kind: FindingKind
+    claim: str
+    evidence_basis: tuple[FindingEvidence, ...]
+    published_at: datetime
+
+    def __post_init__(self) -> None:
+        _positive_id(self.id, "finding ID")
+        _positive_id(self.job_id, "job ID")
+        _positive_id(self.run_id, "job run ID")
+        object.__setattr__(self, "task_id", _text(self.task_id, "task_id", 100))
+        _positive_id(self.episode_id, "episode ID")
+        topic = _text(self.topic, "topic", MAX_FINDING_TOPIC_CHARS).casefold()
+        topic = re.sub(r"\s+", "_", topic)
+        object.__setattr__(self, "topic", topic)
+        if not isinstance(self.kind, FindingKind):
+            raise TypeError("kind must be a FindingKind")
+        object.__setattr__(self, "claim", _text(
+            self.claim, "claim", MAX_FINDING_CLAIM_CHARS))
+        if not isinstance(self.evidence_basis, tuple) or not self.evidence_basis:
+            raise ValueError("evidence_basis must not be empty")
+        if any(not isinstance(item, FindingEvidence) for item in self.evidence_basis):
+            raise TypeError("evidence_basis must contain FindingEvidence records")
+        if tuple(item.ordinal for item in self.evidence_basis) != tuple(
+                sorted({item.ordinal for item in self.evidence_basis})):
+            raise ValueError("evidence ordinals must be unique and ordered")
+        object.__setattr__(self, "published_at", _time(self.published_at, "published_at"))
 
 
 @dataclass(frozen=True, slots=True)

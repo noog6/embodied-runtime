@@ -3,15 +3,31 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+import json
 import sqlite3
+import unicodedata
 
 from .model import (
+    Finding, FindingEvidence, FindingEvidenceClass, FindingKind,
+    MAX_FINDING_QUERY_CHARS, MAX_FINDING_SEARCH_LIMIT,
     InvalidJobRunTransitionError, Job, JobRun, JobRunStatus, JobSchedule, JobTarget,
     JobTrigger, JobTriggerType,
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+_FINDINGS_SCHEMA = """CREATE TABLE IF NOT EXISTS job_findings (
+       id INTEGER PRIMARY KEY,
+       job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+       run_id INTEGER NOT NULL REFERENCES job_runs(id) ON DELETE RESTRICT,
+       task_id TEXT NOT NULL, episode_id INTEGER NOT NULL,
+       topic TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('observation','synthesis')),
+       claim TEXT NOT NULL, evidence_json TEXT NOT NULL, published_at TEXT NOT NULL)"""
+_FINDINGS_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_job_findings_job ON job_findings(job_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_job_findings_run ON job_findings(run_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_job_findings_published ON job_findings(published_at DESC, id DESC)",
+)
 _JOB_RUNS_SCHEMA = """CREATE TABLE job_runs (
        id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
        status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','stopped','interrupted')),
@@ -38,6 +54,8 @@ _SCHEMA = (
            'thermal_warning_raised','memory_pressure_raised','runtime_ready')),
        enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
        PRIMARY KEY(job_id,event_type))""",
+    _FINDINGS_SCHEMA,
+    *_FINDINGS_INDEXES,
 )
 
 
@@ -61,6 +79,18 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
+        if version == 8:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(_FINDINGS_SCHEMA)
+                for statement in _FINDINGS_INDEXES:
+                    self._connection.execute(statement)
+                self._connection.execute("PRAGMA user_version = 9")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+            return
         if version == 7:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -71,13 +101,14 @@ class SQLiteJobStore:
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version in (5, 6):
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 self._connection.execute("DROP INDEX IF EXISTS idx_job_triggers_enabled_event")
                 self._connection.execute("ALTER TABLE job_triggers RENAME TO job_triggers_previous")
-                self._connection.execute(_SCHEMA[-1])
+                self._connection.execute(_SCHEMA[4])
                 self._connection.execute(
                     """INSERT INTO job_triggers(job_id,event_type,enabled)
                        SELECT job_id,event_type,enabled FROM job_triggers_previous""")
@@ -87,22 +118,24 @@ class SQLiteJobStore:
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version == 4:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                self._connection.execute(_SCHEMA[-1])
+                self._connection.execute(_SCHEMA[4])
                 self._connection.execute("PRAGMA user_version = 8")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version in (1, 2, 3):
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 if version == 1:
-                    self._connection.execute(_SCHEMA[-2])
+                    self._connection.execute(_SCHEMA[3])
                 if version in (1, 2):
                     self._connection.execute("ALTER TABLE job_runs ADD COLUMN result_report TEXT")
                 self._connection.execute("ALTER TABLE job_runs RENAME TO job_runs_v3")
@@ -117,12 +150,13 @@ class SQLiteJobStore:
                 )
                 self._connection.execute("DROP TABLE job_runs_v3")
                 self._connection.execute("CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)")
-                self._connection.execute(_SCHEMA[-1])
+                self._connection.execute(_SCHEMA[4])
                 self._connection.execute("PRAGMA user_version = 8")
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version != 0:
             raise RuntimeError(f"unsupported jobs schema version {version}; expected {SCHEMA_VERSION}")
@@ -428,6 +462,88 @@ class SQLiteJobStore:
             self._connection.rollback()
             raise
 
+    def create_finding(self, job_id: int, run_id: int, task_id: str, episode_id: int,
+                       topic: str, kind: FindingKind, claim: str,
+                       evidence_basis: tuple[FindingEvidence, ...]) -> Finding:
+        """Stage a Finding iff its exact source Run is still running."""
+        now = self._now()
+        probe = Finding(1, job_id, run_id, task_id, episode_id, topic, kind, claim,
+                        evidence_basis, now)
+        evidence_json = json.dumps([{
+            "ordinal": item.ordinal, "capability": item.capability,
+            "status": item.status, "class": item.evidence_class.value,
+        } for item in probe.evidence_basis], ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"))
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT job_id,status FROM job_runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"job run does not exist: {run_id}")
+            if row["job_id"] != job_id:
+                raise ValueError("job run does not belong to finding job")
+            if row["status"] != JobRunStatus.RUNNING.value:
+                raise ValueError("source job run is not running")
+            cursor = self._connection.execute(
+                """INSERT INTO job_findings
+                   (job_id,run_id,task_id,episode_id,topic,kind,claim,evidence_json,published_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (job_id, run_id, probe.task_id, episode_id, probe.topic, kind.value,
+                 probe.claim, evidence_json, _format(now)))
+            self._connection.commit()
+            return Finding(cursor.lastrowid, job_id, run_id, probe.task_id, episode_id,
+                           probe.topic, kind, probe.claim, evidence_basis, now)
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+    def get_finding(self, finding_id: int) -> Finding | None:
+        _id(finding_id, "finding")
+        row = self._connection.execute(
+            "SELECT * FROM job_findings WHERE id=?", (finding_id,)).fetchone()
+        return None if row is None else _finding(row)
+
+    def list_findings(self, *, limit: int = 20) -> tuple[Finding, ...]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be from 1 to 100")
+        rows = self._connection.execute(
+            "SELECT * FROM job_findings ORDER BY published_at DESC,id DESC LIMIT ?",
+            (limit,)).fetchall()
+        return tuple(_finding(row) for row in rows)
+
+    def search_findings(self, query: str, *, limit: int = 5) -> tuple[Finding, ...]:
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        normalized = " ".join(query.split()).casefold()
+        if (not normalized or len(normalized) > MAX_FINDING_QUERY_CHARS
+                or any(unicodedata.category(c) == "Cc" for c in normalized)):
+            raise ValueError("query must be non-empty bounded text")
+        if type(limit) is not int or not 1 <= limit <= MAX_FINDING_SEARCH_LIMIT:
+            raise ValueError(f"limit must be from 1 to {MAX_FINDING_SEARCH_LIMIT}")
+        tokens = tuple(dict.fromkeys(normalized.split()))
+        # A bounded candidate set keeps scoring understandable without adding FTS.
+        rows = self._connection.execute(
+            """SELECT f.*,j.name AS job_name FROM job_findings f
+               JOIN job_runs r ON r.id=f.run_id JOIN jobs j ON j.id=f.job_id
+               WHERE r.status='completed' ORDER BY f.published_at DESC,f.id DESC""")
+        # Stream the whole corpus but retain only the best bounded result window.
+        # This deliberately trades O(corpus) lexical scan time for O(limit) Python
+        # memory until a later phase introduces an indexed search subsystem.
+        ranked: list[tuple[int, str, int, sqlite3.Row]] = []
+        for row in rows:
+            topic, claim, job_name = (row["topic"].casefold(), row["claim"].casefold(),
+                                      row["job_name"].casefold())
+            fields = (topic, claim, job_name)
+            score = sum(3 if token == topic else 1 for token in tokens
+                        if any(token in field for field in fields))
+            if score:
+                candidate = (score, row["published_at"], row["id"], row)
+                ranked.append(candidate)
+                ranked.sort(key=lambda item: item[:3], reverse=True)
+                if len(ranked) > limit:
+                    ranked.pop()
+        return tuple(_finding(row) for _, _, _, row in ranked)
+
     def close(self) -> None:
         self._connection.close()
 
@@ -463,6 +579,21 @@ def _run(row: sqlite3.Row) -> JobRun:
                   _parse(row["created_at"]), _parse(row["started_at"]),
                   _parse(row["finished_at"]), row["outcome_summary"],
                   row["error_summary"], row["result_report"])  # type: ignore[arg-type]
+
+
+def _finding(row: sqlite3.Row) -> Finding:
+    try:
+        raw = json.loads(row["evidence_json"])
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("invalid finding evidence")
+        evidence = tuple(FindingEvidence(
+            item["ordinal"], item["capability"], item["status"],
+            FindingEvidenceClass(item["class"])) for item in raw)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"malformed evidence for FIND{row['id']}") from error
+    return Finding(row["id"], row["job_id"], row["run_id"], row["task_id"],
+                   row["episode_id"], row["topic"], FindingKind(row["kind"]),
+                   row["claim"], evidence, _parse(row["published_at"]))  # type: ignore[arg-type]
 
 
 def _schedule(row: sqlite3.Row) -> JobSchedule:
