@@ -149,6 +149,7 @@ ElevenLabs-hosted speech is a fourth explicit option:
 [voice]
 enabled = true
 tts = "elevenlabs"
+fallback_tts = "espeak" # optional; global default is "none"
 elevenlabs_tts_model = "eleven_flash_v2_5"
 elevenlabs_tts_voice_id = "YOUR_VOICE_ID"
 elevenlabs_tts_speed = 1.0
@@ -167,7 +168,12 @@ default is `eleven_flash_v2_5`. The provider requests `wav_24000` and collects
 all asynchronously delivered SDK chunks into one complete in-memory WAV before
 enabling the speaker and invoking `aplay`. This is not streaming playback and
 does not create temporary files. eSpeak, Piper, and OpenAI remain explicit
-alternatives, and there is no automatic fallback.
+alternatives. The optional eSpeak fallback runs only when hosted synthesis
+cannot produce audio. It is lazy, remains under the same canonical speaker
+lease, and never masks local `aplay`, Fusion HAT, speaker-authority, shutdown,
+or cancellation failures. Provider diagnostics use a bounded allowlist; for
+example, recognized `insufficient_credits` and `quota_exceeded` codes are logged
+as `reason=credits_exhausted` without response bodies, headers, or credentials.
 
 `elevenlabs_tts_speed` accepts numeric values from `0.7` through `1.2`; values
 above `1.0` speak faster. It is sent as request-level `VoiceSettings(speed=...)`
@@ -191,8 +197,8 @@ python main.py \
   --tts openai
 ```
 
-This is explicit operator selection; a missing ElevenLabs credential or other
-ElevenLabs failure does not trigger automatic fallback.
+This is explicit operator selection. Mira's configured eSpeak fallback is a
+separate emergency path for synthesis-time provider failures.
 
 Hosted synthesis logs derive `audio_ms` by reading the PCM frames actually
 present in the returned in-memory WAV in bounded chunks. They do not blindly

@@ -10,6 +10,7 @@ import io
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import threading
 import time
@@ -70,6 +71,78 @@ class ElevenLabsTTSUnavailableError(RuntimeError):
     """Raised when selected hosted ElevenLabs speech cannot be initialized."""
 
 
+@dataclass(frozen=True, slots=True)
+class TextToSpeechResult:
+    provider: str
+
+
+@dataclass(frozen=True, slots=True)
+class SynthesisFailureDetails:
+    provider: str
+    error: str
+    http_status: int | None = None
+    provider_type: str | None = None
+    code: str | None = None
+    message: str | None = None
+    request_id: str | None = None
+    reason: str = "provider_error"
+
+
+class TextToSpeechSynthesisError(RuntimeError):
+    """Safe semantic boundary for hosted synthesis (never local playback)."""
+
+    def __init__(self, details: SynthesisFailureDetails) -> None:
+        super().__init__(details.reason)
+        self.details = details
+
+
+def _safe_provider_text(value: object, limit: int = 240) -> str | None:
+    if not isinstance(value, (str, int)):
+        return None
+    normalized = " ".join(str(value).split())
+    normalized = re.sub(r"https?://\S+", "[redacted-url]", normalized)
+    normalized = re.sub(
+        r"(?i)\bauthorization\s*[:=]\s*(?:bearer\s+)?\S+",
+        "authorization=[redacted]", normalized,
+    )
+    normalized = re.sub(
+        r"(?i)\b(xi-api-key|api[_ -]?key)\s*[:=]\s*\S+",
+        r"\1=[redacted]", normalized,
+    )
+    normalized = re.sub(
+        r"(?i)\bbearer\s+\S+", "bearer [redacted]", normalized
+    )
+    return normalized[:limit] or None
+
+
+def elevenlabs_failure_details(error: BaseException) -> SynthesisFailureDetails:
+    """Extract only explicitly allowed fields from known SDK error containers."""
+    body = getattr(error, "body", None)
+    detail = body.get("detail") if isinstance(body, dict) else None
+    source = detail if isinstance(detail, dict) else (
+        body if isinstance(body, dict) else {}
+    )
+
+    def allowed(name: str) -> object:
+        value = source.get(name) if isinstance(source, dict) else None
+        return value if value is not None else getattr(error, name, None)
+
+    status = getattr(error, "status_code", None)
+    if type(status) is not int:
+        status = None
+    provider_type = _safe_provider_text(allowed("type"))
+    code = _safe_provider_text(allowed("code"))
+    message = _safe_provider_text(allowed("message"))
+    request_id = _safe_provider_text(
+        allowed("request_id"), 96
+    )
+    exhausted = code in {"insufficient_credits", "quota_exceeded"}
+    return SynthesisFailureDetails(
+        "elevenlabs", type(error).__name__, status, provider_type, code,
+        message, request_id, "credits_exhausted" if exhausted else "provider_error",
+    )
+
+
 class VoiceProvider(Protocol):
     """Transient speech input for a voice session."""
 
@@ -81,7 +154,7 @@ class VoiceProvider(Protocol):
 class TextToSpeechProvider(Protocol):
     """Speech output used by a runtime-owned voice session."""
 
-    async def speak(self, text: str) -> None: ...
+    async def speak(self, text: str) -> TextToSpeechResult | None: ...
     async def close(self) -> None: ...
 
 
@@ -514,6 +587,7 @@ class FusionHatEspeakTTSProvider:
 
     def __init__(self) -> None:
         self._tts = None
+        self.identifier = "espeak"
 
     def _ensure_tts(self):
         if self._tts is None:
@@ -679,6 +753,7 @@ class FusionHatElevenLabsTTSProvider:
         voice_id: str,
         model: str = "eleven_flash_v2_5",
         speed: float = 1.0,
+        observability: RunObservability | None = None,
     ) -> None:
         api_key = os.environ.get("ELEVENLABS_API_KEY")
         if not api_key:
@@ -702,6 +777,8 @@ class FusionHatElevenLabsTTSProvider:
         self._speed = speed
         self._voice_settings_type = VoiceSettings
         self._client = AsyncElevenLabs(api_key=api_key)
+        self._observability = observability
+        self.identifier = "elevenlabs"
 
     async def speak(self, text: str) -> None:
         try:
@@ -711,16 +788,42 @@ class FusionHatElevenLabsTTSProvider:
 
         await _await_owned_blocking_operation(disable_speaker)
         synthesis_started = time.perf_counter()
-        audio_chunks = self._client.text_to_speech.convert(
-            voice_id=self._voice_id,
-            text=text,
-            model_id=self._model,
-            output_format="wav_24000",
-            voice_settings=self._voice_settings_type(speed=self._speed),
-        )
-        wav_bytes = b"".join([chunk async for chunk in audio_chunks])
+        try:
+            audio_chunks = self._client.text_to_speech.convert(
+                voice_id=self._voice_id, text=text, model_id=self._model,
+                output_format="wav_24000",
+                voice_settings=self._voice_settings_type(speed=self._speed),
+            )
+            wav_bytes = b"".join([chunk async for chunk in audio_chunks])
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            details = elevenlabs_failure_details(error)
+            fields = {"http_status": details.http_status,
+                      "type": details.provider_type, "code": details.code,
+                      "reason": details.reason, "detail": details.message,
+                      "request_id": details.request_id}
+            LOGGER.warning(
+                "[TTS] provider=elevenlabs stage=synthesis status=failed "
+                "error=%s %s", details.error,
+                " ".join(f"{key}={value!r}" for key, value in fields.items()
+                         if value is not None),
+            )
+            if self._observability is not None:
+                self._observability.event(
+                    "voice", "tts_synthesis", "failed", severity="error",
+                    source="elevenlabs", error=details.error,
+                    metadata={key: value for key, value in fields.items()
+                              if value is not None},
+                )
+            raise TextToSpeechSynthesisError(details) from error
         synthesis_ms = int((time.perf_counter() - synthesis_started) * 1_000)
         _log_synthesis_completed(synthesis_ms, wav_bytes)
+        if self._observability is not None:
+            self._observability.tts_synthesized(
+                "elevenlabs", self._model, characters=len(text),
+                duration_ms=synthesis_ms,
+            )
 
         def play() -> None:
             enable_speaker()
@@ -735,6 +838,7 @@ class FusionHatElevenLabsTTSProvider:
             LOGGER.info("[TTS] playback_completed duration_ms=%s", playback_ms)
 
         await _await_owned_blocking_operation(play)
+        return TextToSpeechResult("elevenlabs")
 
     async def close(self) -> None:
         """Disable output while retaining the reusable ElevenLabs client."""
@@ -743,6 +847,69 @@ class FusionHatElevenLabsTTSProvider:
         except ImportError:
             return
         await _await_owned_blocking_operation(disable_speaker)
+
+
+class FallbackTextToSpeechProvider:
+    """One lazy local fallback, solely for hosted synthesis failures."""
+
+    def __init__(self, primary: TextToSpeechProvider,
+                 fallback_factory: Callable[[], TextToSpeechProvider], *,
+                 fallback_identifier: str = "espeak",
+                 observability: RunObservability | None = None) -> None:
+        self._primary = primary
+        self._fallback_factory = fallback_factory
+        self._fallback_identifier = fallback_identifier
+        self._fallback: TextToSpeechProvider | None = None
+        self._observability = observability
+
+    async def speak(self, text: str) -> TextToSpeechResult:
+        try:
+            result = await self._primary.speak(text)
+            return result or TextToSpeechResult(
+                str(getattr(self._primary, "identifier", "unknown")))
+        except TextToSpeechSynthesisError as error:
+            if self._observability is not None:
+                self._observability.increment("tts_primary_failures")
+                self._observability.increment("tts_fallbacks")
+                self._observability.event(
+                    "voice", "tts_fallback", "attempted",
+                    source=self._fallback_identifier,
+                    metadata={"primary": error.details.provider,
+                              "reason": error.details.reason},
+                )
+            LOGGER.warning("[TTS] primary=%s fallback=%s status=attempted reason=%s",
+                           error.details.provider, self._fallback_identifier,
+                           error.details.reason)
+            if self._fallback is None:
+                self._fallback = self._fallback_factory()
+            try:
+                await self._fallback.speak(text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if self._observability is not None:
+                    self._observability.increment("tts_fallback_failures")
+                raise
+            LOGGER.info("[TTS] provider=%s fallback=true status=completed",
+                        self._fallback_identifier)
+            return TextToSpeechResult(self._fallback_identifier)
+
+    async def close(self) -> None:
+        primary_error: BaseException | None = None
+        try:
+            await self._primary.close()
+        except BaseException as error:
+            primary_error = error
+        fallback_error: BaseException | None = None
+        if self._fallback is not None:
+            try:
+                await self._fallback.close()
+            except BaseException as error:
+                fallback_error = error
+        if primary_error is not None:
+            raise primary_error
+        if fallback_error is not None:
+            raise fallback_error
 
 
 def _log_synthesis_completed(synthesis_ms: int, wav_bytes: bytes) -> None:

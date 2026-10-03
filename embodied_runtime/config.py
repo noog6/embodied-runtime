@@ -38,6 +38,7 @@ class VoiceFileConfig:
     wake_word_enabled: bool | None = None
     wake_words: list[str] | None = None
     tts: str | None = None
+    fallback_tts: str | None = None
     piper_model: str | None = None
     openai_tts_model: str | None = None
     openai_tts_voice: str | None = None
@@ -127,6 +128,7 @@ class LaunchConfiguration:
     voice_wake_word_enabled: bool
     voice_wake_words: list[str]
     voice_tts: str
+    voice_fallback_tts: str
     voice_piper_model: str | None
     voice_openai_tts_model: str
     voice_openai_tts_voice: str
@@ -163,7 +165,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     initiative_actions=False, initiative_messages=False,
     initiative_continuation=False, initiative_goal_closure=False,
     voice_enabled=False, voice_wake_word_enabled=False, voice_wake_words=["mira"],
-    voice_tts="espeak", voice_piper_model=None,
+    voice_tts="espeak", voice_fallback_tts="none", voice_piper_model=None,
     voice_openai_tts_model="gpt-4o-mini-tts", voice_openai_tts_voice="cedar",
     voice_elevenlabs_tts_model="eleven_flash_v2_5",
     voice_elevenlabs_tts_voice_id=None,
@@ -191,7 +193,7 @@ _INITIATIVE_KEYS = {
 }
 _VOICE_KEYS = {
     "enabled", "wake_word_enabled", "wake_words", "initial_timeout_seconds",
-    "followup_timeout_seconds", "tts", "piper_model", "openai_tts_model",
+    "followup_timeout_seconds", "tts", "fallback_tts", "piper_model", "openai_tts_model",
     "openai_tts_voice",
     "elevenlabs_tts_model", "elevenlabs_tts_voice_id", "elevenlabs_tts_speed",
 }
@@ -397,6 +399,16 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
                 f"unsupported value for voice.tts: {voice['tts']!r} "
                 "(choose from elevenlabs, espeak, openai, piper)"
             )
+    if "fallback_tts" in voice:
+        if not isinstance(voice["fallback_tts"], str):
+            raise ConfigurationError("voice.fallback_tts must be a string")
+        if voice["fallback_tts"] not in {"none", "espeak"}:
+            raise ConfigurationError(
+                "unsupported value for voice.fallback_tts: "
+                f"{voice['fallback_tts']!r} (choose from espeak, none)"
+            )
+        if voice.get("tts") == "espeak" and voice["fallback_tts"] == "espeak":
+            raise ConfigurationError("voice.fallback_tts cannot equal primary espeak")
     if "piper_model" in voice and not isinstance(voice["piper_model"], str):
         raise ConfigurationError("voice.piper_model must be a string")
     for key in ("openai_tts_model", "openai_tts_voice"):
@@ -496,6 +508,7 @@ def resolve_launch_configuration(
         voice_wake_word_enabled=voice.wake_word_enabled or False,
         voice_wake_words=voice.wake_words or ["mira"],
         voice_tts=scalar("tts", voice.tts, "espeak"),
+        voice_fallback_tts=scalar("fallback_tts", voice.fallback_tts, "none"),
         voice_piper_model=scalar("piper_model", voice.piper_model, None),
         voice_openai_tts_model=scalar(
             "openai_tts_model", voice.openai_tts_model, "gpt-4o-mini-tts"

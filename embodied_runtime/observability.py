@@ -35,9 +35,17 @@ class TokenPrice:
 
 
 @dataclass(frozen=True, slots=True)
+class CharacterPrice:
+    """Public USD rate for one thousand successfully synthesized characters."""
+
+    usd_per_thousand: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class PricingCatalog:
     rates: Mapping[tuple[str, str], TokenPrice]
     identity: str
+    character_rates: Mapping[tuple[str, str], CharacterPrice] = MappingProxyType({})
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +68,8 @@ _COUNTERS = (
     "cached_input_tokens", "cache_write_tokens", "output_tokens", "total_tokens",
     "provider_duration_ms", "wake_capture_attempts", "wake_captures",
     "stt_captures", "voice_turns", "tts_generations", "tts_characters",
-    "voice_failures", "camera_captures", "camera_failures",
+    "voice_failures", "tts_primary_failures", "tts_fallbacks",
+    "tts_fallback_failures", "camera_captures", "camera_failures",
     "vision_acquisitions", "vision_failures", "attention_episodes_started",
     "attention_episodes_completed", "operator_attention_episodes",
     "automatic_attention_episodes", "job_runs_started", "job_runs_completed",
@@ -90,6 +99,7 @@ class RunObservability:
             "attention_completion_reasons": Counter(), "job_work_outcomes": Counter(),
         }
         self._provider_usage: dict[tuple[str, str], Counter[str]] = {}
+        self._tts_usage: dict[tuple[str, str], Counter[str]] = {}
         self._unpriceable_usage: set[tuple[str, str]] = set()
         self._events: deque[RuntimeEvent] = deque(maxlen=event_capacity)
         self._lock = Lock()
@@ -188,13 +198,30 @@ class RunObservability:
                    source=provider, duration_ms=duration_ms, error=error,
                    metadata={"model": model or "unknown", "stage": stage})
 
+    def tts_synthesized(self, provider: str, model: str, *, characters: int,
+                        duration_ms: int = 0) -> None:
+        """Record hosted usage once audio is collected, before local playback."""
+        if any(type(value) is not int or value < 0
+               for value in (characters, duration_ms)):
+            return
+        key = (self._short(provider), self._short(model))
+        with self._lock:
+            if self._final is not None:
+                return
+            bucket = self._tts_usage.setdefault(key, Counter())
+            bucket.update(syntheses=1, characters=characters, duration_ms=duration_ms)
+        self.event("voice", "tts_synthesis", "completed", source=provider,
+                   duration_ms=duration_ms,
+                   metadata={"model": model, "characters": characters})
+
     def _cost(self) -> dict[str, object]:
-        if not self._provider_usage:
+        if not self._provider_usage and not self._tts_usage:
             return {"status": "unavailable", "estimated_usd": None,
                     "pricing_identity": self._pricing.identity if self._pricing else None}
         if self._pricing is None:
             return {"status": "unavailable", "estimated_usd": None, "pricing_identity": None}
         total = Decimal(0)
+        cognition = Decimal(0)
         for (provider, model), usage in self._provider_usage.items():
             if (provider, model) in self._unpriceable_usage:
                 return {"status": "unavailable", "estimated_usd": None,
@@ -209,13 +236,27 @@ class RunObservability:
             if uncached < 0 or (cache_write and rate.cache_write_per_million is None):
                 return {"status": "unavailable", "estimated_usd": None,
                         "pricing_identity": self._pricing.identity}
-            total += Decimal(uncached) * rate.input_per_million / Decimal(1_000_000)
-            total += Decimal(cached) * rate.cached_input_per_million / Decimal(1_000_000)
-            total += Decimal(usage["output_tokens"]) * rate.output_per_million / Decimal(1_000_000)
+            cognition += Decimal(uncached) * rate.input_per_million / Decimal(1_000_000)
+            cognition += Decimal(cached) * rate.cached_input_per_million / Decimal(1_000_000)
+            cognition += Decimal(usage["output_tokens"]) * rate.output_per_million / Decimal(1_000_000)
             if cache_write:
-                total += Decimal(cache_write) * rate.cache_write_per_million / Decimal(1_000_000)
-        return {"status": "estimated", "estimated_usd": str(total.quantize(Decimal("0.000001"))),
-                "pricing_identity": self._pricing.identity}
+                cognition += Decimal(cache_write) * rate.cache_write_per_million / Decimal(1_000_000)
+        tts = Decimal(0)
+        for key, usage in self._tts_usage.items():
+            rate = self._pricing.character_rates.get(key)
+            if rate is None:
+                return {"status": "unavailable", "estimated_usd": None,
+                        "pricing_identity": self._pricing.identity}
+            tts += Decimal(usage["characters"]) * rate.usd_per_thousand / Decimal(1_000)
+        total = cognition + tts
+        amount = lambda value: str(value.quantize(Decimal("0.000001")))
+        return {"status": "estimated", "estimated_usd": amount(total),
+                "pricing_identity": self._pricing.identity,
+                "components": {
+                    "cognition": {"status": "estimated", "estimated_usd": amount(cognition)},
+                    "tts": {"status": "estimated", "estimated_usd": amount(tts),
+                            "basis": "public_api_character_rate"},
+                }}
 
     def snapshot(self) -> Mapping[str, object]:
         with self._lock:
@@ -255,7 +296,7 @@ class RunObservability:
     def _build_snapshot_locked(self, stopped: datetime, status: str | None,
                                shutdown: str | None) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "run": {"run_id": self.run_id, "started_at": self._started_at.isoformat(),
                     "stopped_at": stopped.isoformat() if status else None,
                     "elapsed_seconds": max(0.0, self._monotonic() - self._started_monotonic),
@@ -269,6 +310,12 @@ class RunObservability:
                      "cache_write_tokens", "output_tokens", "total_tokens",
                      "duration_ms")}}
                 for (provider, model), usage in sorted(self._provider_usage.items())
+            ],
+            "tts_usage": [
+                {"provider": provider, "model": model,
+                 **{field: usage[field] for field in
+                    ("syntheses", "characters", "duration_ms")}}
+                for (provider, model), usage in sorted(self._tts_usage.items())
             ],
             "cost": self._cost(),
         }
@@ -312,17 +359,26 @@ class RunObservability:
         title = f" {self.run_id or 'RUNTIME'} SUMMARY "
         line = "=" * 64
         value = cost["estimated_usd"] if cost["status"] == "estimated" else "unavailable"
+        components = cost.get("components", {})
+        cognition_cost = components.get("cognition", {}).get(
+            "estimated_usd", "unavailable"
+        )
+        tts_cost = components.get("tts", {}).get("estimated_usd", "unavailable")
         return "\n".join((line, title.center(64, "="), "", "Runtime",
             f"  duration:             {duration}", f"  status:               {run['status']}", "",
             "Cognition", f"  provider_requests:    {metrics['provider_requests']}",
             f"  input_tokens:         {metrics['input_tokens']}",
             f"  cached_input_tokens:  {metrics['cached_input_tokens']}",
             f"  output_tokens:        {metrics['output_tokens']}",
+            f"  cognition_cost_usd:   {cognition_cost}",
+            f"  tts_cost_usd:         {tts_cost}",
             f"  estimated_cost_usd:   {value}", "", "Voice",
             f"  wake_captures:        {metrics['wake_captures']}",
             f"  stt_captures:         {metrics['stt_captures']}",
             f"  voice_turns:          {metrics['voice_turns']}",
-            f"  tts_generations:      {metrics['tts_generations']}", "", "Perception",
+            f"  tts_generations:      {metrics['tts_generations']}",
+            f"  tts_fallbacks:        {metrics['tts_fallbacks']}",
+            f"  voice_failures:       {metrics['voice_failures']}", "", "Perception",
             f"  camera_captures:      {metrics['camera_captures']}",
             f"  vision_acquisitions:  {metrics['vision_acquisitions']}", "", "Autonomy",
             f"  attention_episodes:   {metrics['attention_episodes_started']}",

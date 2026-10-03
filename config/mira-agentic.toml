@@ -15,6 +15,7 @@ enabled = true
 wake_word_enabled = true
 wake_words = ["mira", "mirror", "huh mirror"]
 tts = "elevenlabs"
+fallback_tts = "espeak"
 openai_tts_model = "gpt-4o-mini-tts"
 openai_tts_voice = "marin"
 elevenlabs_tts_model = "eleven_flash_v2_5"

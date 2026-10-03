@@ -83,7 +83,7 @@ def test_cost_uses_mutually_exclusive_input_categories_and_rejects_bad_usage():
 
 
 def test_built_in_pricing_has_only_the_supported_openai_responses_model():
-    assert BUILT_IN_PRICING.identity == "openai-public-built-in-pricing-2026-09-26"
+    assert BUILT_IN_PRICING.identity == "public-built-in-pricing-2026-10-02"
     assert tuple(BUILT_IN_PRICING.rates) == (("openai-responses", "gpt-5.6-luna"),)
     rate = BUILT_IN_PRICING.rates[("openai-responses", "gpt-5.6-luna")]
     assert rate.input_per_million == Decimal("0.20")
@@ -102,10 +102,10 @@ def test_built_in_pricing_calculates_real_provider_usage_without_double_counting
             input_tokens=250_000, cached_input_tokens=50_000,
             cache_write_tokens=25_000, output_tokens=125_000,
         )
-    assert observed.snapshot()["cost"] == {
-        "status": "estimated", "estimated_usd": "0.769000",
-        "pricing_identity": BUILT_IN_PRICING.identity,
-    }
+    cost = observed.snapshot()["cost"]
+    assert cost["estimated_usd"] == "0.769000"
+    assert cost["components"]["cognition"]["estimated_usd"] == "0.769000"
+    assert cost["components"]["tts"]["estimated_usd"] == "0.000000"
 
 
 def test_built_in_pricing_fails_closed_above_per_request_context_limit():
@@ -189,7 +189,7 @@ def test_finalize_once_freezes_late_updates_and_writes_safe_summary(tmp_path):
     assert first["run"]["status"] == "interrupted"
     persisted = json.loads((tmp_path / "summary.json").read_text())
     serialized = json.dumps(persisted)
-    assert persisted["schema_version"] == 1
+    assert persisted["schema_version"] == 2
     assert persisted["provider_usage"] == [{
         "provider": "p", "model": "m", "requests": 1,
         "input_tokens": 2, "cached_input_tokens": 0,
@@ -218,3 +218,29 @@ def test_banner_contains_stable_sections():
     assert "provider_requests:    0" in banner
     assert "estimated_cost_usd:   unavailable" in banner
     assert "camera_captures:      0" in banner
+
+
+def test_elevenlabs_character_usage_combines_with_cognition_without_float_drift():
+    observed, _ = make(pricing=BUILT_IN_PRICING)
+    observed.provider_completed("openai-responses", "gpt-5.6-luna", "initial",
+                                input_tokens=5, output_tokens=5)
+    observed.tts_synthesized("elevenlabs", "eleven_flash_v2_5",
+                             characters=31, duration_ms=12)
+    observed.tts_synthesized("elevenlabs", "eleven_flash_v2_5",
+                             characters=46, duration_ms=8)
+    snapshot = observed.snapshot()
+    assert snapshot["tts_usage"] == [{
+        "provider": "elevenlabs", "model": "eleven_flash_v2_5",
+        "syntheses": 2, "characters": 77, "duration_ms": 20,
+    }]
+    assert snapshot["cost"]["components"]["tts"]["estimated_usd"] == "0.003850"
+    assert snapshot["cost"]["estimated_usd"] == "0.003857"
+
+
+def test_unknown_used_tts_model_fails_cost_closed_and_finalize_is_frozen():
+    observed, _ = make(pricing=BUILT_IN_PRICING)
+    observed.tts_synthesized("elevenlabs", "unknown", characters=1)
+    first = observed.finalize("completed")
+    assert first["cost"]["status"] == "unavailable"
+    observed.tts_synthesized("elevenlabs", "eleven_flash_v2_5", characters=1000)
+    assert observed.finalize("failed") == first

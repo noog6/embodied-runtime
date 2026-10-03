@@ -2,7 +2,8 @@
 
 Each authoritative run directory also receives `summary.json` during process
 finalization. This schema-versioned document contains run identity/timing/status,
-aggregate operational counters, bounded dimensions, and a `provider_usage` array. Each
+aggregate operational counters, bounded dimensions, a token `provider_usage` array,
+and a hosted `tts_usage` array. Each
 provider/model item contains `requests`, `input_tokens`, `cached_input_tokens`,
 `cache_write_tokens`, `output_tokens`, `total_tokens`, and `duration_ms`, in addition to
 the bounded provider and model identifiers. These are raw provider-reported usage totals.
@@ -25,14 +26,20 @@ cache-write rate makes the estimate unavailable. The OpenAI Responses adapter re
 provider-reported cached reads and cache writes when present; absent detail fields are
 recorded as zero. Normal provider request log lines likewise include
 `cache_write_tokens=<n>` when that valid provider detail is present. Local speech
-activity is not assigned hosted cost.
+activity is not assigned hosted cost. ElevenLabs usage is recorded after complete WAV
+collection and before playback, so a later local playback failure still retains the
+synthesis estimate; a rejected pre-synthesis request does not invent usage.
 
-The versioned built-in catalog currently covers only OpenAI Responses cognition using
+The versioned built-in catalog covers OpenAI Responses cognition using
 the exact model key `gpt-5.6-luna`, at the standard pricing applicable to requests with
 at most 272,000 input tokens. A request above that boundary, or usage from any unknown
 provider or model, makes the run estimate unavailable rather than applying an unsafe
-fallback. Vision, image tokens, TTS, ElevenLabs, Realtime, Live, and other providers or
-models are not priced yet.
+fallback. It also covers ElevenLabs `eleven_flash_v2_5` at the public Flash/Turbo API
+estimate dated 2026-10-02: USD $0.05 per 1,000 characters. Cost components expose
+cognition and TTS separately and `estimated_usd` combines known usage. This public-rate
+estimate is not an account invoice: subscriptions, included credits, taxes, and final
+marginal charges may differ. eSpeak has no external API cost. Unknown actually used
+hosted TTS models make cost unavailable rather than silently appearing as zero.
 
 This locally calculated value estimates only usage represented in priced provider
 accounting; it is not a billing authority or a complete robot operating cost. Built-in

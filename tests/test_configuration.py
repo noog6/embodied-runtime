@@ -22,7 +22,7 @@ EXPLICIT_AGENTIC = [
     "--initiative-platform-attention", "--initiative-actions",
     "--initiative-messages", "--initiative-continuation",
     "--initiative-goal-closure", "--console",
-    "--voice", "--tts", "elevenlabs",
+    "--voice", "--tts", "elevenlabs", "--fallback-tts", "espeak",
     "--openai-tts-model", "gpt-4o-mini-tts",
     "--openai-tts-voice", "marin",
     "--elevenlabs-tts-model", "eleven_flash_v2_5",
