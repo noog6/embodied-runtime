@@ -3,7 +3,7 @@
 from decimal import Decimal
 from types import MappingProxyType
 
-from embodied_runtime.observability import PricingCatalog, TokenPrice
+from embodied_runtime.observability import CharacterPrice, PricingCatalog, TokenPrice
 
 
 BUILT_IN_PRICING = PricingCatalog(
@@ -16,5 +16,10 @@ BUILT_IN_PRICING = PricingCatalog(
             max_input_tokens=272_000,
         ),
     }),
-    identity="openai-public-built-in-pricing-2026-09-26",
+    identity="public-built-in-pricing-2026-10-02",
+    character_rates=MappingProxyType({
+        ("elevenlabs", "eleven_flash_v2_5"): CharacterPrice(
+            usd_per_thousand=Decimal("0.05")
+        ),
+    }),
 )

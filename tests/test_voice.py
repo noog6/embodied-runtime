@@ -20,11 +20,14 @@ from embodied_runtime.resources import (
     ResourceArbiter, ResourceBusyError, ResourceKey, ResourceOwner,
 )
 from embodied_runtime.observability import RunObservability
+from embodied_runtime.pricing import BUILT_IN_PRICING
 from embodied_runtime.voice import (
     FusionHatElevenLabsTTSProvider, FusionHatEspeakTTSProvider,
     FusionHatOpenAITTSProvider,
     FusionHatPiperTTSProvider,
-    FusionHatVoiceProvider, VoiceInteraction, VoiceSessionPolicy,
+    FallbackTextToSpeechProvider, FusionHatVoiceProvider, SynthesisFailureDetails,
+    TextToSpeechSynthesisError, VoiceInteraction, elevenlabs_failure_details,
+    VoiceSessionPolicy,
 )
 
 
@@ -665,7 +668,8 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             openai.assert_called_once_with(model="model", voice="voice")
             build_text_to_speech_provider(argparse.Namespace(**base, tts="elevenlabs"))
             elevenlabs.assert_called_once_with(
-                model="el-model", voice_id="el-voice", speed=1.1
+                model="el-model", voice_id="el-voice", speed=1.1,
+                observability=None,
             )
 
             for disabled in (
@@ -1818,7 +1822,7 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
              patch.dict(sys.modules, modules), \
              patch("embodied_runtime.voice.subprocess.run") as run:
             provider = FusionHatElevenLabsTTSProvider(voice_id="voice")
-            with self.assertRaisesRegex(RuntimeError, "generation failed"):
+            with self.assertRaises(TextToSpeechSynthesisError):
                 await provider.speak("hello")
         self.assertEqual(calls, ["disable"])
         run.assert_not_called()
@@ -1827,16 +1831,20 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         async def chunks():
             yield b"wav"
         modules = self.elevenlabs_modules(calls, lambda **kwargs: chunks())
+        observed = RunObservability(pricing=BUILT_IN_PRICING)
         with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
              patch.dict(sys.modules, modules), \
              patch("embodied_runtime.voice.subprocess.run",
                    side_effect=RuntimeError("playback failed")), \
              patch("embodied_runtime.voice.LOGGER.info") as log:
-            provider = FusionHatElevenLabsTTSProvider(voice_id="voice")
+            provider = FusionHatElevenLabsTTSProvider(
+                voice_id="voice", observability=observed
+            )
             with self.assertRaisesRegex(RuntimeError, "playback failed"):
                 await provider.speak("hello")
         self.assertEqual(calls, ["disable", "enable", "disable"])
         self.assertEqual(log.call_count, 1)
+        self.assertEqual(observed.snapshot()["tts_usage"][0]["characters"], 5)
 
     async def test_elevenlabs_close_preserves_client_across_sessions(self):
         calls = []
@@ -1909,3 +1917,190 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((wav.getnchannels(), wav.getsampwidth()), (1, 2))
             self.assertEqual(wav.getframerate(), 16_000)
             self.assertEqual(wav.getnframes(), 3_520)
+
+class TTSFallbackCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_diagnostics_are_allowlisted_normalized_and_bounded(self):
+        class ApiError(Exception):
+            status_code = 402
+            request_id = "request-1"
+            body = {"detail": {"type": "payment_required",
+                               "code": "insufficient_credits",
+                               "message": "not enough\ncredits " + "x" * 400},
+                    "authorization": "secret", "response": {"api_key": "secret"}}
+
+        details = elevenlabs_failure_details(ApiError())
+        self.assertEqual(details.reason, "credits_exhausted")
+        self.assertEqual(details.http_status, 402)
+        self.assertEqual(details.provider_type, "payment_required")
+        self.assertEqual(details.code, "insufficient_credits")
+        self.assertNotIn("\n", details.message)
+        self.assertLessEqual(len(details.message), 240)
+        self.assertNotIn("secret", str(details))
+
+    async def test_quota_generic_and_missing_diagnostics(self):
+        class Quota(Exception):
+            body = {"detail": {"code": "quota_exceeded"}}
+        class Generic(Exception):
+            status_code = 503
+            body = {"detail": {"code": "temporarily_unavailable",
+                               "message": "try later"}}
+        self.assertEqual(elevenlabs_failure_details(Quota()).reason,
+                         "credits_exhausted")
+        generic = elevenlabs_failure_details(Generic())
+        self.assertEqual((generic.http_status, generic.code, generic.message),
+                         (503, "temporarily_unavailable", "try later"))
+        missing = elevenlabs_failure_details(Exception())
+        self.assertIsNone(missing.code)
+
+    async def test_allowlisted_diagnostic_message_redacts_urls_and_credentials(self):
+        secrets = ("query-secret", "bearer-secret", "xi-secret", "api-secret")
+
+        class ApiError(Exception):
+            body = {"detail": {"message": (
+                "See https://example.invalid/path?token=query-secret "
+                "Authorization: Bearer bearer-secret "
+                "xi-api-key=xi-secret api_key=api-secret"
+            )}}
+
+        message = elevenlabs_failure_details(ApiError()).message
+        self.assertIsNotNone(message)
+        self.assertNotIn("https://example.invalid", message)
+        for secret in secrets:
+            self.assertNotIn(secret, message)
+        self.assertIn("[redacted-url]", message)
+        self.assertIn("[redacted]", message)
+
+    async def test_lazy_fallback_success_and_authority_accounting(self):
+        observed = RunObservability()
+        calls = []
+        details = SynthesisFailureDetails("elevenlabs", "ApiError", 402,
+            "payment_required", "insufficient_credits", "no credits", None,
+            "credits_exhausted")
+        class Primary:
+            identifier = "elevenlabs"
+            async def speak(self, text):
+                calls.append("primary")
+                raise TextToSpeechSynthesisError(details)
+            async def close(self): calls.append("primary-close")
+        class Fallback:
+            async def speak(self, text): calls.append("fallback")
+            async def close(self): calls.append("fallback-close")
+        def factory():
+            calls.append("construct")
+            return Fallback()
+        composite = FallbackTextToSpeechProvider(
+            Primary(), factory, observability=observed)
+        authorized = SpeakerAuthorizedTextToSpeechProvider(
+            composite, ResourceArbiter(), observed)
+        await authorized.speak("hello")
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(calls, ["primary", "construct", "fallback"])
+        self.assertEqual(metrics["tts_generations"], 1)
+        self.assertEqual(metrics["tts_characters"], 5)
+        self.assertEqual(metrics["tts_fallbacks"], 1)
+        self.assertEqual(metrics["tts_primary_failures"], 1)
+        self.assertEqual(metrics["voice_failures"], 0)
+        self.assertEqual(observed.snapshot()["dimensions"]["tts_providers"],
+                         {"espeak": 1})
+        await authorized.close()
+        self.assertEqual(calls[-2:], ["primary-close", "fallback-close"])
+
+    async def test_non_synthesis_failure_and_cancellation_never_construct_fallback(self):
+        for failure in (RuntimeError("playback"), asyncio.CancelledError()):
+            calls = []
+            class Primary:
+                async def speak(self, text): raise failure
+                async def close(self): pass
+            composite = FallbackTextToSpeechProvider(
+                Primary(), lambda: calls.append("constructed"))
+            with self.assertRaises(type(failure)):
+                await composite.speak("hello")
+            self.assertEqual(calls, [])
+
+    async def test_uninitialized_fallback_is_not_constructed_by_close(self):
+        calls = []
+        class Primary:
+            identifier = "elevenlabs"
+            async def speak(self, text): return None
+            async def close(self): calls.append("closed")
+        composite = FallbackTextToSpeechProvider(
+            Primary(), lambda: calls.append("constructed"))
+        await composite.close()
+        self.assertEqual(calls, ["closed"])
+
+    async def test_initialized_fallback_closes_after_primary_close_failure(self):
+        calls = []
+        details = SynthesisFailureDetails("elevenlabs", "ApiError")
+
+        class Primary:
+            async def speak(self, text):
+                raise TextToSpeechSynthesisError(details)
+            async def close(self):
+                calls.append("primary-close")
+                raise RuntimeError("primary cleanup failed")
+
+        class Fallback:
+            async def speak(self, text):
+                calls.append("fallback-speak")
+            async def close(self):
+                calls.append("fallback-close")
+
+        composite = FallbackTextToSpeechProvider(Primary(), Fallback)
+        await composite.speak("hello")
+        with self.assertRaisesRegex(RuntimeError, "primary cleanup failed"):
+            await composite.close()
+        self.assertEqual(
+            calls, ["fallback-speak", "primary-close", "fallback-close"]
+        )
+
+    async def test_cancellation_during_fallback_is_not_failure(self):
+        observed = RunObservability()
+        started = asyncio.Event()
+        details = SynthesisFailureDetails("elevenlabs", "ApiError")
+
+        class Primary:
+            async def speak(self, text):
+                raise TextToSpeechSynthesisError(details)
+            async def close(self): pass
+
+        class Fallback:
+            async def speak(self, text):
+                started.set()
+                await asyncio.Event().wait()
+            async def close(self): pass
+
+        provider = SpeakerAuthorizedTextToSpeechProvider(
+            FallbackTextToSpeechProvider(
+                Primary(), Fallback, observability=observed
+            ),
+            ResourceArbiter(), observed,
+        )
+        task = asyncio.create_task(provider.speak("hello"))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(metrics["tts_fallbacks"], 1)
+        self.assertEqual(metrics["tts_fallback_failures"], 0)
+        self.assertEqual(metrics["voice_failures"], 0)
+
+    async def test_failed_fallback_is_terminal_once(self):
+        observed = RunObservability()
+        details = SynthesisFailureDetails("elevenlabs", "ApiError")
+        class Primary:
+            async def speak(self, text): raise TextToSpeechSynthesisError(details)
+            async def close(self): pass
+        class Fallback:
+            async def speak(self, text): raise RuntimeError("local failure")
+            async def close(self): pass
+        provider = SpeakerAuthorizedTextToSpeechProvider(
+            FallbackTextToSpeechProvider(Primary(), Fallback,
+                                         observability=observed),
+            ResourceArbiter(), observed)
+        with self.assertRaisesRegex(RuntimeError, "local failure"):
+            await provider.speak("x")
+        metrics = observed.snapshot()["metrics"]
+        self.assertEqual(metrics["tts_fallback_failures"], 1)
+        self.assertEqual(metrics["voice_failures"], 1)
+        self.assertEqual(metrics["tts_generations"], 0)

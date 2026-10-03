@@ -71,6 +71,7 @@ from embodied_runtime.voice import (
     FusionHatOpenAITTSProvider,
     FusionHatPiperTTSProvider,
     FusionHatVoiceProvider,
+    FallbackTextToSpeechProvider,
     OpenAITTSUnavailableError,
     ElevenLabsTTSUnavailableError,
     PiperTTSUnavailableError,
@@ -161,6 +162,8 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     )
     parser.add_argument("--tts", choices=("espeak", "piper", "openai", "elevenlabs"),
                         default=configurable_default("espeak"))
+    parser.add_argument("--fallback-tts", choices=("none", "espeak"),
+                        default=configurable_default("none"))
     parser.add_argument("--piper-model", default=configurable_default(None),
                         help="path to a local Piper .onnx voice model")
     parser.add_argument(
@@ -271,6 +274,7 @@ def parse_launch_arguments(
     args.voice_wake_word_enabled = effective.voice_wake_word_enabled
     args.voice_wake_words = effective.voice_wake_words
     args.tts = effective.voice_tts
+    args.fallback_tts = effective.voice_fallback_tts
     args.piper_model = effective.voice_piper_model
     args.openai_tts_model = effective.voice_openai_tts_model
     args.openai_tts_voice = effective.voice_openai_tts_voice
@@ -414,6 +418,7 @@ def build_platform_monitor_policy(
 
 def build_text_to_speech_provider(
     args: argparse.Namespace, hardware: HardwareBackend | None = None,
+    observability: RunObservability | None = None,
 ):
     """Build the selected physical speech adapter only when voice is available."""
     fusion_selected = (
@@ -429,11 +434,18 @@ def build_text_to_speech_provider(
             model=args.openai_tts_model, voice=args.openai_tts_voice
         )
     if args.tts == "elevenlabs":
-        return FusionHatElevenLabsTTSProvider(
+        primary = FusionHatElevenLabsTTSProvider(
             model=args.elevenlabs_tts_model,
             voice_id=args.elevenlabs_tts_voice_id,
             speed=args.elevenlabs_tts_speed,
+            observability=observability,
         )
+        if getattr(args, "fallback_tts", "none") == "espeak":
+            return FallbackTextToSpeechProvider(
+                primary, FusionHatEspeakTTSProvider,
+                observability=observability,
+            )
+        return primary
     return FusionHatEspeakTTSProvider()
 
 
@@ -625,7 +637,9 @@ async def _run_application(
             voice_provider=(FusionHatVoiceProvider()
                             if args.voice_enabled
                             and isinstance(hardware, FusionHatHardwareBackend) else None),
-            text_to_speech_provider=build_text_to_speech_provider(args, hardware),
+            text_to_speech_provider=build_text_to_speech_provider(
+                args, hardware, observability
+            ),
             voice_policy=VoiceSessionPolicy(args.voice_initial_timeout_seconds, args.voice_followup_timeout_seconds),
             voice_wake_words=(args.voice_wake_words
                               if args.voice_enabled and args.voice_wake_word_enabled
@@ -906,6 +920,8 @@ def validate_launch_dependencies(args: argparse.Namespace) -> None:
             "ElevenLabs TTS requires voice.elevenlabs_tts_voice_id or "
             "--elevenlabs-tts-voice-id"
         )
+    if args.tts == "espeak" and args.fallback_tts == "espeak":
+        raise ConfigurationError("--fallback-tts espeak cannot equal primary espeak")
     if args.fusion_servo_test is not None and not args.diagnostics:
         raise ConfigurationError("--fusion-servo-test requires --diagnostics")
     if args.fusion_servo_test is not None and args.hardware != "fusion-hat":

@@ -20,6 +20,12 @@ implicit configuration discovery.
 Mira's checked-in physical voice is ElevenLabs model `eleven_flash_v2_5`, voice
 ID `pFZP5JQG7iQjIQuC4Bku`, at speed `1.1`. Normal startup requires the optional
 ElevenLabs dependency and `ELEVENLABS_API_KEY` in the environment. The profile
+sets `fallback_tts = "espeak"` as a lazy emergency degradation path. It is
+constructed only after hosted synthesis fails (including rejected credentials,
+rate limits, service/network errors, or exhausted credits); local playback and
+speaker failures do not trigger it. Other configurations default to
+`fallback_tts = "none"`.
+The profile
 also retains OpenAI model `gpt-4o-mini-tts` and voice `marin` as dormant
 alternative-provider settings. An operator can explicitly select that
 alternative without restating its model or voice:
@@ -30,8 +36,8 @@ python main.py \
   --tts openai
 ```
 
-This override is an explicit operator comparison or fallback choice, not an
-automatic fallback when ElevenLabs credentials or service are unavailable.
+This override is an explicit operator comparison; it is separate from the
+single automatic eSpeak emergency fallback.
 
 ## Schema
 

@@ -191,9 +191,12 @@ class SpeakerAuthorizedTextToSpeechProvider:
     async def speak(self, text: str) -> None:
         lease = self._resources.acquire(SPEAKER_RESOURCE, VOICE_SPEAKER_OWNER)
         try:
-            await self._provider.speak(text)
+            result = await self._provider.speak(text)
             if self._observability is not None:
-                provider = getattr(self._provider, "identifier", type(self._provider).__name__)
+                provider = getattr(
+                    result, "provider",
+                    getattr(self._provider, "identifier", type(self._provider).__name__),
+                )
                 self._observability.increment(
                     "tts_generations", dimension=("tts_providers", str(provider))
                 )
