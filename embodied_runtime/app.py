@@ -3696,7 +3696,8 @@ class RobotApplication:
             if self._cognition_backend is not None:
                 backend = self._cognition_backend
                 LOGGER.info(
-                    "[COGNITION] backend=%s preparation=started", backend.identifier
+                    "[COGNITION] backend=%s model=%s preparation=started",
+                    backend.identifier, getattr(backend, "model", "unknown"),
                 )
                 try:
                     await backend.prepare()

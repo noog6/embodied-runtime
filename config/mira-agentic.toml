@@ -7,6 +7,9 @@ vision = "openai-responses"
 mode = "console"
 timezone = "America/Toronto"
 
+[cognition]
+model = "gpt-5.6-luna"
+
 [interaction]
 environment = "workstation"
 

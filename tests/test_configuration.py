@@ -18,6 +18,7 @@ from embodied_runtime.config import (
 EXPLICIT_AGENTIC = [
     "--hardware", "auto", "--camera", "auto",
     "--cognition", "openai-responses",
+    "--cognition-model", "gpt-5.6-luna",
     "--vision", "openai-responses", "--initiative",
     "--initiative-platform-attention", "--initiative-actions",
     "--initiative-messages", "--initiative-continuation",
@@ -77,11 +78,48 @@ class ConfigurationTests(unittest.TestCase):
         )
 
     def test_no_arguments_preserves_historical_defaults(self):
-        self.assertEqual(parse_launch_arguments([])[2], HISTORICAL_DEFAULTS)
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(parse_launch_arguments([])[2], HISTORICAL_DEFAULTS)
         self.assertEqual(HISTORICAL_DEFAULTS.interaction_environment, "workstation")
         self.assertFalse(HISTORICAL_DEFAULTS.sms_enabled)
         self.assertTrue(HISTORICAL_DEFAULTS.earcons_enabled)
         self.assertEqual(HISTORICAL_DEFAULTS.jobs_max_concurrent_work, 1)
+
+    def test_cognition_model_configuration_is_strict_and_optional(self):
+        configured = load_runtime_config(self.write(
+            "[cognition]\nmodel = '  gpt-5.6-luna  '\n"
+        ))
+        self.assertEqual(configured.cognition.model, "gpt-5.6-luna")
+        self.assertIsNone(load_runtime_config(self.write("")).cognition.model)
+        for contents in (
+            "[cognition]\nunknown = 'value'\n",
+            "[cognition]\nmodel = 123\n",
+            "[cognition]\nmodel = ''\n",
+            "[cognition]\nmodel = '   '\n",
+        ):
+            with self.subTest(contents=contents), self.assertRaises(ConfigurationError):
+                load_runtime_config(self.write(contents))
+
+    def test_cognition_model_precedence(self):
+        with patch.dict("os.environ", {"OPENAI_MODEL": "environment-model"}, clear=True):
+            self.assertEqual(self.effective("").cognition_model, "environment-model")
+            self.assertEqual(
+                self.effective("[cognition]\nmodel='file-model'\n").cognition_model,
+                "file-model",
+            )
+            self.assertEqual(
+                self.effective(
+                    "[cognition]\nmodel='file-model'\n",
+                    ("--cognition-model", " cli-model "),
+                ).cognition_model,
+                "cli-model",
+            )
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(self.effective("").cognition_model, "gpt-5.6-luna")
+
+    def test_empty_cognition_model_cli_is_rejected(self):
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_launch_arguments(["--cognition-model", "   "])
 
     def test_job_concurrent_work_configuration_and_cli_override(self):
         self.assertEqual(

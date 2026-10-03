@@ -33,6 +33,7 @@ from embodied_runtime.events import ApplicationStarted, EventBus
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.observability import RunObservability
+from embodied_runtime.pricing import BUILT_IN_PRICING
 from embodied_runtime.run_history import RunHistoryEvidenceReader
 from embodied_runtime.sensing.camera import CameraBackend, CameraFrame
 from embodied_runtime.state import LifecycleState
@@ -107,6 +108,8 @@ class ImageCognition(FakeCognition):
 
 
 class PreparingCognition(FakeCognition):
+    model = "test-model"
+
     def __init__(self, preparation_error=None):
         super().__init__("later response")
         self.preparation_error = preparation_error
@@ -223,6 +226,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend.prepare_calls, 1)
         self.assertEqual(prepared_at_started, [True])
         rendered = "\n".join(logs.output)
+        self.assertIn("backend=fake-cognition model=test-model preparation=started", rendered)
         self.assertLess(rendered.index("preparation=started"),
                         rendered.index("preparation=ready"))
         self.assertLess(rendered.index("preparation=ready"),
@@ -653,8 +657,9 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
                     cached_tokens=12_000, cache_write_tokens=3_000,
                 ),
             ))
-        observed = RunObservability()
+        observed = RunObservability(pricing=BUILT_IN_PRICING)
         backend = OpenAIResponsesBackend(
+            model="experimental-model",
             client=SimpleNamespace(responses=FakeResponses(results=[response])),
             observability=observed,
         )
@@ -667,12 +672,14 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
                           metrics["total_tokens"]),
                          (1, 15_000, 12_000, 3_000, 500, 15_500))
         self.assertEqual(snapshot["provider_usage"], [{
-            "provider": "openai-responses", "model": DEFAULT_MODEL,
+            "provider": "openai-responses", "model": "experimental-model",
             "requests": 1, "input_tokens": 15_000,
             "cached_input_tokens": 12_000, "cache_write_tokens": 3_000,
             "output_tokens": 500, "total_tokens": 15_500,
             "duration_ms": metrics["provider_duration_ms"],
         }])
+        self.assertEqual(snapshot["cost"]["status"], "unavailable")
+        self.assertIsNone(snapshot["cost"]["estimated_usd"])
 
     async def test_provider_authority_failure_adds_no_usage(self):
         observed = RunObservability()
@@ -734,7 +741,9 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_request_after_prewarm_is_second_and_warm(self):
         responses = FakeResponses()
-        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
+        backend = OpenAIResponsesBackend(
+            model="selected-model", client=SimpleNamespace(responses=responses)
+        )
         with self.assertLogs(
             "embodied_runtime.cognition.openai_responses", "INFO"
         ) as logs:
@@ -742,8 +751,8 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
             result = await backend.respond("real operator request", instructions="runtime")
         self.assertEqual(result, "provider text")
         self.assertEqual(responses.calls, [
-            {"model": DEFAULT_MODEL, "input": PREWARM_INPUT},
-            {"model": DEFAULT_MODEL, "input": "real operator request",
+            {"model": "selected-model", "input": PREWARM_INPUT},
+            {"model": "selected-model", "input": "real operator request",
              "instructions": "runtime"},
         ])
         self.assertIn("provider_request=prewarm ordinal=1 cold=true", logs.output[0])
@@ -992,6 +1001,8 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(initial["parallel_tool_calls"])
         self.assertEqual([item["name"] for item in initial["tools"]], ["orient_body"])
         self.assertEqual(continuation["previous_response_id"], "response-1")
+        self.assertEqual(initial["model"], "test-model")
+        self.assertEqual(continuation["model"], "test-model")
         self.assertEqual(continuation["instructions"], "after")
         self.assertEqual(continuation["tool_choice"], "none")
         self.assertEqual(continuation["input"], [{

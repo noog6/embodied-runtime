@@ -741,10 +741,13 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(argv), 0)
 
     def test_openai_cognition_selection_is_lazy(self) -> None:
-        args = build_parser().parse_args(["--cognition", "openai-responses"])
+        args = build_parser().parse_args([
+            "--cognition", "openai-responses", "--cognition-model", "selected-model",
+        ])
         with patch.object(OpenAIResponsesBackend, "_get_client") as get_client:
             backend = build_cognition_backend(args)
         self.assertIsInstance(backend, OpenAIResponsesBackend)
+        self.assertEqual(backend.model, "selected-model")
         get_client.assert_not_called()
 
     def test_optional_startup_prompt(self) -> None:
