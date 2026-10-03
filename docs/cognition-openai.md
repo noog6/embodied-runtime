@@ -25,8 +25,25 @@ python -m pip install -e '.[openai]'
 `OPENAI_API_KEY` remains the runtime's application-facing authentication
 interface. Do not commit it or put it in source or command-line arguments. See
 [Secrets and API keys](secrets.md) for the recommended Raspberry Pi and local
-development storage and delivery procedure. The default experimental model is
-`gpt-5.6-luna`; `OPENAI_MODEL` may override it. Then start the local console:
+development storage and delivery procedure. Backend and model selection are
+separate runtime concepts, expressed in the preferred configuration as:
+
+```toml
+[runtime]
+cognition = "openai-responses"
+
+[cognition]
+model = "gpt-5.6-luna"
+```
+
+Only `openai-responses` is implemented today. The provider-neutral model name is
+intentional preparation for future backends, not support for other providers or
+arbitrary OpenAI-compatible endpoints. Resolution order is
+`--cognition-model`, `cognition.model`, the backward-compatible `OPENAI_MODEL`,
+then the built-in `gpt-5.6-luna` default. A model without an explicit pricing
+entry can still be used, but its estimated monetary cost is `unavailable`; raw
+usage remains recorded. Selecting a model does not guarantee it supports the
+tool or image behavior Mira requires. Start the local console with:
 
 ```sh
 python main.py --cognition openai-responses --console

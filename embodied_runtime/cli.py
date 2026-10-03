@@ -149,6 +149,11 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         default=configurable_default("none")
     )
     parser.add_argument(
+        "--cognition-model", type=_non_empty_string,
+        default=configurable_default(None), metavar="MODEL",
+        help="model used by the configured cognition backend",
+    )
+    parser.add_argument(
         "--vision", choices=("none", "openai-responses"),
         default=configurable_default("none"),
     )
@@ -258,6 +263,7 @@ def parse_launch_arguments(
     args.hardware = effective.hardware
     args.camera = effective.camera
     args.cognition = effective.cognition
+    args.cognition_model = effective.cognition_model
     args.vision = effective.vision
     args.timezone = effective.timezone
     args.interaction_environment = effective.interaction_environment
@@ -310,6 +316,13 @@ def _pwm_channel(value: str) -> str:
         return normalize_pwm_channel(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _non_empty_string(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("must be a non-empty string")
+    return value
 
 
 def _elevenlabs_tts_speed(value: str) -> float:
@@ -370,7 +383,7 @@ def _stop_unowned_camera(camera: CameraBackend) -> None:
 
 def build_cognition_backend(args: argparse.Namespace) -> TextCognitionBackend | None:
     if args.cognition == "openai-responses":
-        return OpenAIResponsesBackend()
+        return OpenAIResponsesBackend(model=args.cognition_model)
     return None
 
 

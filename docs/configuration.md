@@ -53,6 +53,9 @@ vision = "openai-responses"
 mode = "console"
 timezone = "America/Toronto"
 
+[cognition]
+model = "gpt-5.6-luna"
+
 [interaction]
 environment = "workstation"
 
@@ -111,7 +114,22 @@ backend is retained for application startup rather than opening the device a
 second time. Explicit `picamera2` remains fail-fast, while `none` disables the
 camera. Camera resolution is independent of Fusion HAT resolution.
 
-`cognition` accepts the same values as its existing CLI option.
+`runtime.cognition` selects the cognition backend, while the deliberately
+provider-neutral `cognition.model` selects the model used by that backend. Only
+the `openai-responses` backend is implemented today; this separation prepares
+the runtime architecture for later backends without adding another provider,
+arbitrary endpoints, or configurable base URLs now. The effective model is
+resolved in this order: explicit `--cognition-model`, `cognition.model`, the
+backward-compatible `OPENAI_MODEL` environment variable, then the built-in
+`gpt-5.6-luna` default. Model values are trimmed and must be non-empty.
+
+Changing the model does not imply that every OpenAI model supports the tool and
+image behavior required by Mira. Provider usage retains the actually selected
+model. If that model has no explicit built-in pricing entry, token usage remains
+available but monetary cost is reported as `unavailable` rather than borrowing
+the `gpt-5.6-luna` rate.
+
+`runtime.cognition` accepts the same values as its existing CLI option.
 `runtime.mode` is exactly one of `run`, `console`, or `diagnostics`:
 
 - `run` is the headless, long-lived runtime suitable for process supervisors;

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import math
+import os
 from pathlib import Path
 import tomllib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -20,6 +21,11 @@ class RuntimeFileConfig:
     vision: str | None = None
     mode: str | None = None
     timezone: str | None = None
+
+
+@dataclass(frozen=True)
+class CognitionFileConfig:
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,7 @@ class PowerFileConfig:
 @dataclass(frozen=True)
 class RuntimeFileConfiguration:
     runtime: RuntimeFileConfig = RuntimeFileConfig()
+    cognition: CognitionFileConfig = CognitionFileConfig()
     initiative: InitiativeFileConfig = InitiativeFileConfig()
     voice: VoiceFileConfig = VoiceFileConfig()
     earcons: EarconsFileConfig = EarconsFileConfig()
@@ -114,6 +121,7 @@ class LaunchConfiguration:
     hardware: str
     camera: str
     cognition: str
+    cognition_model: str
     vision: str
     mode: str
     timezone: str
@@ -158,8 +166,12 @@ class LaunchConfiguration:
     power_recovery_voltage_v: float
 
 
+DEFAULT_COGNITION_MODEL = "gpt-5.6-luna"
+
+
 HISTORICAL_DEFAULTS = LaunchConfiguration(
     profile="mira", hardware="virtual", camera="none", cognition="none", vision="none", mode="run",
+    cognition_model=DEFAULT_COGNITION_MODEL,
     timezone="UTC", interaction_environment="workstation",
     initiative=False, initiative_platform_attention=False,
     initiative_actions=False, initiative_messages=False,
@@ -187,6 +199,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
 _RUNTIME_KEYS = {
     "profile", "hardware", "camera", "cognition", "vision", "mode", "timezone",
 }
+_COGNITION_KEYS = {"model"}
 _INITIATIVE_KEYS = {
     "enabled", "platform_attention", "actions", "messages", "continuation",
     "goal_closure",
@@ -232,8 +245,9 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "initiative", "voice", "earcons", "memory", "jobs", "interaction", "sms", "power"})
+    _reject_unknown(data, {"runtime", "cognition", "initiative", "voice", "earcons", "memory", "jobs", "interaction", "sms", "power"})
     runtime = _table(data, "runtime")
+    cognition = _table(data, "cognition")
     initiative = _table(data, "initiative")
     voice = _table(data, "voice")
     earcons = _table(data, "earcons")
@@ -243,6 +257,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     sms = _table(data, "sms")
     power = _table(data, "power")
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
+    _reject_unknown(cognition, _COGNITION_KEYS, "cognition")
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
     _reject_unknown(earcons, _EARCONS_KEYS, "earcons")
@@ -251,6 +266,12 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     _reject_unknown(interaction, _INTERACTION_KEYS, "interaction")
     _reject_unknown(sms, _SMS_KEYS, "sms")
     _reject_unknown(power, _POWER_KEYS, "power")
+
+    cognition_model = cognition.get("model")
+    if cognition_model is not None:
+        if not isinstance(cognition_model, str) or not cognition_model.strip():
+            raise ConfigurationError("cognition.model must be a non-empty string")
+        cognition_model = cognition_model.strip()
 
     power_values = {
         "interval_seconds": power.get("interval_seconds", 30.0),
@@ -433,7 +454,8 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
             raise ConfigurationError(f"voice.{key} must be a positive number")
 
     return RuntimeFileConfiguration(
-        RuntimeFileConfig(**runtime), InitiativeFileConfig(**initiative),
+        RuntimeFileConfig(**runtime), CognitionFileConfig(cognition_model),
+        InitiativeFileConfig(**initiative),
         VoiceFileConfig(**voice), EarconsFileConfig(earcons.get("enabled", True)),
         MemoryFileConfig(memory_enabled, database_path),
         JobsFileConfig(
@@ -454,6 +476,7 @@ def resolve_launch_configuration(
     """Merge explicit CLI values over file values and historical defaults."""
     file_config = file_config or RuntimeFileConfiguration()
     runtime = file_config.runtime
+    cognition = file_config.cognition
     initiative = file_config.initiative
     voice = file_config.voice
     earcons = file_config.earcons
@@ -487,6 +510,10 @@ def resolve_launch_configuration(
         hardware=scalar("hardware", runtime.hardware, HISTORICAL_DEFAULTS.hardware),
         camera=scalar("camera", runtime.camera, HISTORICAL_DEFAULTS.camera),
         cognition=scalar("cognition", runtime.cognition, HISTORICAL_DEFAULTS.cognition),
+        cognition_model=scalar(
+            "cognition_model", cognition.model,
+            os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_COGNITION_MODEL,
+        ),
         vision=scalar("vision", runtime.vision, HISTORICAL_DEFAULTS.vision),
         mode=mode,
         timezone=runtime.timezone or HISTORICAL_DEFAULTS.timezone,
