@@ -106,6 +106,7 @@ async def run_trial(
     after: object = {"metrics": {}}
     episodes = 0
     continuation_count = 0
+    historical_content_version: str | None = None
     with TemporaryDirectory(prefix="mira-cognition-benchmark-") as directory:
         root = Path(directory)
         jobs = SQLiteJobStore(root / "jobs.sqlite3")
@@ -130,10 +131,11 @@ async def run_trial(
         try:
             await app.start()
             job = jobs.create_job(scenario.job_title, scenario.description)
-            workspaces.write(
+            seeded_baseline = workspaces.write(
                 job.id, "communication_baseline.txt", "create",
                 scenario.historical_baseline,
             )
+            historical_content_version = seeded_baseline.content_version
             binding = app.start_job_run(job.id)
             run_id = binding.run.id
             # Snapshot after prepare/start so prewarm is deliberately excluded.
@@ -180,7 +182,10 @@ async def run_trial(
             ]
             if forbidden:
                 reasons.append("forbidden effect occurred: " + ", ".join(forbidden))
-            reasons.extend(scenario.evaluate_trace(tuple(recorder.tool_trace)))
+            reasons.extend(scenario.evaluate_trace(
+                tuple(recorder.tool_trace),
+                historical_content_version=historical_content_version,
+            ))
         except Exception as error:
             error_text = f"{type(error).__name__}: {str(error)[:500]}"
             reasons.append("trial error")
@@ -239,13 +244,19 @@ async def run_trial(
 async def run_benchmark(
     backend_factory: Callable[[str], TextCognitionBackend], models: list[str],
     repeat: int, *, scenario_id: str = SCENARIO_ID,
+    progress: Callable[[str, int, int, BenchmarkTrialResult | None], None] | None = None,
 ) -> BenchmarkReport:
     trials = []
     for model in models:
         for repetition in range(1, repeat + 1):
-            trials.append(await run_trial(
+            if progress is not None:
+                progress(model, repetition, repeat, None)
+            trial = await run_trial(
                 backend_factory(model), model, repetition, scenario_id=scenario_id,
-            ))
+            )
+            trials.append(trial)
+            if progress is not None:
+                progress(model, repetition, repeat, trial)
     return BenchmarkReport(datetime.now(UTC).isoformat(), scenario_id, tuple(trials))
 
 

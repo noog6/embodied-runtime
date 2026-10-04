@@ -75,10 +75,12 @@ class ScriptedBenchmarkBackend(TextCognitionBackend):
 
 class AuthorityScenarioBackend(ScriptedBenchmarkBackend):
     def __init__(self, *, read=True, inspect=True, write=True,
-                 outcomes=("completed",), inspection_area="network"):
+                 outcomes=("completed",), inspection_area="network", actions=None,
+                 read_path="communication_baseline.txt"):
         super().__init__(outcomes, workspace=False)
         self.inspection_area = inspection_area
-        self.actions = [
+        self.read_path = read_path
+        self.actions = list(actions) if actions is not None else [
             action for enabled, action in (
                 (read, "read"), (inspect, "inspect"), (write, "write"),
             ) if enabled
@@ -100,18 +102,22 @@ class AuthorityScenarioBackend(ScriptedBenchmarkBackend):
             if action == "read":
                 result = await tool_executor(CognitionToolCall(
                     "workspace_read",
-                    '{"path":"communication_baseline.txt","offset_chars":0}',
+                    json.dumps({"path": self.read_path, "offset_chars": 0}),
                 ))
-                self.baselines.append(json.loads(result.output)["artifact"]["content"])
+                decoded = json.loads(result.output)
+                if decoded.get("artifact") is not None:
+                    self.baselines.append(decoded["artifact"]["content"])
                 return "reviewed historical evidence"
             if action == "inspect":
                 await tool_executor(CognitionToolCall(
                     "inspect_self", json.dumps({"area": self.inspection_area}),
                 ))
                 return "obtained fresh network evidence"
+            path = ("communication_baseline.txt"
+                    if action == "overwrite" else "current_communication_baseline.txt")
             await tool_executor(CognitionToolCall(
                 "workspace_write", json.dumps({
-                    "path": "current_communication_baseline.txt", "mode": "upsert",
+                    "path": path, "mode": "upsert",
                     "content": (
                         "Current inspection: wlan0 is up with carrier and is the "
                         "default route; earlier unhealthy state is historical."
@@ -333,6 +339,53 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(facts["interface.wlan0.operstate"], "up")
         self.assertEqual(facts["interface.wlan0.carrier"], "1")
         self.assertEqual(facts["default_route_interface"], "wlan0")
+        self.assertEqual(result.metrics.job_work_episodes, 1)
+        self.assertEqual(result.metrics.acquisition_tool_calls, 2)
+        self.assertNotIn("workspace_list", [item.name for item in result.tool_trace])
+        self.assertTrue(any(
+            "workspace_list" in request.offered_tools
+            for request in result.requests if request.kind == "job_work"
+        ))
+
+    async def test_authority_scenario_accepts_reverse_acquisition_order(self):
+        result = await run_trial(
+            AuthorityScenarioBackend(actions=("inspect", "read", "write")),
+            "fake-model", 1, scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        acquisitions = [item.name for item in result.tool_trace
+                        if item.name in {"workspace_read", "inspect_self"}]
+        self.assertEqual(acquisitions, ["inspect_self", "workspace_read"])
+
+    def test_authority_job_names_fixture_without_disclosing_contents(self):
+        scenario = SCENARIOS[FRESH_RUNTIME_SCENARIO_ID]
+        self.assertIn("communication_baseline.txt", scenario.description)
+        self.assertNotIn("wlan0 was unavailable/down", scenario.description)
+
+    async def test_replacing_baseline_before_read_does_not_read_fixture(self):
+        result = await run_trial(
+            AuthorityScenarioBackend(actions=("overwrite", "read", "inspect")),
+            "fake-model", 1, scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("original historical Workspace baseline was not read",
+                      result.failure_reasons)
+
+    async def test_original_read_then_baseline_update_passes(self):
+        result = await run_trial(
+            AuthorityScenarioBackend(actions=("read", "inspect", "overwrite")),
+            "fake-model", 1, scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+
+    async def test_other_baseline_path_does_not_satisfy_fixture_read(self):
+        result = await run_trial(
+            AuthorityScenarioBackend(read_path="old_communication_baseline.txt"),
+            "fake-model", 1, scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("original historical Workspace baseline was not read",
+                      result.failure_reasons)
 
     async def test_authority_repetitions_get_distinct_identical_inspectors(self):
         scenario = SCENARIOS[FRESH_RUNTIME_SCENARIO_ID]
@@ -408,7 +461,7 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             scenario_id=FRESH_RUNTIME_SCENARIO_ID,
         )
         self.assertFalse(result.passed)
-        self.assertIn("historical Workspace baseline was not read",
+        self.assertIn("original historical Workspace baseline was not read",
                       result.failure_reasons)
 
     async def test_authority_scenario_requires_durable_update(self):
@@ -446,6 +499,21 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         for backend in backends:
             self.assertIn("wlan0 was unavailable/down", backend.baselines[0])
             self.assertNotIn("Current inspection", backend.baselines[0])
+
+    async def test_benchmark_progress_callback_surrounds_each_trial(self):
+        events = []
+        report = await run_benchmark(
+            lambda _model: AuthorityScenarioBackend(), ["model-a"], 2,
+            scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+            progress=lambda model, repetition, repeat, result: events.append(
+                (model, repetition, repeat, None if result is None else result.passed)
+            ),
+        )
+        self.assertTrue(all(trial.passed for trial in report.trials))
+        self.assertEqual(events, [
+            ("model-a", 1, 2, None), ("model-a", 1, 2, True),
+            ("model-a", 2, 2, None), ("model-a", 2, 2, True),
+        ])
 
     async def test_json_is_deterministic_and_contains_only_plain_values(self):
         trial = await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1)

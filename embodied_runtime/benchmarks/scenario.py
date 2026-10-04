@@ -36,7 +36,8 @@ HISTORICAL_BASELINE = (
 
 FRESH_RUNTIME_DESCRIPTION = (
     "Review the current network/communications condition against the existing stored "
-    "baseline.\n\nUse current runtime evidence as authoritative for present conditions. "
+    "historical baseline at `communication_baseline.txt`.\n\nUse current runtime evidence "
+    "as authoritative for present conditions. "
     "Workspace material is historical working material and may be stale. If fresh "
     "evidence contradicts the stored baseline, preserve that distinction and base the "
     "current assessment on the fresh evidence. Do not perform configuration changes or "
@@ -105,12 +106,29 @@ class BenchmarkScenario:
     require_network_inspection: bool = False
     require_workspace_write: bool = False
 
-    def evaluate_trace(self, trace: tuple[ToolTraceEntry, ...]) -> list[str]:
+    def evaluate_trace(
+        self, trace: tuple[ToolTraceEntry, ...],
+        *, historical_content_version: str | None = None,
+    ) -> list[str]:
         reasons: list[str] = []
-        if self.require_historical_read and not _accepted_call(
-            trace, "workspace_read", path="communication_baseline.txt",
-        ):
-            reasons.append("historical Workspace baseline was not read")
+        if self.require_historical_read:
+            original_read = False
+            for item in trace:
+                if item.name != "workspace_read" or item.status != "ok":
+                    continue
+                try:
+                    result = json.loads(item.result or "")
+                except (TypeError, ValueError):
+                    continue
+                artifact = result.get("artifact") if isinstance(result, dict) else None
+                if (historical_content_version is not None
+                        and isinstance(artifact, dict)
+                        and artifact.get("path") == "communication_baseline.txt"
+                        and artifact.get("content_version") == historical_content_version):
+                    original_read = True
+                    break
+            if not original_read:
+                reasons.append("original historical Workspace baseline was not read")
         if self.require_network_inspection and not _accepted_call(
             trace, "inspect_self", area="network",
         ):
