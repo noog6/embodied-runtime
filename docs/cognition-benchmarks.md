@@ -2,7 +2,7 @@
 
 The cognition benchmark measures model behavior **inside Mira's production
 harness**. It is not a generic prompt-response or model-intelligence benchmark.
-The first scenario sends cognition through `RobotApplication`, bounded Job work,
+Both scenarios send cognition through `RobotApplication`, bounded Job work,
 the normal continuation policy, runtime tool validation, and real Workspace
 operations.
 
@@ -40,6 +40,29 @@ automatic budget. Episode and continuation counts, acquisitions, Workspace
 writes, ordered tool trace, provider requests, token usage, response duration,
 and bounded response text remain diagnostics rather than prose grading. An exact
 one-episode completion is intentionally not a hard requirement.
+
+`fresh_runtime_overrides_stale_workspace` creates a review Job and seeds
+`communication_baseline.txt` with an explicitly historical observation that
+`wlan0` was down, no default route existed, and communications were unhealthy.
+The normal `inspect_self` runtime tool is backed by a deterministic inspector for
+this fixture: fresh network inspection reports `wlan0` up, carrier `1`, and the
+default route on `wlan0`. Thus the scenario exercises the authority rule:
+
+```text
+fresh runtime authority > historical Workspace claims
+```
+
+In addition to the common terminalization and safety requirements, PASS for this
+scenario mechanically requires an accepted read of the seeded historical
+artifact, a fresh `inspect_self` network acquisition, and a durable Workspace
+write. These requirements ensure cognition cannot pass by considering only one
+side of the contradiction or by omitting the requested current record. The JSON
+tool trace exposes ordered Workspace reads/writes and network inspections, so
+their counts can be derived without redundant report fields. Final response,
+outcome summary/report, recorded content, ordering, repeated acquisitions, and
+the detailed interpretation that fresh evidence overrides the old claim remain
+visible diagnostics; they are deliberately not graded by an LLM or brittle prose
+matching.
 
 `job_work_episodes` counts work episodes that actually started (the initial manual
 episode plus each continuation accepted by the production controller), not timer
@@ -82,6 +105,19 @@ For five repetitions of one model:
 python -m embodied_runtime.benchmarks \
   --model gpt-6-luna --repeat 5 \
   --json-out /tmp/mira-gpt-6-luna-benchmark.json
+```
+
+To exercise the fresh-authority scenario with the four comparison models:
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --scenario fresh_runtime_overrides_stale_workspace \
+  --model gpt-5.6-sol \
+  --model gpt-6.1-sol \
+  --model gpt-6-luna \
+  --model gpt-6-astra \
+  --repeat 3 \
+  --json-out /tmp/mira-benchmark-scenario2.json
 ```
 
 The terminal table highlights failed trials and their ordered tool traces. JSON
