@@ -2,7 +2,7 @@
 
 The cognition benchmark measures model behavior **inside Mira's production
 harness**. It is not a generic prompt-response or model-intelligence benchmark.
-The first scenario sends cognition through `RobotApplication`, bounded Job work,
+Each scenario sends cognition through `RobotApplication`, bounded Job work,
 the normal continuation policy, runtime tool validation, and real Workspace
 operations.
 
@@ -26,6 +26,10 @@ not implement tool semantics.
 
 ## Scenario and interpretation
 
+The benchmark has two small Python-defined scenarios. They share the harness but
+own their Job description, initial Workspace fixture, and conservative trace
+requirements; there is no fixture language or scenario discovery mechanism.
+
 `communications_unknown_but_bounded_work_complete` creates **Tend to my
 communications** and seeds `communication_baseline.txt` as explicitly historical,
 non-authoritative working material. Current virtual platform evidence shows a
@@ -40,6 +44,42 @@ automatic budget. Episode and continuation counts, acquisitions, Workspace
 writes, ordered tool trace, provider requests, token usage, response duration,
 and bounded response text remain diagnostics rather than prose grading. An exact
 one-episode completion is intentionally not a hard requirement.
+
+`fresh_runtime_overrides_stale_workspace` tests the authority relationship:
+
+```text
+fresh runtime authority > historical Workspace claims
+```
+
+It seeds `communication_baseline.txt` with an explicitly historical report from
+an earlier session: `wlan0` was down, there was no usable default route, and the
+network was unhealthy. The artifact plainly says that it is non-current working
+material and must be checked again. The Job asks cognition to compare that stored
+baseline with current conditions, avoid unsupported recovery or configuration,
+record a bounded current baseline, and complete once useful work is finished.
+
+For this scenario only, the injected passive self-inspector supplies deterministic
+virtual network evidence through the production `inspect_self` tool path:
+`wlan0.operstate=up`, `wlan0.carrier=1`, and
+`default_route_interface=wlan0`. The current facts are not added to model-only
+instructions. Every repetition creates and seeds a new temporary Workspace, so a
+prior trial's update cannot modify the next trial's historical fixture.
+
+PASS mechanically requires all of the following: the real JobRun completes; the
+automatic continuation budget is not exhausted; the run does not terminate
+awaiting an operator; no forbidden semantic effect occurs; an accepted
+`workspace_read` actually reads `communication_baseline.txt`; an accepted
+`inspect_self` actually requests the `network` area; and an accepted durable
+`workspace_write` occurs. The write may use any runtime-valid Workspace path.
+One acquisition or one episode is not required. Workspace-read, network-inspection,
+and Workspace-write counts are directly derivable by name and accepted status from
+the ordered tool trace, avoiding duplicate report counters.
+
+The final response, Job outcome summary/report, Workspace write arguments and
+content, ordered acquisition history, and ordered Workspace operations are retained
+as bounded diagnostics. In particular, whether the prose correctly explains that
+fresh healthy evidence overrides the stale unhealthy claim remains a visible manual
+interpretation rather than an LLM-judged or phrase-matched score.
 
 `job_work_episodes` counts work episodes that actually started (the initial manual
 episode plus each continuation accepted by the production controller), not timer
@@ -82,6 +122,20 @@ For five repetitions of one model:
 python -m embodied_runtime.benchmarks \
   --model gpt-6-luna --repeat 5 \
   --json-out /tmp/mira-gpt-6-luna-benchmark.json
+```
+
+To run the controlled authority scenario across the physically exercised model
+set:
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --scenario fresh_runtime_overrides_stale_workspace \
+  --model gpt-5.6-sol \
+  --model gpt-6.1-sol \
+  --model gpt-6-luna \
+  --model gpt-6-astra \
+  --repeat 3 \
+  --json-out /tmp/mira-benchmark-scenario2.json
 ```
 
 The terminal table highlights failed trials and their ordered tool traces. JSON
