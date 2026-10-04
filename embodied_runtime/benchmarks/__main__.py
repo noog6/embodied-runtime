@@ -7,14 +7,14 @@ from pathlib import Path
 from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
 
 from .runner import render_report, run_benchmark
-from .scenario import SCENARIO_ID
+from .scenario import SCENARIOS, SCENARIO_ID
 
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run cognition inside Mira's harness")
     parser.add_argument("--model", action="append", required=True,
                         help="OpenAI model string (repeatable)")
-    parser.add_argument("--scenario", default=SCENARIO_ID, choices=(SCENARIO_ID,))
+    parser.add_argument("--scenario", default=SCENARIO_ID, choices=tuple(SCENARIOS))
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()

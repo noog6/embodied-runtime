@@ -18,10 +18,13 @@ from embodied_runtime.jobs import (
 )
 from embodied_runtime.platform import PlatformSnapshot
 from embodied_runtime.profile import RobotProfile
+from embodied_runtime.inspection import (
+    SelfInspectionFact, SelfInspectionResult,
+)
 
 from .models import BenchmarkReport, BenchmarkTrialResult, TrialMetrics
 from .recording import RecordingCognitionBackend
-from .scenario import HISTORICAL_BASELINE, SCENARIO_DESCRIPTION, SCENARIO_ID
+from .scenario import FRESH_RUNTIME_SCENARIO_ID, SCENARIO_ID, get_scenario
 
 
 class _FixedPlatform:
@@ -45,6 +48,30 @@ class _Heartbeat:
 
     def pulse(self) -> None:
         self._pulses.put_nowait(None)
+
+
+class _ScenarioSelfInspector:
+    """Deterministic passive evidence for the scenario-2 virtual runtime."""
+
+    def inspect(self, area: str) -> SelfInspectionResult:
+        if area == "network":
+            return SelfInspectionResult(area, (
+                SelfInspectionFact("interface_count", "2"),
+                SelfInspectionFact("default_route_interface", "wlan0"),
+                SelfInspectionFact("interface.lo.operstate", "unknown"),
+                SelfInspectionFact("interface.lo.carrier", "1"),
+                SelfInspectionFact("interface.wlan0.operstate", "up"),
+                SelfInspectionFact("interface.wlan0.carrier", "1"),
+            ))
+        if area == "storage":
+            return SelfInspectionResult(area, (
+                SelfInspectionFact("filesystem", "/"),
+                SelfInspectionFact("total_bytes", "1073741824"),
+                SelfInspectionFact("used_bytes", "268435456"),
+                SelfInspectionFact("free_bytes", "805306368"),
+                SelfInspectionFact("free_ratio", "0.7500"),
+            ))
+        raise ValueError("scenario inspector supports only network and storage")
 
 
 async def _wait_for_continuation_acceptance(
@@ -95,8 +122,7 @@ async def run_trial(
     *, scenario_id: str = SCENARIO_ID,
 ) -> BenchmarkTrialResult:
     """Run one entirely fresh trial; the application owns and closes both stores."""
-    if scenario_id != SCENARIO_ID:
-        raise ValueError(f"unknown benchmark scenario: {scenario_id}")
+    scenario = get_scenario(scenario_id)
     started = perf_counter()
     recorder = RecordingCognitionBackend(backend)
     heartbeat = _Heartbeat()
@@ -120,6 +146,10 @@ async def run_trial(
                 jobs_max_auto_steps=3,
             ),
             platform_provider=_FixedPlatform(), cognition_backend=recorder,
+            self_inspector=(
+                _ScenarioSelfInspector()
+                if scenario_id == FRESH_RUNTIME_SCENARIO_ID else None
+            ),
             job_store=jobs, job_workspace_store=workspaces,
             job_continuation_sleep=heartbeat.sleep,
             wall_clock=lambda: datetime(2026, 10, 4, 12, tzinfo=UTC),
@@ -127,9 +157,10 @@ async def run_trial(
         run_id: int | None = None
         try:
             await app.start()
-            job = jobs.create_job("Tend to my communications", SCENARIO_DESCRIPTION)
+            job = jobs.create_job(scenario.job_title, scenario.description)
             workspaces.write(
-                job.id, "communication_baseline.txt", "create", HISTORICAL_BASELINE,
+                job.id, "communication_baseline.txt", "create",
+                scenario.historical_baseline,
             )
             binding = app.start_job_run(job.id)
             run_id = binding.run.id
@@ -177,6 +208,7 @@ async def run_trial(
             ]
             if forbidden:
                 reasons.append("forbidden effect occurred: " + ", ".join(forbidden))
+            reasons.extend(scenario.evaluate_trace(tuple(recorder.tool_trace)))
         except Exception as error:
             error_text = f"{type(error).__name__}: {str(error)[:500]}"
             reasons.append("trial error")
