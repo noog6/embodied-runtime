@@ -10,6 +10,18 @@ from .runner import render_report, run_benchmark
 from .scenario import SCENARIOS, SCENARIO_ID
 
 
+def _progress(model, repetition, repeat, result) -> None:
+    if result is None:
+        print(f"model: {model}\ntrial {repetition}/{repeat} running...", flush=True)
+    else:
+        outcome = "PASS" if result.passed else "FAIL"
+        print(
+            f"trial {repetition}/{repeat} {outcome} "
+            f"{result.wall_duration_seconds:.1f}s",
+            flush=True,
+        )
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run cognition inside Mira's harness")
     parser.add_argument("--model", action="append", required=True,
@@ -25,9 +37,10 @@ def _arguments() -> argparse.Namespace:
 
 async def _main() -> int:
     args = _arguments()
+    print(f"scenario: {args.scenario}", flush=True)
     report = await run_benchmark(
         lambda model: OpenAIResponsesBackend(model=model), args.model, args.repeat,
-        scenario_id=args.scenario,
+        scenario_id=args.scenario, progress=_progress,
     )
     print(render_report(report), end="")
     if args.json_out is not None:
