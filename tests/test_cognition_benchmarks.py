@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -10,6 +11,7 @@ from embodied_runtime.benchmarks import (
     run_benchmark, run_trial,
 )
 from embodied_runtime.benchmarks.models import BenchmarkReport
+from embodied_runtime.benchmarks.scenario import SCENARIOS
 from embodied_runtime.cognition import (
     CognitionToolCall, CognitionToolDefinition, CognitionToolResult,
     TextCognitionBackend,
@@ -73,8 +75,9 @@ class ScriptedBenchmarkBackend(TextCognitionBackend):
 
 class AuthorityScenarioBackend(ScriptedBenchmarkBackend):
     def __init__(self, *, read=True, inspect=True, write=True,
-                 outcomes=("completed",)):
+                 outcomes=("completed",), inspection_area="network"):
         super().__init__(outcomes, workspace=False)
+        self.inspection_area = inspection_area
         self.actions = [
             action for enabled, action in (
                 (read, "read"), (inspect, "inspect"), (write, "write"),
@@ -103,7 +106,7 @@ class AuthorityScenarioBackend(ScriptedBenchmarkBackend):
                 return "reviewed historical evidence"
             if action == "inspect":
                 await tool_executor(CognitionToolCall(
-                    "inspect_self", '{"area":"network"}',
+                    "inspect_self", json.dumps({"area": self.inspection_area}),
                 ))
                 return "obtained fresh network evidence"
             await tool_executor(CognitionToolCall(
@@ -330,6 +333,65 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(facts["interface.wlan0.operstate"], "up")
         self.assertEqual(facts["interface.wlan0.carrier"], "1")
         self.assertEqual(facts["default_route_interface"], "wlan0")
+
+    async def test_authority_repetitions_get_distinct_identical_inspectors(self):
+        scenario = SCENARIOS[FRESH_RUNTIME_SCENARIO_ID]
+        original_factory = scenario.self_inspector_factory
+        self.assertIsNotNone(original_factory)
+        inspectors = []
+
+        def recording_factory():
+            inspector = original_factory()
+            inspectors.append(inspector)
+            return inspector
+
+        SCENARIOS[FRESH_RUNTIME_SCENARIO_ID] = replace(
+            scenario, self_inspector_factory=recording_factory,
+        )
+        try:
+            first = await run_trial(
+                AuthorityScenarioBackend(), "fake-model", 1,
+                scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+            )
+            second = await run_trial(
+                AuthorityScenarioBackend(), "fake-model", 2,
+                scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+            )
+        finally:
+            SCENARIOS[FRESH_RUNTIME_SCENARIO_ID] = scenario
+
+        self.assertTrue(first.passed and second.passed)
+        self.assertEqual(len(inspectors), 2)
+        self.assertIsNot(inspectors[0], inspectors[1])
+        self.assertEqual(
+            inspectors[0].inspect("network"), inspectors[1].inspect("network"),
+        )
+
+    async def test_storage_fixture_is_deterministic_but_not_fresh_authority(self):
+        first = await run_trial(
+            AuthorityScenarioBackend(inspection_area="storage"), "fake-model", 1,
+            scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+        )
+        second = await run_trial(
+            AuthorityScenarioBackend(inspection_area="storage"), "fake-model", 2,
+            scenario_id=FRESH_RUNTIME_SCENARIO_ID,
+        )
+        self.assertFalse(first.passed)
+        self.assertFalse(second.passed)
+        self.assertIn(
+            "fresh current network evidence was not acquired", first.failure_reasons,
+        )
+        storage_results = [
+            json.loads(next(item for item in trial.tool_trace
+                            if item.name == "inspect_self").result)
+            for trial in (first, second)
+        ]
+        self.assertEqual(storage_results[0], storage_results[1])
+        self.assertEqual(storage_results[0]["area"], "storage")
+        self.assertEqual(storage_results[0]["status"], "applied")
+
+    def test_original_scenario_has_no_self_inspection_fixture(self):
+        self.assertIsNone(SCENARIOS[SCENARIO_ID].self_inspector_factory)
 
     async def test_authority_scenario_rejects_historical_only(self):
         result = await run_trial(

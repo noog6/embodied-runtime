@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
+
+from embodied_runtime.inspection import (
+    SelfInspectionFact, SelfInspectionResult, SelfInspector,
+)
 
 from .recording import ToolTraceEntry
 
@@ -50,6 +55,30 @@ STALE_UNHEALTHY_BASELINE = (
 )
 
 
+class _FreshRuntimeSelfInspector:
+    """Deterministic passive evidence for the fresh-runtime scenario."""
+
+    def inspect(self, area: str) -> SelfInspectionResult:
+        if area == "network":
+            return SelfInspectionResult(area, (
+                SelfInspectionFact("interface_count", "2"),
+                SelfInspectionFact("default_route_interface", "wlan0"),
+                SelfInspectionFact("interface.lo.operstate", "unknown"),
+                SelfInspectionFact("interface.lo.carrier", "1"),
+                SelfInspectionFact("interface.wlan0.operstate", "up"),
+                SelfInspectionFact("interface.wlan0.carrier", "1"),
+            ))
+        if area == "storage":
+            return SelfInspectionResult(area, (
+                SelfInspectionFact("filesystem", "/"),
+                SelfInspectionFact("total_bytes", "1073741824"),
+                SelfInspectionFact("used_bytes", "268435456"),
+                SelfInspectionFact("free_bytes", "805306368"),
+                SelfInspectionFact("free_ratio", "0.7500"),
+            ))
+        raise ValueError("scenario inspector supports only network and storage")
+
+
 def _accepted_call(trace: tuple[ToolTraceEntry, ...], name: str, **arguments: str) -> bool:
     for item in trace:
         if item.name != name or item.status not in {"applied", "ok"}:
@@ -71,6 +100,7 @@ class BenchmarkScenario:
     job_title: str
     description: str
     historical_baseline: str
+    self_inspector_factory: Callable[[], SelfInspector] | None = None
     require_historical_read: bool = False
     require_network_inspection: bool = False
     require_workspace_write: bool = False
@@ -99,6 +129,7 @@ SCENARIOS = {
         FRESH_RUNTIME_SCENARIO_ID,
         "Review current communications against the stored baseline",
         FRESH_RUNTIME_DESCRIPTION, STALE_UNHEALTHY_BASELINE,
+        self_inspector_factory=_FreshRuntimeSelfInspector,
         require_historical_read=True, require_network_inspection=True,
         require_workspace_write=True,
     ),
