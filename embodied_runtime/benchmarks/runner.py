@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +19,8 @@ from embodied_runtime.jobs import (
     SQLiteJobStore,
 )
 from embodied_runtime.platform import PlatformSnapshot
+from embodied_runtime.observability import RunObservability
+from embodied_runtime.pricing import BUILT_IN_PRICING
 from embodied_runtime.profile import RobotProfile
 from .models import BenchmarkReport, BenchmarkTrialResult, TrialMetrics
 from .recording import RecordingCognitionBackend
@@ -90,6 +93,21 @@ def _latest_response(recorder: RecordingCognitionBackend) -> str:
     return ""
 
 
+def _cost_delta(before: object, after: object) -> str | None:
+    """Subtract already-priced snapshots, retaining observability's precision."""
+    old = before.get("cost", {})  # type: ignore[union-attr]
+    new = after.get("cost", {})  # type: ignore[union-attr]
+    if old.get("status") != "estimated" or new.get("status") != "estimated":
+        return None
+    try:
+        delta = Decimal(new["estimated_usd"]) - Decimal(old["estimated_usd"])
+    except (InvalidOperation, KeyError, TypeError):
+        return None
+    if delta < 0:
+        return None
+    return str(delta.quantize(Decimal("0.000001")))
+
+
 async def run_trial(
     backend: TextCognitionBackend, model: str, repetition: int,
     *, scenario_id: str = SCENARIO_ID,
@@ -114,6 +132,7 @@ async def run_trial(
         root = Path(directory)
         jobs = SQLiteJobStore(root / "jobs.sqlite3")
         workspaces = FilesystemJobWorkspaceStore(root / "workspaces")
+        observability = RunObservability(pricing=BUILT_IN_PRICING)
         app = RobotApplication(
             RobotProfile("mira-benchmark", "Mira"), VirtualHardwareBackend(),
             ApplicationOptions(
@@ -129,6 +148,7 @@ async def run_trial(
             job_store=jobs, job_workspace_store=workspaces,
             job_continuation_sleep=heartbeat.sleep,
             wall_clock=lambda: datetime(2026, 10, 4, 12, tzinfo=UTC),
+            observability=observability,
         )
         run_id: int | None = None
         try:
@@ -255,9 +275,11 @@ async def run_trial(
         job_work_episodes=episodes, continuation_count=continuation_count,
         acquisition_tool_calls=acquisitions, effect_tool_calls=effects,
     )
+    estimated_cost_usd = _cost_delta(before, after)
     return BenchmarkTrialResult(
         scenario_id, backend.identifier, model, repetition, not reasons,
-        tuple(reasons), error_text, round(perf_counter() - started, 6), status,
+        tuple(reasons), error_text, round(perf_counter() - started, 6),
+        estimated_cost_usd, BUILT_IN_PRICING.identity, status,
         disposition, continuation_state, _latest_response(recorder), metrics,
         tuple(recorder.requests), tuple(recorder.tool_trace),
     )
@@ -279,7 +301,18 @@ async def run_benchmark(
             trials.append(trial)
             if progress is not None:
                 progress(model, repetition, repeat, trial)
-    return BenchmarkReport(datetime.now(UTC).isoformat(), scenario_id, tuple(trials))
+    return BenchmarkReport(
+        datetime.now(UTC).isoformat(), scenario_id, tuple(trials),
+        BUILT_IN_PRICING.identity,
+    )
+
+
+def _estimated_total(trials: list[BenchmarkTrialResult]) -> str | None:
+    if not trials or any(trial.estimated_cost_usd is None for trial in trials):
+        return None
+    amounts = [Decimal(trial.estimated_cost_usd) for trial in trials
+               if trial.estimated_cost_usd is not None]
+    return str(sum(amounts, Decimal(0)).quantize(Decimal("0.000001")))
 
 
 def render_report(report: BenchmarkReport) -> str:
@@ -289,15 +322,22 @@ def render_report(report: BenchmarkReport) -> str:
         passed = sum(trial.passed for trial in trials)
         lines.extend((f"model: {model}", f"PASS {passed}/{len(trials)}",
                       "trial result episodes provider_req acquisitions effects "
-                      "output_tokens duration"))
+                      "output_tokens est_cost_usd duration"))
         for trial in trials:
             metric = trial.metrics
             lines.append(
                 f"{trial.repetition:<5} {'PASS' if trial.passed else 'FAIL':<6} "
                 f"{metric.job_work_episodes:<8} {metric.provider_requests:<12} "
                 f"{metric.acquisition_tool_calls:<12} {metric.effect_tool_calls:<7} "
-                f"{metric.output_tokens:<13} {trial.wall_duration_seconds:.1f}s"
+                f"{metric.output_tokens:<13} "
+                f"{('$' + trial.estimated_cost_usd) if trial.estimated_cost_usd is not None else 'unavailable':<12} "
+                f"{trial.wall_duration_seconds:.1f}s"
             )
+        model_total = _estimated_total(trials)
+        lines.append(
+            "estimated model cost: "
+            + (f"${model_total}" if model_total is not None else "unavailable")
+        )
         failures = [trial for trial in trials if not trial.passed]
         if failures:
             lines.append("Failure reasons")
@@ -309,4 +349,9 @@ def render_report(report: BenchmarkReport) -> str:
                     for item in trial.tool_trace
                 ))
         lines.append("")
+    report_total = _estimated_total(list(report.trials))
+    lines.append(
+        "estimated report cost: "
+        + (f"${report_total}" if report_total is not None else "unavailable")
+    )
     return "\n".join(lines).rstrip() + "\n"
