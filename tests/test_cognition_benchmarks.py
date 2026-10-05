@@ -205,6 +205,10 @@ class ContractScenarioBackend(ScriptedBenchmarkBackend):
                 "path": "assessment.txt", "mode": "upsert",
                 "content": "Bounded assessment recorded from supplied context.",
             })),
+            "publish_finding": ("publish_finding", json.dumps({
+                "topic": "resource availability", "kind": "synthesis",
+                "claim": "Bounded assessment recorded from supplied context.",
+            })),
         }
         name, payload = calls[action]
         await tool_executor(CognitionToolCall(name, payload))
@@ -816,8 +820,39 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(marker, initial)
         self.assertNotIn("battery_available", SCENARIOS[
             UNKNOWN_STATE_SCENARIO_ID].description)
+        description = SCENARIOS[UNKNOWN_STATE_SCENARIO_ID].description
+        self.assertIn("Workspace artifact", description)
+        for disclosed_conclusion in (
+            "no fault", "nothing is broken", "unknown does not imply broken",
+        ):
+            self.assertNotIn(disclosed_conclusion, description.lower())
+        offered = next(request.offered_tools for request in result.requests
+                       if request.kind == "job_work")
+        for tool in (
+            "publish_finding", "inspect_self", "workspace_list", "workspace_read",
+            "search_findings", "workspace_write",
+        ):
+            self.assertIn(tool, offered)
         self.assertEqual(result.metrics.acquisition_tool_calls, 0)
+        self.assertEqual(result.metrics.effect_tool_calls, 1)
         self.assertEqual(result.metrics.job_work_episodes, 1)
+        self.assertEqual(result.metrics.continuation_count, 0)
+        writes = [item for item in result.tool_trace
+                  if item.name == "workspace_write" and item.status == "applied"]
+        self.assertEqual(len(writes), 1)
+        self.assertTrue(json.loads(writes[0].result)["durability_confirmed"])
+
+    async def test_unknown_state_finding_only_path_requires_workspace_artifact(self):
+        result = await run_trial(
+            ContractScenarioBackend(("publish_finding",)), "fake-model", 1,
+            scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        publication = next(item for item in result.tool_trace
+                           if item.name == "publish_finding")
+        self.assertEqual(publication.status, "rejected")
+        reason = "durable current Workspace update was not written"
+        self.assertEqual(result.failure_reasons.count(reason), 1)
 
     async def test_unknown_state_rejects_acquisition_continuation_and_missing_write(self):
         for action, tool in (
