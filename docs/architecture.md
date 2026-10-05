@@ -1,5 +1,9 @@
 # Architecture
 
+See [conversation continuity](conversation-history.md) for the boundary between
+volatile WorkingMemory, durable historical dialogue, and admitted semantic
+memory.
+
 ## Semantic earcons
 
 > **Earcons communicate operator-relevant semantic state transitions. They are

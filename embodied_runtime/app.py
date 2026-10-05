@@ -12,7 +12,7 @@ import secrets
 import unicodedata
 from time import monotonic, monotonic_ns
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from embodied_runtime.body.base import BodyBackend
@@ -43,6 +43,9 @@ from embodied_runtime.cognition import (
 )
 from embodied_runtime.cognition.finding_context import (
     FindingContextSelector, render_finding_context,
+)
+from embodied_runtime.conversation_history import (
+    ConversationHistoryStore, render_conversation_history,
 )
 from embodied_runtime.events import (
     ApplicationStarted,
@@ -1057,6 +1060,8 @@ class RobotApplication:
         interaction_environment: InteractionEnvironment = InteractionEnvironment.WORKSTATION,
         sms_service: object | None = None,
         earcon_player: EarconPlayer | None = None,
+        conversation_history_store: ConversationHistoryStore | None = None,
+        conversation_session_id: str | None = None,
     ) -> None:
         self.profile = profile
         self.observability = observability or RunObservability()
@@ -1121,6 +1126,8 @@ class RobotApplication:
             working_memory if working_memory is not None else WorkingMemory()
         )
         self.persistent_memory = persistent_memory_store
+        self.conversation_history = conversation_history_store
+        self._conversation_session_id = conversation_session_id or uuid4().hex
         self.jobs = job_store
         self.job_workspaces = job_workspace_store
         self._run_history_evidence = run_history_evidence
@@ -1133,6 +1140,7 @@ class RobotApplication:
             if persistent_memory_store is not None else None
         )
         self._persistent_memory_closed = False
+        self._conversation_history_closed = False
         self._job_store_closed = False
         self._job_workspace_store_closed = False
         authorized_tts_provider = (
@@ -3938,6 +3946,10 @@ class RobotApplication:
         except BaseException as error:
             failure = failure or error
         try:
+            self._close_conversation_history()
+        except BaseException as error:
+            failure = failure or error
+        try:
             self._close_job_workspace_store()
         except BaseException as error:
             failure = failure or error
@@ -3955,6 +3967,12 @@ class RobotApplication:
             return
         self._persistent_memory_closed = True
         self.persistent_memory.close()
+
+    def _close_conversation_history(self) -> None:
+        if self.conversation_history is None or self._conversation_history_closed:
+            return
+        self._conversation_history_closed = True
+        self.conversation_history.close()
 
     async def _stop_job_work(self) -> None:
         """Cancel and join every context-owned task before volatile cleanup."""
@@ -4121,6 +4139,24 @@ class RobotApplication:
     ) -> str:
         """Execute an episode while retaining its interaction-layer identity."""
         prior_memory = self.working_memory.snapshot()
+        prior_conversation_history = ""
+        if interaction is not None and self.conversation_history is not None:
+            try:
+                records = self.conversation_history.select_prior(
+                    self._conversation_session_id, interaction.channel
+                )
+                prior_conversation_history = render_conversation_history(records)
+                same = sum(record.channel == interaction.channel for record in records)
+                LOGGER.info(
+                    "[CONTEXT] source=conversation_history status=selected "
+                    "current_channel=%s same_channel=%s cross_channel=%s selected=%s",
+                    interaction.channel.value, same, len(records) - same, len(records),
+                )
+            except Exception as error:
+                LOGGER.warning(
+                    "[CONTEXT] source=conversation_history status=unavailable error=%s",
+                    type(error).__name__,
+                )
         finding_context = self._select_operator_finding_context(message, episode.id)
         tool_outcomes: list[WorkingMemoryToolOutcome] = []
         acquisitions: list[InitiativeAcquisitionOutcome] = []
@@ -4284,6 +4320,7 @@ class RobotApplication:
                         episode, message, prior_memory, acquisitions, interaction,
                         delivery_destinations, has_image_attachment=bool(image_attachments),
                         finding_context=finding_context,
+                        prior_conversation_history=prior_conversation_history,
                     ),
                     tools=tools,
                     tool_executor=execute_tool if tools else None,
@@ -4291,6 +4328,7 @@ class RobotApplication:
                         episode, message, prior_memory, acquisitions, interaction,
                         delivery_destinations, has_image_attachment=bool(image_attachments),
                         finding_context=finding_context,
+                        prior_conversation_history=prior_conversation_history,
                     ),
                 )
                 if image_attachments:
@@ -4338,10 +4376,23 @@ class RobotApplication:
                     result.observed_at,
                     (("focus", result.focus), ("description", result.description)),
                 ))
+        completed_at = self._aware_wall_clock()
         self.working_memory.append(
             message, response, tool_outcomes,
-            completed_at=self._aware_wall_clock(), observations=observations,
+            completed_at=completed_at, observations=observations,
+            channel=interaction.channel if interaction is not None else None,
         )
+        if interaction is not None and self.conversation_history is not None:
+            try:
+                self.conversation_history.append(
+                    self._conversation_session_id, completed_at, interaction.channel,
+                    message, response,
+                )
+            except Exception as error:
+                LOGGER.warning(
+                    "[CONVERSATION_HISTORY] status=append_failed error=%s",
+                    type(error).__name__,
+                )
         self._last_operator_turn_completed_monotonic = self._monotonic()
         await self._finish_operator_episode(episode, "handled")
         return response
@@ -4397,6 +4448,7 @@ class RobotApplication:
         delivery_destinations: Sequence[OperatorDeliveryDestination] = (),
         has_image_attachment: bool = False,
         finding_context: str = "",
+        prior_conversation_history: str = "",
     ) -> str:
         remaining = 2 - len(acquisitions)
         lines = [
@@ -4405,6 +4457,7 @@ class RobotApplication:
                 self.options.startup_prompt,
                 working_memory, self._active_goal,
                 selected_historical_context=finding_context,
+                prior_conversation_history=prior_conversation_history,
             ),
         ]
         if interaction is not None:

@@ -63,12 +63,17 @@ class ConfigurationTests(unittest.TestCase):
             explicit.__class__(**{
                 **explicit.__dict__,
                 "voice_wake_word_enabled": True,
+                "cognition_model": "gpt-6.1-sol",
                 "voice_wake_words": ["mira", "mirror", "huh mirror"],
                 "voice_initial_timeout_seconds": 18,
                 "voice_followup_timeout_seconds": 12,
                 "timezone": "America/Toronto",
                 "memory_enabled": True,
                 "memory_database_path": Path("data/mira-memory.sqlite3").resolve(),
+                "conversation_history_enabled": True,
+                "conversation_history_database_path": Path(
+                    "data/conversations.sqlite3"
+                ).resolve(),
                 "jobs_enabled": True,
                 "jobs_database_path": Path("data/jobs.sqlite3").resolve(),
                 "jobs_auto_continue": True,

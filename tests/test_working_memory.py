@@ -164,7 +164,8 @@ class WorkingMemoryTests(unittest.TestCase):
             outcome.output = "changed"
         self.assertEqual(
             set(WorkingMemoryTurn.__dataclass_fields__),
-            {"operator_text", "assistant_text", "completed_at", "tool_outcomes", "observations"},
+            {"operator_text", "assistant_text", "completed_at", "tool_outcomes",
+             "observations", "channel"},
         )
         self.assertEqual(
             set(WorkingMemoryToolOutcome.__dataclass_fields__), {"name", "output"}

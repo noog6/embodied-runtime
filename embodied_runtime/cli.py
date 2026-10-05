@@ -44,6 +44,7 @@ from embodied_runtime.sms import TwilioSmsService, TwilioSmsSettings
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.pricing import BUILT_IN_PRICING
 from embodied_runtime.memory import SQLiteMemoryStore
+from embodied_runtime.conversation_history import SQLiteConversationHistoryStore
 from embodied_runtime.jobs import (
     FilesystemJobWorkspaceStore, SQLiteJobStore, workspace_root_for_database,
 )
@@ -292,6 +293,8 @@ def parse_launch_arguments(
     args.earcons_enabled = effective.earcons_enabled
     args.memory_enabled = effective.memory_enabled
     args.memory_database_path = effective.memory_database_path
+    args.conversation_history_enabled = effective.conversation_history_enabled
+    args.conversation_history_database_path = effective.conversation_history_database_path
     args.jobs_enabled = effective.jobs_enabled
     args.jobs_database_path = effective.jobs_database_path
     args.jobs_auto_continue = effective.jobs_auto_continue
@@ -403,6 +406,15 @@ def build_persistent_memory_store(
         return None
     args.memory_database_path.parent.mkdir(parents=True, exist_ok=True)
     return SQLiteMemoryStore(args.memory_database_path)
+
+
+def build_conversation_history_store(
+    args: argparse.Namespace,
+) -> SQLiteConversationHistoryStore | None:
+    if not args.conversation_history_enabled:
+        return None
+    args.conversation_history_database_path.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteConversationHistoryStore(args.conversation_history_database_path)
 
 
 def build_job_store(args: argparse.Namespace) -> SQLiteJobStore | None:
@@ -600,14 +612,17 @@ async def _run_application(
         delivery_routes = OperatorDeliveryRouteCatalog(routes)
         notification_sink = message_channel or sms_service
         persistent_memory = build_persistent_memory_store(args)
+        conversation_history = build_conversation_history_store(args)
+        if persistent_memory is not None:
+            composition_cleanup.callback(persistent_memory.close)
+        if conversation_history is not None:
+            composition_cleanup.callback(conversation_history.close)
         jobs = build_job_store(args)
         try:
             job_workspaces = build_job_workspace_store(args)
         except BaseException:
             if jobs is not None:
                 jobs.close()
-            if persistent_memory is not None:
-                persistent_memory.close()
             raise
         resources = ResourceArbiter()
         application = RobotApplication(
@@ -659,6 +674,9 @@ async def _run_application(
                               and isinstance(hardware, FusionHatHardwareBackend) else None),
             timezone_name=args.timezone,
             persistent_memory_store=persistent_memory,
+            conversation_history_store=conversation_history,
+            conversation_session_id=(observability.run_id if observability is not None
+                                     else None),
             job_store=jobs,
             job_workspace_store=job_workspaces,
             run_history_evidence=history_evidence,

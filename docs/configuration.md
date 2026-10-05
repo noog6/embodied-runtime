@@ -1,5 +1,9 @@
 # Runtime startup configuration
 
+Durable cross-session dialogue continuity is optional under
+`[conversation_history]`; see [conversation continuity](conversation-history.md)
+for its schema, authority boundary, and deterministic selection limits.
+
 When Jobs persistence is enabled, the runtime also constructs the Job Workspace
 store. Its root is not separately configurable: the sibling directory name is
 the Jobs database stem plus `-workspaces` (for example, `data/jobs.sqlite3`
