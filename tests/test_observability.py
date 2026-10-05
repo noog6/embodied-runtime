@@ -202,7 +202,7 @@ def test_finalize_once_freezes_late_updates_and_writes_safe_summary(tmp_path):
     assert first["run"]["status"] == "interrupted"
     persisted = json.loads((tmp_path / "summary.json").read_text())
     serialized = json.dumps(persisted)
-    assert persisted["schema_version"] == 2
+    assert persisted["schema_version"] == 3
     assert persisted["provider_usage"] == [{
         "provider": "p", "model": "m", "requests": 1,
         "input_tokens": 2, "cached_input_tokens": 0,
@@ -230,6 +230,7 @@ def test_banner_contains_stable_sections():
     assert "R7 SUMMARY" in banner
     assert "provider_requests:    0" in banner
     assert "estimated_cost_usd:   unavailable" in banner
+    assert "tts_characters:       0" in banner
     assert "camera_captures:      0" in banner
 
 
@@ -244,6 +245,7 @@ def test_elevenlabs_character_usage_combines_with_cognition_without_float_drift(
     snapshot = observed.snapshot()
     assert snapshot["tts_usage"] == [{
         "provider": "elevenlabs", "model": "eleven_flash_v2_5",
+        "usage_basis": "text_length_estimate",
         "syntheses": 2, "characters": 77, "duration_ms": 20,
     }]
     assert snapshot["cost"]["components"]["tts"]["estimated_usd"] == "0.003850"

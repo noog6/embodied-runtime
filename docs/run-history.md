@@ -3,8 +3,10 @@
 Each authoritative run directory also receives `summary.json` during process
 finalization. This schema-versioned document contains run identity/timing/status,
 aggregate operational counters, bounded dimensions, a token `provider_usage` array,
-and a hosted `tts_usage` array. Each
-provider/model item contains `requests`, `input_tokens`, `cached_input_tokens`,
+and a hosted `tts_usage` array. TTS entries include a bounded `usage_basis`
+(`provider_reported` or `text_length_estimate`) alongside their synthesis,
+character, and duration totals. Each cognition provider/model item contains
+`requests`, `input_tokens`, `cached_input_tokens`,
 `cache_write_tokens`, `output_tokens`, `total_tokens`, and `duration_ms`, in addition to
 the bounded provider and model identifiers. These are raw provider-reported usage totals.
 The document also includes an explicitly derived cost result. It contains no prompts,
@@ -28,14 +30,18 @@ recorded as zero. Normal provider request log lines likewise include
 `cache_write_tokens=<n>` when that valid provider detail is present. Local speech
 activity is not assigned hosted cost. ElevenLabs usage is recorded after complete WAV
 collection and before playback, so a later local playback failure still retains the
-synthesis estimate; a rejected pre-synthesis request does not invent usage.
+synthesis estimate; a rejected pre-synthesis request does not invent usage. The
+official SDK's raw-response synthesis path exposes `character-cost` while retaining
+asynchronous audio collection. A valid bounded non-negative integer from that header
+is preferred as billable character usage; missing or unsafe metadata falls back to
+requested text length without affecting speech success.
 
 The versioned built-in catalog covers OpenAI Responses cognition using
 the exact model key `gpt-5.6-luna`, at the standard pricing applicable to requests with
 at most 272,000 input tokens. A request above that boundary, or usage from any unknown
 provider or model, makes the run estimate unavailable rather than applying an unsafe
 fallback. It also covers ElevenLabs `eleven_flash_v2_5` at the public Flash/Turbo API
-estimate dated 2026-10-02: USD $0.05 per 1,000 characters. Cost components expose
+estimate dated 2026-10-02: USD $0.05 per 1,000 billed characters. Cost components expose
 cognition and TTS separately and `estimated_usd` combines known usage. This public-rate
 estimate is not an account invoice: subscriptions, included credits, taxes, and final
 marginal charges may differ. eSpeak has no external API cost. Unknown actually used
@@ -44,6 +50,8 @@ hosted TTS models make cost unavailable rather than silently appearing as zero.
 This locally calculated value estimates only usage represented in priced provider
 accounting; it is not a billing authority or a complete robot operating cost. Built-in
 pricing is dated and versioned, performs no runtime network lookup, and may become stale.
+The summary observability schema is version 3; this version adds the bounded TTS usage
+basis and does not persist response headers or other provider metadata.
 
 Summary persistence reports `written`, `failed`, or `not_requested` to the runtime. A
 failure is logged with its bounded exception class and never changes authoritative

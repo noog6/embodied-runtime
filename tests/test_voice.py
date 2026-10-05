@@ -1,5 +1,6 @@
 import asyncio
 import argparse
+from contextlib import asynccontextmanager
 import io
 import sys
 import tempfile
@@ -1611,9 +1612,16 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         return {"openai": openai, "fusion_hat": fusion_hat,
                 "fusion_hat.device": device}
 
-    def elevenlabs_modules(self, calls, convert):
+    def elevenlabs_modules(self, calls, convert, *, headers=None):
+        @asynccontextmanager
+        async def raw_convert(**kwargs):
+            calls.append(("request", kwargs))
+            yield SimpleNamespace(data=convert(**kwargs), headers=headers or {})
+
         client = SimpleNamespace(
-            text_to_speech=SimpleNamespace(convert=convert)
+            text_to_speech=SimpleNamespace(
+                with_raw_response=SimpleNamespace(convert=raw_convert)
+            )
         )
         elevenlabs = ModuleType("elevenlabs")
         elevenlabs.VoiceSettings = lambda **kwargs: SimpleNamespace(**kwargs)
@@ -1782,7 +1790,6 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
                 yield chunk
 
         def convert(**kwargs):
-            calls.append(("request", kwargs))
             return chunks()
 
         with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
@@ -1811,6 +1818,55 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(calls[-3:], ["enable", "disable", "disable"])
 
+    async def test_elevenlabs_prefers_valid_provider_billed_characters(self):
+        calls = []
+        observed = RunObservability(pricing=BUILT_IN_PRICING)
+
+        async def chunks(**kwargs):
+            yield b"wav"
+
+        modules = self.elevenlabs_modules(
+            calls, chunks, headers={"character-cost": "123"}
+        )
+        with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
+             patch.dict(sys.modules, modules), \
+             patch("embodied_runtime.voice.subprocess.run"):
+            provider = FusionHatElevenLabsTTSProvider(
+                voice_id="voice", observability=observed
+            )
+            await provider.speak("short")
+
+        usage = observed.snapshot()["tts_usage"]
+        self.assertEqual(usage[0]["characters"], 123)
+        self.assertEqual(usage[0]["usage_basis"], "provider_reported")
+        self.assertEqual(
+            observed.snapshot()["cost"]["components"]["tts"]["estimated_usd"],
+            "0.006150",
+        )
+
+    async def test_elevenlabs_invalid_or_missing_billing_metadata_is_estimated(self):
+        for header in (None, "not-a-number", "-1", "1.5", "1000001"):
+            with self.subTest(header=header):
+                calls = []
+                observed = RunObservability(pricing=BUILT_IN_PRICING)
+
+                async def chunks(**kwargs):
+                    yield b"wav"
+
+                headers = {} if header is None else {"character-cost": header}
+                modules = self.elevenlabs_modules(calls, chunks, headers=headers)
+                with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
+                     patch.dict(sys.modules, modules), \
+                     patch("embodied_runtime.voice.subprocess.run"):
+                    provider = FusionHatElevenLabsTTSProvider(
+                        voice_id="voice", observability=observed
+                    )
+                    await provider.speak("hello")
+
+                usage = observed.snapshot()["tts_usage"][0]
+                self.assertEqual(usage["characters"], 5)
+                self.assertEqual(usage["usage_basis"], "text_length_estimate")
+
     async def test_elevenlabs_generation_and_playback_failures_clean_up(self):
         async def failed_chunks():
             raise RuntimeError("generation failed")
@@ -1818,13 +1874,19 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         calls = []
         modules = self.elevenlabs_modules(calls, lambda **kwargs: failed_chunks())
+        failed_observed = RunObservability(pricing=BUILT_IN_PRICING)
         with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}), \
              patch.dict(sys.modules, modules), \
              patch("embodied_runtime.voice.subprocess.run") as run:
-            provider = FusionHatElevenLabsTTSProvider(voice_id="voice")
+            provider = FusionHatElevenLabsTTSProvider(
+                voice_id="voice", observability=failed_observed
+            )
             with self.assertRaises(TextToSpeechSynthesisError):
                 await provider.speak("hello")
-        self.assertEqual(calls, ["disable"])
+        self.assertEqual([call for call in calls if isinstance(call, str)],
+                         ["disable"])
+        self.assertEqual(failed_observed.snapshot()["tts_usage"], [])
+        self.assertEqual(failed_observed.snapshot()["cost"]["status"], "unavailable")
         run.assert_not_called()
 
         calls = []
@@ -1842,7 +1904,8 @@ class VoiceInteractionTests(unittest.IsolatedAsyncioTestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "playback failed"):
                 await provider.speak("hello")
-        self.assertEqual(calls, ["disable", "enable", "disable"])
+        self.assertEqual([call for call in calls if isinstance(call, str)],
+                         ["disable", "enable", "disable"])
         self.assertEqual(log.call_count, 1)
         self.assertEqual(observed.snapshot()["tts_usage"][0]["characters"], 5)
 
@@ -2002,6 +2065,7 @@ class TTSFallbackCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics["voice_failures"], 0)
         self.assertEqual(observed.snapshot()["dimensions"]["tts_providers"],
                          {"espeak": 1})
+        self.assertEqual(observed.snapshot()["tts_usage"], [])
         await authorized.close()
         self.assertEqual(calls[-2:], ["primary-close", "fallback-close"])
 
