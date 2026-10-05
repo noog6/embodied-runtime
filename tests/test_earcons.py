@@ -5,7 +5,9 @@ import tempfile
 import unittest
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication
-from embodied_runtime.earcons import Earcon, EarconPlayer, SPEAKER_RESOURCE
+from embodied_runtime.earcons import (
+    EARCON_CATALOG, Earcon, EarconAttemptStatus, EarconPlayer, SPEAKER_RESOURCE,
+)
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.jobs import (
     JobContinuationReadiness, JobReadinessEventType, JobRunStatus,
@@ -51,11 +53,63 @@ class RecordingOutput:
 
 
 class EarconPlayerTests(unittest.IsolatedAsyncioTestCase):
+    def test_catalog_is_complete_unique_and_bounded(self):
+        self.assertEqual({item.cue for item in EARCON_CATALOG}, set(Earcon))
+        self.assertEqual(len(EARCON_CATALOG), len(Earcon))
+        for item in EARCON_CATALOG:
+            self.assertTrue(item.meaning)
+            self.assertLessEqual(len(item.meaning), 100)
+
+    def test_new_player_has_no_fabricated_activity(self):
+        snapshot = EarconPlayer(ResourceArbiter(), None).snapshot()
+        self.assertIsNone(snapshot.last_attempt)
+        self.assertIsNone(snapshot.last_played)
+        self.assertFalse(snapshot.output_available)
+
     async def test_enabled_player_calls_physical_output(self):
         resources = ResourceArbiter()
         output = RecordingOutput(resources)
         self.assertTrue(await EarconPlayer(resources, output).play(Earcon.READY))
         self.assertEqual(output.calls, 1)
+
+    async def test_success_then_skip_preserves_last_audible_cue(self):
+        resources = ResourceArbiter()
+        output = RecordingOutput(resources)
+        player = EarconPlayer(resources, output)
+        self.assertTrue(await player.play(Earcon.READY))
+        lease = resources.acquire(SPEAKER_RESOURCE, ResourceOwner("test", "speech"))
+        self.assertFalse(await player.play(Earcon.WORK_STARTED))
+        resources.release(lease)
+        snapshot = player.snapshot()
+        self.assertEqual(snapshot.last_attempt.cue, Earcon.WORK_STARTED)
+        self.assertIs(snapshot.last_attempt.status, EarconAttemptStatus.SKIPPED)
+        self.assertEqual(snapshot.last_attempt.reason, "speaker_busy")
+        self.assertEqual(snapshot.last_played.cue, Earcon.READY)
+
+    async def test_failure_does_not_replace_last_played(self):
+        resources = ResourceArbiter()
+        output = RecordingOutput(resources)
+        player = EarconPlayer(resources, output)
+        await player.play(Earcon.READY)
+        output.fail = True
+        self.assertFalse(await player.play(Earcon.WORK_COMPLETED))
+        snapshot = player.snapshot()
+        self.assertIs(snapshot.last_attempt.status, EarconAttemptStatus.FAILED)
+        self.assertEqual(snapshot.last_attempt.reason, "output_error")
+        self.assertEqual(snapshot.last_played.cue, Earcon.READY)
+
+    async def test_snapshot_is_read_only_and_restart_state_is_fresh(self):
+        resources = ResourceArbiter()
+        output = RecordingOutput(resources)
+        player = EarconPlayer(resources, output)
+        await player.play(Earcon.READY)
+        before = player.snapshot()
+        self.assertEqual(player.snapshot(), before)
+        self.assertEqual(output.calls, 1)
+        self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+        restarted = EarconPlayer(resources, output).snapshot()
+        self.assertIsNone(restarted.last_attempt)
+        self.assertIsNone(restarted.last_played)
 
     async def test_exact_speaker_lease_surrounds_playback_and_releases_on_failure(self):
         resources = ResourceArbiter()
@@ -81,6 +135,11 @@ class EarconPlayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await player.play(Earcon.READY))
         self.assertEqual(output.calls, 0)
         self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+        snapshot = player.snapshot()
+        self.assertFalse(snapshot.output_available)
+        self.assertIs(snapshot.last_attempt.status, EarconAttemptStatus.SKIPPED)
+        self.assertEqual(snapshot.last_attempt.reason, "output_unavailable")
+        self.assertIsNone(snapshot.last_played)
 
     async def test_wake_engagement_uses_named_earcon_exactly_once(self):
         class VoiceInput:
@@ -166,6 +225,33 @@ class SemanticEarconTests(unittest.IsolatedAsyncioTestCase):
             Earcon.READY, Earcon.WORK_STARTED, Earcon.WORK_COMPLETED,
         ])
         await app.stop()
+
+    async def test_self_inspection_exposes_semantics_and_playback_distinction(self):
+        resources = ResourceArbiter()
+        output = RecordingOutput(resources)
+        player = EarconPlayer(resources, output)
+        app = RobotApplication(
+            RobotProfile("test", "Test"), VirtualHardwareBackend(),
+            platform_provider=StaticPlatform(), job_store=self.store,
+            resource_arbiter=resources, earcon_player=player,
+        )
+        await player.play(Earcon.READY)
+        lease = resources.acquire(SPEAKER_RESOURCE, ResourceOwner("test", "speech"))
+        await player.play(Earcon.WORK_STARTED)
+        resources.release(lease)
+        before = player.snapshot()
+
+        result = app._inspect_area("earcons")
+        facts = {fact.name: fact.value for fact in result.facts}
+
+        self.assertEqual(facts["last_attempt.cue"], "work_started")
+        self.assertEqual(facts["last_attempt.status"], "skipped")
+        self.assertEqual(facts["last_attempt.reason"], "speaker_busy")
+        self.assertEqual(facts["last_played.cue"], "ready")
+        self.assertIn("ready", facts["available_cue.ready.meaning"])
+        self.assertEqual(player.snapshot(), before)
+        self.assertEqual(output.calls, 1)
+        self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
 
     async def test_only_wait_for_operator_signals_and_is_deduplicated(self):
         job = self.store.create_job("Wait correctly")

@@ -1,11 +1,18 @@
 # Bounded semantic self-inspection
 
 `inspect_self(area)` is the runtime's single read-only inspection capability.
-Its exact areas are `network`, `storage`, `camera`, and `runtime`; aliases,
+Its exact areas are `network`, `storage`, `camera`, `runtime`, and `earcons`; aliases,
 multiple areas, extra arguments, commands, and model-selected paths are rejected.
 Immutable `SelfInspectionResult` and `SelfInspectionFact` values carry a small
 provider-neutral summary. `RobotApplication` validates and executes the semantic
 request, while the injectable `HostSelfInspector` owns passive host reads.
+
+The `earcons` area projects the bounded semantic cue catalog plus output
+availability and current-process `last_attempt`/`last_played` evidence.
+Skipped or failed attempts never replace the most recent confirmed playback,
+and playback confirmation does not prove human perception. This inspection is
+passive: it cannot acquire the speaker, play a cue, or offer a model-selectable
+audio effect. Activity is not persisted and starts empty in each new player.
 
 Operator cognition may make one tool call and use its provider-local result
 continuation. An autonomous episode may spend either or both of its two acquisition
