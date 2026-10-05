@@ -60,7 +60,9 @@ from embodied_runtime.events import (
     ThermalWarningCleared,
     ThermalWarningRaised,
 )
-from embodied_runtime.earcons import Earcon, EarconPlayer, SPEAKER_RESOURCE
+from embodied_runtime.earcons import (
+    EARCON_CATALOG, Earcon, EarconAttemptStatus, EarconPlayer, SPEAKER_RESOURCE,
+)
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, InteractionCadence, InteractionChannel,
@@ -257,6 +259,31 @@ ADDRESS_OPERATOR_TOOL = CognitionToolDefinition(
             "message": {"type": "string", "maxLength": MAX_OPERATOR_MESSAGE_CHARS}
         },
         "required": ["message"],
+        "additionalProperties": False,
+    },
+)
+
+
+PLAY_EARCON_TOOL = CognitionToolDefinition(
+    name="play_earcon",
+    description=(
+        "Request one deliberate semantic earcon. Select it only when its catalog "
+        "meaning is useful, avoid unnecessarily repeating automatic signals, and do "
+        "not claim playback unless this invocation returns status=applied. Playback "
+        "confirms runtime output, not that a person heard it or that the cue's described "
+        "lifecycle transition occurred. Available cues: "
+        + "; ".join(
+            f"{definition.cue.value}: {definition.meaning}"
+            for definition in EARCON_CATALOG
+        )
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"cue": {
+            "type": "string",
+            "enum": [definition.cue.value for definition in EARCON_CATALOG],
+        }},
+        "required": ["cue"],
         "additionalProperties": False,
     },
 )
@@ -5586,6 +5613,9 @@ class RobotApplication:
             return ()
         body = self.body_backend
         tools = []
+        if (self.options.initiative_actions_enabled
+                and self.earcons.snapshot().output_available):
+            tools.append(PLAY_EARCON_TOOL)
         if self.temporal.pending is None:
             tools.append(SCHEDULE_FOLLOWUP_TOOL)
         if (self.options.initiative_actions_enabled and body is not None and
@@ -5611,6 +5641,9 @@ class RobotApplication:
         """Project currently safe cognition capabilities at request time."""
         body = self.body_backend
         tools = []
+        if (self.state is LifecycleState.RUNNING
+                and self.earcons.snapshot().output_available):
+            tools.append(PLAY_EARCON_TOOL)
         if (
             body is not None
             and not body.is_physical
@@ -5715,6 +5748,9 @@ class RobotApplication:
     async def _execute_cognition_tool(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
     ) -> CognitionToolResult:
+        if call.name == PLAY_EARCON_TOOL.name:
+            return await self._execute_play_earcon(
+                call, available=self.cognition_tools())
         if call.name == ORIENT_BODY_TOOL.name:
             return await self._execute_orient_body(
                 call, available=self.cognition_tools(), source="cognition"
@@ -7183,6 +7219,10 @@ class RobotApplication:
         acquisitions: tuple[InitiativeAcquisitionOutcome, ...] = (),
     ) -> CognitionToolResult:
         projected = self.initiative_tools() if available is None else available
+        if call.name == PLAY_EARCON_TOOL.name:
+            return await self._execute_play_earcon(
+                call, available=projected, expected_goal=expected_goal,
+                job_binding=job_binding, log_prefix=log_prefix)
         if call.name == ORIENT_BODY_TOOL.name:
             return await self._execute_orient_body(
                 call, available=projected, source="initiative",
@@ -7213,6 +7253,48 @@ class RobotApplication:
         return self._rejected_tool(
             call.name, "tool is not available", log_prefix=log_prefix
         )
+
+    async def _execute_play_earcon(
+        self, call: CognitionToolCall, *,
+        available: tuple[CognitionToolDefinition, ...],
+        expected_goal: ActiveGoal | None = None,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
+        log_prefix: str = "COGNITION",
+    ) -> CognitionToolResult:
+        try:
+            if not any(tool.name == PLAY_EARCON_TOOL.name for tool in available):
+                raise RuntimeError("tool is not available")
+            arguments = self._tool_arguments(call, {"cue"})
+            if type(arguments["cue"]) is not str:
+                raise ValueError("cue must be a string")
+            cue = Earcon(arguments["cue"])
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("playback requires a running application")
+            if expected_goal is not None and not self._goal_is_live(expected_goal):
+                raise RuntimeError("expected active goal is no longer current")
+            if job_binding is not None:
+                binding, task_binding, goal = job_binding
+                context = self._context_for_run(binding.run.id)
+                if (context is None or context.binding is not binding
+                        or expected_goal is not goal
+                        or not self._job_work_binding_matches(
+                            binding, task_binding, goal)):
+                    raise RuntimeError("stale_job_work_binding")
+            result = await self.earcons.play_attempt(cue)
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as error:
+            return self._rejected_tool(call.name, str(error), log_prefix=log_prefix)
+        status = (
+            "applied" if result.status is EarconAttemptStatus.PLAYED
+            else result.status.value
+        )
+        payload = {"status": status, "cue": result.cue.value,
+                   "playback_confirmed": result.status is EarconAttemptStatus.PLAYED,
+                   "human_heard": "not_established"}
+        if result.reason is not None:
+            payload["reason"] = result.reason
+        LOGGER.info("[%s] tool=%s cue=%s status=%s", log_prefix, call.name,
+                    result.cue.value, status)
+        return CognitionToolResult(json.dumps(payload, sort_keys=True))
 
     def _execute_schedule_followup(
         self, call: CognitionToolCall, *,
