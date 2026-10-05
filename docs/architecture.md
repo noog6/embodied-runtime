@@ -5,7 +5,8 @@
 > **Earcons communicate operator-relevant semantic state transitions. They are
 > not runtime activity telemetry.**
 
-The runtime owns a bounded `EarconPlayer`, which maps five names to small,
+The runtime owns a bounded `EarconPlayer`, whose single semantic catalog maps five
+names and meanings to small,
 deterministically generated local tones: `engagement` means a wake word was
 heard and speech may begin; `ready` means application startup reached the
 operational state; `work_started` and `work_completed` bracket one durable
@@ -22,6 +23,20 @@ acquires the canonical `audio.speaker` lease without waiting or retrying, holds
 that exact lease through local playback, and releases it in `finally`. A busy
 speaker or playback failure is logged and never changes the underlying semantic
 transition.
+
+There are three deliberately separate boundaries:
+
+1. **Harness-selected earcons (current):** a runtime event makes the harness select
+   a semantic cue, and `EarconPlayer` attempts playback under normal arbitration.
+2. **Earcon awareness (current):** cognition may use the existing read-only
+   `inspect_self(area="earcons")` acquisition to inspect the catalog and the most
+   recent attempt/confirmed playback. A skipped or failed attempt never replaces
+   `last_played`, and successful playback does not prove human perception.
+3. **Model-selectable earcons (future, out of scope):** cognition choosing a cue and
+   requesting playback is not implemented. There is no cognition audio effect.
+
+Awareness is current-runtime, ephemeral state. It is not earcon history and is not
+persisted to conversation history, memory, Job Workspace, Findings, or RunHistory.
 
 Earcons are deliberately lossy, immediate representations of state—not a
 guaranteed notification channel. Playback never waits behind TTS, retries, or

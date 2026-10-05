@@ -1,7 +1,7 @@
 # Bounded semantic self-inspection
 
 `inspect_self(area)` is the runtime's single read-only inspection capability.
-Its exact areas are `network`, `storage`, `camera`, and `runtime`; aliases,
+Its exact areas are `network`, `storage`, `camera`, `runtime`, and `earcons`; aliases,
 multiple areas, extra arguments, commands, and model-selected paths are rejected.
 Immutable `SelfInspectionResult` and `SelfInspectionFact` values carry a small
 provider-neutral summary. `RobotApplication` validates and executes the semantic
@@ -37,6 +37,14 @@ no Raspberry Pi command runner is introduced.
 Phase 15 adds the single runtime-area fact
 `temporal_followup_pending=true|false`. It reveals no purpose, due point, task,
 or scheduler internals. Scheduling itself is a semantic effect, not inspection.
+
+The `earcons` area projects the shared semantic cue catalog plus volatile
+`last_attempt` and `last_played` evidence from `EarconPlayer`. An attempt may be
+`played`, `skipped`, or `failed`; only `last_played` identifies the most recent cue
+whose output completed successfully. Even that is runtime playback evidence, not
+proof that a human heard it. Output availability is reported without guessing why
+an output adapter is absent. Inspection neither acquires the speaker nor emits a
+sound, and activity resets with a new player/runtime instance.
 
 Operator and autonomous attention episodes may use self-inspection as one of at
 most two ordered read-only acquisition attempts. Successful facts are

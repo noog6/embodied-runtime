@@ -60,7 +60,9 @@ from embodied_runtime.events import (
     ThermalWarningCleared,
     ThermalWarningRaised,
 )
-from embodied_runtime.earcons import Earcon, EarconPlayer, SPEAKER_RESOURCE
+from embodied_runtime.earcons import (
+    EARCON_CATALOG, Earcon, EarconPlayer, EarconSnapshot, SPEAKER_RESOURCE,
+)
 from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, InteractionCadence, InteractionChannel,
@@ -411,7 +413,9 @@ INSPECT_SELF_TOOL = CognitionToolDefinition(
     name="inspect_self",
     description=(
         "Read one bounded runtime-owned local condition. Use only when a missing "
-        "local fact is materially relevant. This is read-only and is not an effect."
+        "local fact is materially relevant. The earcons area describes short runtime "
+        "semantic cues (not speech) and runtime-confirmed attempts; played does not "
+        "prove a person heard one. This is read-only and is not an effect."
     ),
     parameters={
         "type": "object",
@@ -6777,7 +6781,7 @@ class RobotApplication:
             arguments = self._tool_arguments(call, {"area"})
             value = arguments["area"]
             if type(value) is not str or value not in SELF_INSPECTION_AREAS:
-                raise ValueError("area must be network, storage, camera, or runtime")
+                raise ValueError("area must be network, storage, camera, runtime, or earcons")
             area = value
             LOGGER.info("[INSPECTION] area=%s status=requested", area)
             if self.state is not LifecycleState.RUNNING:
@@ -7122,6 +7126,36 @@ class RobotApplication:
                 SelfInspectionFact("visual_perception_enabled", str(self._visual_perception_backend is not None).lower()),
                 SelfInspectionFact("visual_perception_backend", "none" if self._visual_perception_backend is None else self._visual_perception_backend.identifier),
             ))
+        if area == "earcons":
+            snapshot_method = getattr(self.earcons, "snapshot", None)
+            snapshot = snapshot_method() if callable(snapshot_method) else EarconSnapshot(
+                False, EARCON_CATALOG, None, None
+            )
+            facts = [
+                SelfInspectionFact("output_available", str(snapshot.output_available).lower()),
+            ]
+            for definition in snapshot.catalog:
+                facts.append(SelfInspectionFact(
+                    f"cue.{definition.cue.value}.meaning", definition.meaning
+                ))
+            for name, activity in (
+                ("last_attempt", snapshot.last_attempt),
+                ("last_played", snapshot.last_played),
+            ):
+                if activity is None:
+                    facts.append(SelfInspectionFact(name, "none"))
+                    continue
+                facts.extend((
+                    SelfInspectionFact(f"{name}.cue", activity.cue.value),
+                    SelfInspectionFact(f"{name}.status", activity.status.value),
+                    SelfInspectionFact(
+                        f"{name}.occurred_at",
+                        activity.occurred_at.isoformat(timespec="seconds"),
+                    ),
+                ))
+                if activity.reason is not None:
+                    facts.append(SelfInspectionFact(f"{name}.reason", activity.reason))
+            return SelfInspectionResult(area, tuple(facts))
         body = self.body_backend
         return SelfInspectionResult(area, (
             SelfInspectionFact("lifecycle", self.state.value),
