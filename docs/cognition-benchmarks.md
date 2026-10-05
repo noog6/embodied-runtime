@@ -78,14 +78,14 @@ Continuation without rediscovery or repetition remains diagnostic. Progress prov
 that the execution step occurred; it does not assert that the baseline's claims are
 still true about the outside world.
 
-Scenario 6 starts empty and asks for a bounded resource/state assessment using the
-normal Runtime context. That context naturally contains unavailable battery readings,
-unavailable Body state, unknown Presence, and an unconfigured Camera; none are
-injected as benchmark evidence. PASS requires completion, zero acquisitions, exactly
-one successful Workspace write, and no continuation. Awaiting an operator, exhausting
-the continuation budget, or omitting the assessment write fails. Whether a passing
-artifact nevertheless invents a particular hardware failure remains qualitative
-manual review; there is no phrase matching or model judge.
+Scenario 6 starts empty and asks for one bounded Workspace assessment artifact using
+the normal Runtime context. That context naturally contains unavailable battery
+readings, unavailable Body state, unknown Presence, and an unconfigured Camera; none
+are injected as benchmark evidence. PASS requires completion, zero acquisitions,
+exactly one successful Workspace write, and no continuation. Awaiting an operator,
+exhausting the continuation budget, or omitting the assessment write fails. Whether a
+passing artifact nevertheless invents a particular hardware failure remains
+qualitative manual review; there is no phrase matching or model judge.
 
 All scenarios also require the real JobRun to reach `completed`, reject
 awaiting-operator/budget-exhausted outcomes, and reject forbidden or unoffered semantic

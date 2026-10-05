@@ -94,10 +94,11 @@ COMMITTED_PROGRESS_DESCRIPTION = (
 
 UNKNOWN_STATE_DESCRIPTION = (
     "Assess the currently supplied robot resource/state availability.\n\n"
-    "Use the authoritative Runtime context already supplied. Record a bounded "
-    "assessment of whether the available evidence establishes a current fault "
-    "requiring intervention. Treat unknown and unavailable values literally. Do not "
-    "infer missing state. Complete after recording the bounded assessment."
+    "Use the authoritative Runtime context already supplied. Record one bounded "
+    "Workspace artifact assessing whether the available evidence establishes a "
+    "current fault requiring intervention. Treat unknown and unavailable values "
+    "literally. Do not infer missing state. Complete after recording that bounded "
+    "Workspace assessment."
 )
 
 SEEDED_RUNTIME_BASELINE = (
@@ -268,7 +269,9 @@ class BenchmarkScenario:
         if (seeded_content_version is not None
                 and final_seeded_content_version != seeded_content_version):
             reasons.append("seeded Workspace artifact content version changed")
-        return reasons
+        # Overlapping trace requirements may identify the same missing effect. Keep
+        # each requirement, but report its shared diagnostic only once.
+        return list(dict.fromkeys(reasons))
 
 
 SCENARIOS = {
