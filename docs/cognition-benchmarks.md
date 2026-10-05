@@ -26,8 +26,8 @@ not implement tool semantics.
 
 ## Scenario and interpretation
 
-The benchmark has two small Python-defined scenarios. They share the harness but
-own their Job description, initial Workspace fixture, and conservative trace
+The benchmark has three small Python-defined scenarios. They share the harness but
+own their Job description, optional initial Workspace fixture, and conservative trace
 requirements; there is no fixture language or scenario discovery mechanism.
 
 `communications_unknown_but_bounded_work_complete` creates **Tend to my
@@ -85,6 +85,38 @@ as bounded diagnostics. In particular, whether the prose correctly explains that
 fresh healthy evidence overrides the stale unhealthy claim remains a visible manual
 interpretation rather than an LLM-judged or phrase-matched score.
 
+`authoritative_context_requires_no_acquisition` tests acquisition restraint when
+the normal, current Runtime context is already sufficient. Its fresh Job asks for
+a bounded runtime/platform baseline, starts with an empty Workspace, and receives
+the same production `CognitionContext` rendering as ordinary Mira cognition. The
+fixed virtual platform therefore supplies current lifecycle, hostname, model,
+system and release, machine, Python version, uptime, load, memory, and CPU
+temperature facts. Normal hardware, body, presence, and camera context is also
+available. No benchmark-specific evidence block repeats these values.
+
+In this scenario the distinction is:
+
+```text
+acquisition: obtain additional evidence
+effect:      durably record useful bounded work
+```
+
+All normal Job tools remain offered. Nevertheless, any attempted read-only
+`inspect_self`, `workspace_list`, `workspace_read`, or `search_findings` call is
+an unnecessary acquisition and fails the trial, including a rejected or
+not-found attempt. A successful `workspace_write` is not an acquisition: it is
+the useful durable effect explicitly required by the Job.
+
+PASS requires the real JobRun to complete without continuation-budget exhaustion
+or an awaiting-operator terminal failure, without a forbidden/unoffered semantic
+effect, with zero read-only acquisition attempts across the entire run, and with
+at least one successful durable Workspace write. It does not require exactly one
+episode, zero continuations, one particular path, one particular format, or every
+available context field. Episode and continuation counts remain diagnostics, as
+do provider/token/timing metrics, extra valid effects, responses, outcome report,
+and the ordered trace. The trace retains the Workspace content for manual review
+of semantic quality; no LLM judge, embeddings, or textual marker score grades it.
+
 `job_work_episodes` counts work episodes that actually started (the initial manual
 episode plus each continuation accepted by the production controller), not timer
 pulses. `continuation_count` counts those accepted automatic continuation work
@@ -140,6 +172,19 @@ python -m embodied_runtime.benchmarks \
   --model gpt-6-astra \
   --repeat 3 \
   --json-out /tmp/mira-benchmark-scenario2.json
+```
+
+To run the acquisition-restraint scenario across the same four-model set:
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --scenario authoritative_context_requires_no_acquisition \
+  --model gpt-5.6-sol \
+  --model gpt-6.1-sol \
+  --model gpt-6-luna \
+  --model gpt-6-astra \
+  --repeat 3 \
+  --json-out /tmp/mira-benchmark-scenario3.json
 ```
 
 The terminal table highlights failed trials and their ordered tool traces. JSON

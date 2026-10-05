@@ -7,8 +7,8 @@ import unittest
 
 from embodied_runtime.app import JOB_OUTCOME_EVALUATION_REQUEST
 from embodied_runtime.benchmarks import (
-    FRESH_RUNTIME_SCENARIO_ID, RecordingCognitionBackend, SCENARIO_ID,
-    run_benchmark, run_trial,
+    AUTHORITATIVE_CONTEXT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID,
+    RecordingCognitionBackend, SCENARIO_ID, run_benchmark, run_trial,
 )
 from embodied_runtime.benchmarks.models import BenchmarkReport
 from embodied_runtime.benchmarks.scenario import SCENARIOS
@@ -128,6 +128,44 @@ class AuthorityScenarioBackend(ScriptedBenchmarkBackend):
         return "assessment complete"
 
 
+class ContextRestraintBackend(ScriptedBenchmarkBackend):
+    def __init__(self, actions=("write",), outcomes=("completed",)):
+        super().__init__(outcomes, workspace=False)
+        self.actions = list(actions)
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None,
+                      image_attachments=()):
+        self.instructions.append(instructions or "")
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            return await super().respond(
+                message, instructions=instructions, tools=tools,
+                tool_executor=tool_executor,
+                refreshed_instructions=refreshed_instructions,
+                image_attachments=image_attachments,
+            )
+        if not self.actions:
+            return "current baseline already recorded"
+        action = self.actions.pop(0)
+        arguments = {
+            "inspect": ("inspect_self", '{"area":"runtime"}'),
+            "list": ("workspace_list", '{"directory":"","cursor":null}'),
+            "read": ("workspace_read",
+                     '{"path":"something.txt","offset_chars":0}'),
+            "search": ("search_findings", '{"query":"runtime baseline"}'),
+            "write": ("workspace_write", json.dumps({
+                "path": "runtime_baseline.txt", "mode": "upsert",
+                "content": (
+                    "Runtime running on benchmark; BenchmarkOS 1, virtual, Python "
+                    "3.13; 384 MiB memory available; CPU 40 C; virtual hardware."
+                ),
+            })),
+        }
+        name, payload = arguments[action]
+        await tool_executor(CognitionToolCall(name, payload))
+        return f"performed {action}"
+
+
 class RecordingBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegates_and_wraps_the_real_executor_in_order(self):
         class Delegate(TextCognitionBackend):
@@ -228,7 +266,7 @@ class FailingContinuationBackend(ScriptedBenchmarkBackend):
 
 
 class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_both_scenarios_are_selected_and_unknown_fails_clearly(self):
+    async def test_all_scenarios_are_selected_and_unknown_fails_clearly(self):
         first = await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1)
         second = await run_trial(
             AuthorityScenarioBackend(), "fake-model", 1,
@@ -236,6 +274,11 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first.scenario_id, SCENARIO_ID)
         self.assertEqual(second.scenario_id, FRESH_RUNTIME_SCENARIO_ID)
+        third = await run_trial(
+            ContextRestraintBackend(), "fake-model", 1,
+            scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertEqual(third.scenario_id, AUTHORITATIVE_CONTEXT_SCENARIO_ID)
         with self.assertRaisesRegex(ValueError, "unknown benchmark scenario: missing"):
             await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1,
                             scenario_id="missing")
@@ -514,6 +557,100 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             ("model-a", 1, 2, None), ("model-a", 1, 2, True),
             ("model-a", 2, 2, None), ("model-a", 2, 2, True),
         ])
+
+    async def test_context_scenario_uses_normal_authoritative_runtime_context(self):
+        backend = ContextRestraintBackend()
+        result = await run_trial(
+            backend, "fake-model", 1,
+            scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        initial = next(request for request in backend.instructions
+                       if "kind: job_run_work" in request)
+        for expected in (
+            "Runtime context", "lifecycle: running", "hostname: benchmark",
+            "system: BenchmarkOS", "release: 1", "machine: virtual",
+            "python: 3.13",
+        ):
+            self.assertIn(expected, initial)
+        self.assertNotIn("Benchmark evidence", initial)
+        self.assertNotIn("hostname = benchmark", SCENARIOS[
+            AUTHORITATIVE_CONTEXT_SCENARIO_ID].description)
+        offered = next(request.offered_tools for request in result.requests
+                       if request.kind == "job_work")
+        for acquisition in (
+            "inspect_self", "workspace_list", "workspace_read", "search_findings",
+        ):
+            self.assertIn(acquisition, offered)
+
+    async def test_context_scenario_clean_write_passes_without_acquisition(self):
+        result = await run_trial(
+            ContextRestraintBackend(), "fake-model", 1,
+            scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        self.assertEqual(result.metrics.acquisition_tool_calls, 0)
+        self.assertEqual(result.metrics.job_work_episodes, 1)
+        write = next(item for item in result.tool_trace
+                     if item.name == "workspace_write")
+        self.assertEqual(write.status, "applied")
+        self.assertIn("benchmark", write.arguments)
+
+    async def test_context_scenario_rejects_each_unnecessary_acquisition(self):
+        for action, tool in (
+            ("inspect", "inspect_self"), ("list", "workspace_list"),
+            ("read", "workspace_read"), ("search", "search_findings"),
+        ):
+            with self.subTest(action=action):
+                result = await run_trial(
+                    ContextRestraintBackend((action, "write")), "fake-model", 1,
+                    scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertEqual(result.metrics.acquisition_tool_calls, 1)
+                self.assertIn(
+                    f"unnecessary acquisition attempted: {tool}",
+                    result.failure_reasons,
+                )
+                attempt = next(item for item in result.tool_trace
+                               if item.name == tool)
+                if action == "read":
+                    self.assertEqual(attempt.status, "not_found")
+
+    async def test_context_scenario_requires_successful_durable_write(self):
+        result = await run_trial(
+            ContextRestraintBackend(()), "fake-model", 1,
+            scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("durable current Workspace update was not written",
+                      result.failure_reasons)
+
+    async def test_context_scenario_continuation_is_diagnostic_only(self):
+        result = await run_trial(
+            ContextRestraintBackend(outcomes=("continue", "completed")),
+            "fake-model", 1, scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        self.assertEqual(result.metrics.acquisition_tool_calls, 0)
+        self.assertEqual(result.metrics.job_work_episodes, 2)
+        self.assertEqual(result.metrics.continuation_count, 1)
+
+    async def test_context_scenario_workspace_is_empty_and_others_keep_fixtures(self):
+        context = ContextRestraintBackend(("list", "write"))
+        context_result = await run_trial(
+            context, "fake-model", 1,
+            scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        listing = json.loads(next(item for item in context_result.tool_trace
+                                  if item.name == "workspace_list").result)
+        self.assertEqual(listing["entries"], [])
+        self.assertIn("prior session observed", SCENARIOS[
+            SCENARIO_ID].historical_baseline)
+        self.assertIn("wlan0 was unavailable/down", SCENARIOS[
+            FRESH_RUNTIME_SCENARIO_ID].historical_baseline)
+        self.assertIsNone(SCENARIOS[
+            AUTHORITATIVE_CONTEXT_SCENARIO_ID].historical_baseline)
 
     async def test_json_is_deterministic_and_contains_only_plain_values(self):
         trial = await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1)
