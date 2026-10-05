@@ -214,3 +214,11 @@ request with acquisitions removed. Thus there are at most three cognition stages
 two acquisition attempts (rejections count), and one non-acquisition capability.
 There is no tool loop, recursive continuation, autonomous outcome evaluation, or
 provider session. Only terminal prose is returned and persisted.
+
+`play_earcon(cue)` is an ordinary semantic effect in this grammar when earcon output
+is enabled and configured. Its strict cue enum and descriptions are derived from the
+runtime earcon catalog. The returned result concerns that invocation only: confirmed
+runtime playback does not prove a person heard it and does not enact the lifecycle
+meaning of the selected cue. Autonomous and Job cognition receive the same effect only
+through the existing action permission, fresh-goal/Job authority, and distinct-effect
+continuation gates.

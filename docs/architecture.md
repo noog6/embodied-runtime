@@ -13,11 +13,12 @@ autonomous JobRun; and `needs_operator` means that JobRun entered the explicit
 `wait_for_operator` state. `wait_for_event`, delayed continuations, and startup
 reconciliation are intentionally silent.
 
-The application lifecycle and Job coordination authorities select these cues;
-they are deterministic harness behavior and are not exposed as cognition tools
-or model-selected actions. Cognition requests, tool calls, acquisitions,
-continuation steps, scheduler polls, heartbeats, and observations are likewise
-intentionally silent. `EarconPlayer` only performs safe named playback: it
+The application lifecycle and Job coordination authorities select their automatic
+cues. Cognition may also request exactly one catalog cue through the semantic
+`play_earcon(cue)` effect when configured output and the applicable operator or
+autonomous action permissions are available. Cognition requests, other tool calls,
+acquisitions, continuation steps, scheduler polls, heartbeats, and observations are
+otherwise intentionally silent. `EarconPlayer` only performs safe named playback: it
 acquires the canonical `audio.speaker` lease without waiting or retrying, holds
 that exact lease through local playback, and releases it in `finally`. A busy
 speaker or playback failure is logged and never changes the underlying semantic
@@ -38,8 +39,19 @@ These boundaries are intentionally distinct:
    cue and `EarconPlayer` attempts it under normal resource arbitration.
 2. **Earcon awareness (current):** cognition may inspect meanings and recent
    runtime evidence through the existing read-only self-inspection acquisition.
-3. **Model-selectable earcons (future, out of scope):** cognition selecting or
-   requesting a cue is not implemented; there is no playback cognition effect.
+3. **Model-selectable earcons (current):** `play_earcon` is one bounded semantic
+   effect, projected only with enabled configured output. Its vocabulary and meanings
+   come directly from the same catalog. A busy speaker remains a temporary skipped
+   attempt rather than removing the capability.
+
+The effect awaits one invocation-local result: `applied` means the output adapter
+confirmed playback, while `skipped` identifies unavailable output or contention and
+`failed` identifies output failure. Cancellation propagates after lease cleanup.
+These results never prove human perception or establish the lifecycle state described
+by a cue: demonstrating `ready` does not make the runtime ready, and demonstrating
+`work_completed` does not complete a Task or Job. Model requests use the ordinary
+one-effect operator grammar and the autonomous distinct-effect continuation grammar;
+they are neither acquisitions nor a side channel around episode limits.
 
 Earcons are deliberately lossy, immediate representations of state—not a
 guaranteed notification channel. Playback never waits behind TTS, retries, or

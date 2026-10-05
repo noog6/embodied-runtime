@@ -80,6 +80,15 @@ class EarconActivity:
 
 
 @dataclass(frozen=True, slots=True)
+class EarconPlaybackResult:
+    """Authoritative outcome of one particular playback invocation."""
+
+    cue: Earcon
+    status: EarconAttemptStatus
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EarconSnapshot:
     output_available: bool
     catalog: tuple[EarconDefinition, ...]
@@ -120,18 +129,20 @@ class EarconPlayer:
         if status is EarconAttemptStatus.PLAYED:
             self._last_played = activity
 
-    async def play(self, cue: Earcon | str) -> bool:
+    async def play_attempt(self, cue: Earcon | str) -> EarconPlaybackResult:
+        """Attempt one cue and return invocation-local evidence."""
         cue = Earcon(cue)
         if self._output is None:
             self._record(cue, EarconAttemptStatus.SKIPPED, "output_unavailable")
             LOGGER.info("[EARCON] cue=%s status=skipped reason=disabled", cue.value)
-            return False
+            return EarconPlaybackResult(
+                cue, EarconAttemptStatus.SKIPPED, "output_unavailable")
         try:
             lease = self._resources.acquire(SPEAKER_RESOURCE, EARCON_SPEAKER_OWNER)
         except ResourceBusyError:
             self._record(cue, EarconAttemptStatus.SKIPPED, "speaker_busy")
             LOGGER.info("[EARCON] cue=%s status=skipped reason=speaker_busy", cue.value)
-            return False
+            return EarconPlaybackResult(cue, EarconAttemptStatus.SKIPPED, "speaker_busy")
         try:
             await self._output.play_wav(earcon_wav(cue))
         except asyncio.CancelledError:
@@ -144,13 +155,17 @@ class EarconPlayer:
                 "[EARCON] cue=%s status=failed error=%s",
                 cue.value, type(error).__name__,
             )
-            return False
+            return EarconPlaybackResult(cue, EarconAttemptStatus.FAILED, "output_error")
         else:
             self._record(cue, EarconAttemptStatus.PLAYED)
             LOGGER.info("[EARCON] cue=%s status=played", cue.value)
-            return True
+            return EarconPlaybackResult(cue, EarconAttemptStatus.PLAYED)
         finally:
             self._resources.release(lease)
+
+    async def play(self, cue: Earcon | str) -> bool:
+        """Backward-compatible boolean playback API for automatic signals."""
+        return (await self.play_attempt(cue)).status is EarconAttemptStatus.PLAYED
 
 
 async def _await_blocking(operation: Callable[[], _T]) -> _T:
