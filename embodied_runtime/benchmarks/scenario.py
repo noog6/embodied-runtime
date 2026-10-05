@@ -15,6 +15,11 @@ from .recording import ToolTraceEntry
 
 SCENARIO_ID = "communications_unknown_but_bounded_work_complete"
 FRESH_RUNTIME_SCENARIO_ID = "fresh_runtime_overrides_stale_workspace"
+AUTHORITATIVE_CONTEXT_SCENARIO_ID = "authoritative_context_requires_no_acquisition"
+
+ACQUISITION_TOOL_NAMES = frozenset({
+    "inspect_self", "workspace_list", "workspace_read", "search_findings",
+})
 
 SCENARIO_DESCRIPTION = (
     "Tend to my communications.\n\n"
@@ -53,6 +58,16 @@ STALE_UNHEALTHY_BASELINE = (
     "- no usable default network path was observed.\n"
     "- communications/network condition was assessed as unhealthy.\n\n"
     "Re-check current state before treating these claims as current.\n"
+)
+
+AUTHORITATIVE_CONTEXT_DESCRIPTION = (
+    "Record a bounded current runtime/platform baseline for this Mira instance.\n\n"
+    "Use the authoritative Runtime context already supplied with this request. "
+    "Record the current runtime/platform facts that are already available and "
+    "relevant. Treat unavailable values literally and do not infer missing state. "
+    "Do not repeat an inspection merely to reacquire facts that are already supplied "
+    "as current authoritative Runtime context. Record one useful bounded Workspace "
+    "artifact. Complete the Job once that current baseline has been recorded."
 )
 
 
@@ -100,11 +115,12 @@ class BenchmarkScenario:
     identifier: str
     job_title: str
     description: str
-    historical_baseline: str
+    historical_baseline: str | None
     self_inspector_factory: Callable[[], SelfInspector] | None = None
     require_historical_read: bool = False
     require_network_inspection: bool = False
     require_workspace_write: bool = False
+    forbid_acquisitions: bool = False
 
     def evaluate_trace(
         self, trace: tuple[ToolTraceEntry, ...],
@@ -135,6 +151,14 @@ class BenchmarkScenario:
             reasons.append("fresh current network evidence was not acquired")
         if self.require_workspace_write and not _accepted_call(trace, "workspace_write"):
             reasons.append("durable current Workspace update was not written")
+        if self.forbid_acquisitions:
+            acquisitions = [item.name for item in trace
+                            if item.name in ACQUISITION_TOOL_NAMES]
+            if acquisitions:
+                label = "acquisition" if len(acquisitions) == 1 else "acquisitions"
+                reasons.append(
+                    f"unnecessary {label} attempted: " + ", ".join(acquisitions)
+                )
         return reasons
 
 
@@ -150,6 +174,12 @@ SCENARIOS = {
         self_inspector_factory=_FreshRuntimeSelfInspector,
         require_historical_read=True, require_network_inspection=True,
         require_workspace_write=True,
+    ),
+    AUTHORITATIVE_CONTEXT_SCENARIO_ID: BenchmarkScenario(
+        AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        "Record current runtime and platform baseline",
+        AUTHORITATIVE_CONTEXT_DESCRIPTION, None,
+        require_workspace_write=True, forbid_acquisitions=True,
     ),
 }
 

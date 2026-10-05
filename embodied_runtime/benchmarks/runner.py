@@ -20,7 +20,7 @@ from embodied_runtime.platform import PlatformSnapshot
 from embodied_runtime.profile import RobotProfile
 from .models import BenchmarkReport, BenchmarkTrialResult, TrialMetrics
 from .recording import RecordingCognitionBackend
-from .scenario import SCENARIO_ID, get_scenario
+from .scenario import ACQUISITION_TOOL_NAMES, SCENARIO_ID, get_scenario
 
 
 class _FixedPlatform:
@@ -131,11 +131,12 @@ async def run_trial(
         try:
             await app.start()
             job = jobs.create_job(scenario.job_title, scenario.description)
-            seeded_baseline = workspaces.write(
-                job.id, "communication_baseline.txt", "create",
-                scenario.historical_baseline,
-            )
-            historical_content_version = seeded_baseline.content_version
+            if scenario.historical_baseline is not None:
+                seeded_baseline = workspaces.write(
+                    job.id, "communication_baseline.txt", "create",
+                    scenario.historical_baseline,
+                )
+                historical_content_version = seeded_baseline.content_version
             binding = app.start_job_run(job.id)
             run_id = binding.run.id
             # Snapshot after prepare/start so prewarm is deliberately excluded.
@@ -220,10 +221,7 @@ async def run_trial(
                     disposition = proposed
             break
     names = [item.name for item in recorder.tool_trace]
-    acquisitions = sum(name in {
-        "workspace_list", "workspace_read", "inspect_self", "search_findings",
-    }
-                       for name in names)
+    acquisitions = sum(name in ACQUISITION_TOOL_NAMES for name in names)
     effects = sum(name in {"workspace_write", "publish_finding"} for name in names)
     metrics = TrialMetrics(
         provider_requests=_metric_delta(before, after, "provider_requests"),

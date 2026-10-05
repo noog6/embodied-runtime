@@ -7,8 +7,8 @@ import unittest
 
 from embodied_runtime.app import JOB_OUTCOME_EVALUATION_REQUEST
 from embodied_runtime.benchmarks import (
-    FRESH_RUNTIME_SCENARIO_ID, RecordingCognitionBackend, SCENARIO_ID,
-    run_benchmark, run_trial,
+    AUTHORITATIVE_CONTEXT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID,
+    RecordingCognitionBackend, SCENARIO_ID, run_benchmark, run_trial,
 )
 from embodied_runtime.benchmarks.models import BenchmarkReport
 from embodied_runtime.benchmarks.scenario import SCENARIOS
@@ -128,6 +128,46 @@ class AuthorityScenarioBackend(ScriptedBenchmarkBackend):
         return "assessment complete"
 
 
+class ContextRestraintBackend(ScriptedBenchmarkBackend):
+    def __init__(self, actions=("write",), outcomes=("completed",)):
+        super().__init__(outcomes, workspace=False)
+        self.actions = list(actions)
+        self.tool_results = []
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, **kwargs):
+        self.instructions.append(instructions or "")
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            disposition = next(self.outcomes)
+            await tool_executor(CognitionToolCall(
+                "report_job_outcome", json.dumps({
+                    "disposition": disposition, "summary": disposition,
+                    "report": None,
+                    "readiness": "ready" if disposition == "continue" else None,
+                    "delay_seconds": None,
+                }),
+            ))
+            return f"outcome {disposition}"
+        if not self.actions:
+            return "baseline recorded"
+        action = self.actions.pop(0)
+        calls = {
+            "inspect": ("inspect_self", '{"area":"runtime"}'),
+            "list": ("workspace_list", '{"directory":"","cursor":null}'),
+            "read": ("workspace_read", '{"path":"something.txt","offset_chars":0}'),
+            "search": ("search_findings", '{"query":"runtime baseline","limit":null}'),
+            "write": ("workspace_write", json.dumps({
+                "path": "runtime_baseline.txt", "mode": "upsert",
+                "content": "Runtime running; benchmark / BenchmarkOS 1 / virtual; "
+                           "Python 3.13; virtual hardware.",
+            })),
+        }
+        name, arguments = calls[action]
+        result = await tool_executor(CognitionToolCall(name, arguments))
+        self.tool_results.append(json.loads(result.output))
+        return f"performed {action}"
+
+
 class RecordingBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegates_and_wraps_the_real_executor_in_order(self):
         class Delegate(TextCognitionBackend):
@@ -228,7 +268,7 @@ class FailingContinuationBackend(ScriptedBenchmarkBackend):
 
 
 class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_both_scenarios_are_selected_and_unknown_fails_clearly(self):
+    async def test_all_scenarios_are_selected_and_unknown_fails_clearly(self):
         first = await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1)
         second = await run_trial(
             AuthorityScenarioBackend(), "fake-model", 1,
@@ -236,6 +276,11 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first.scenario_id, SCENARIO_ID)
         self.assertEqual(second.scenario_id, FRESH_RUNTIME_SCENARIO_ID)
+        third = await run_trial(
+            ContextRestraintBackend(), "fake-model", 1,
+            scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertEqual(third.scenario_id, AUTHORITATIVE_CONTEXT_SCENARIO_ID)
         with self.assertRaisesRegex(ValueError, "unknown benchmark scenario: missing"):
             await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1,
                             scenario_id="missing")
@@ -499,6 +544,77 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         for backend in backends:
             self.assertIn("wlan0 was unavailable/down", backend.baselines[0])
             self.assertNotIn("Current inspection", backend.baselines[0])
+
+    async def test_context_scenario_uses_normal_authoritative_runtime_context(self):
+        backend = ContextRestraintBackend()
+        result = await run_trial(
+            backend, "fake-model", 1,
+            scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        initial = backend.instructions[0]
+        for marker in (
+            "Runtime context", "  lifecycle: running", "  hostname: benchmark",
+            "  system: BenchmarkOS", "  release: 1", "  machine: virtual",
+            "  python: 3.13",
+        ):
+            self.assertIn(marker, initial)
+        self.assertNotIn("hostname = benchmark", SCENARIOS[
+            AUTHORITATIVE_CONTEXT_SCENARIO_ID].description)
+        self.assertEqual(result.metrics.acquisition_tool_calls, 0)
+        self.assertEqual(result.metrics.job_work_episodes, 1)
+        offered = next(request.offered_tools for request in result.requests
+                       if request.kind == "job_work")
+        for tool_name in ("inspect_self", "workspace_list", "workspace_read",
+                          "search_findings"):
+            self.assertIn(tool_name, offered)
+
+    async def test_context_scenario_rejects_each_unnecessary_acquisition(self):
+        cases = (("inspect", "inspect_self"), ("list", "workspace_list"),
+                 ("read", "workspace_read"), ("search", "search_findings"))
+        for action, tool_name in cases:
+            with self.subTest(tool=tool_name):
+                backend = ContextRestraintBackend((action, "write"))
+                result = await run_trial(
+                    backend, "fake-model", 1,
+                    scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertEqual(result.metrics.acquisition_tool_calls, 1)
+                self.assertIn(
+                    f"unnecessary acquisition attempted: {tool_name}",
+                    result.failure_reasons,
+                )
+                if action == "read":
+                    self.assertEqual(backend.tool_results[0]["status"], "not_found")
+                if action == "list":
+                    self.assertEqual(backend.tool_results[0]["entries"], [])
+
+    async def test_context_scenario_requires_durable_write(self):
+        result = await run_trial(
+            ContextRestraintBackend(()), "fake-model", 1,
+            scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("durable current Workspace update was not written",
+                      result.failure_reasons)
+
+    async def test_context_scenario_continuation_is_diagnostic_only(self):
+        result = await run_trial(
+            ContextRestraintBackend(("write",), ("continue", "completed")),
+            "fake-model", 1, scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        self.assertEqual(result.metrics.job_work_episodes, 2)
+        self.assertEqual(result.metrics.continuation_count, 1)
+
+    def test_scenario_workspace_fixtures_remain_explicit(self):
+        self.assertIn("prior session observed that communication capability",
+                      SCENARIOS[SCENARIO_ID].historical_baseline)
+        self.assertIn("wlan0 was unavailable/down",
+                      SCENARIOS[FRESH_RUNTIME_SCENARIO_ID].historical_baseline)
+        self.assertIsNone(
+            SCENARIOS[AUTHORITATIVE_CONTEXT_SCENARIO_ID].historical_baseline)
 
     async def test_benchmark_progress_callback_surrounds_each_trial(self):
         events = []
