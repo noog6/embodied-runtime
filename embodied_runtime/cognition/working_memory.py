@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 
+from embodied_runtime.interaction import InteractionChannel
+
 
 TRUNCATION_MARKER = "...[truncated]"
 MAX_OBSERVATIONS_PER_TURN = 3
@@ -46,6 +48,7 @@ class WorkingMemoryTurn:
     completed_at: datetime
     tool_outcomes: tuple[WorkingMemoryToolOutcome, ...] = ()
     observations: tuple[WorkingMemoryObservation, ...] = ()
+    channel: InteractionChannel | None = None
 
     def __post_init__(self) -> None:
         _require_aware(self.completed_at, "completed_at")
@@ -56,6 +59,8 @@ class WorkingMemoryTurn:
             )
         for observation in self.observations:
             _validate_bounded_observation(observation)
+        if self.channel is not None and not isinstance(self.channel, InteractionChannel):
+            raise TypeError("channel must be an InteractionChannel or None")
 
 
 class WorkingMemory:
@@ -79,6 +84,7 @@ class WorkingMemory:
         *,
         completed_at: datetime,
         observations: Sequence[WorkingMemoryObservation] = (),
+        channel: InteractionChannel | None = None,
     ) -> WorkingMemoryTurn:
         turn = WorkingMemoryTurn(
             operator_text=_bounded(operator_text, self.text_limit),
@@ -95,6 +101,7 @@ class WorkingMemory:
                 _bounded_observation(observation)
                 for observation in observations[:MAX_OBSERVATIONS_PER_TURN]
             ),
+            channel=channel,
         )
         self._turns.append(turn)
         return turn
@@ -136,6 +143,7 @@ def render_working_memory(turns: Sequence[WorkingMemoryTurn]) -> str:
                 "",
                 f"Turn {index}",
                 f"  completed_at: {turn.completed_at.isoformat(timespec='seconds')}",
+                f"  channel: {turn.channel.value if turn.channel is not None else 'none'}",
                 f"  operator: {json.dumps(turn.operator_text, ensure_ascii=False)}",
                 f"  assistant: {json.dumps(turn.assistant_text, ensure_ascii=False)}",
                 "  observations:",

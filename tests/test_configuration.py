@@ -67,8 +67,13 @@ class ConfigurationTests(unittest.TestCase):
                 "voice_initial_timeout_seconds": 18,
                 "voice_followup_timeout_seconds": 12,
                 "timezone": "America/Toronto",
+                "cognition_model": "gpt-6.1-sol",
                 "memory_enabled": True,
                 "memory_database_path": Path("data/mira-memory.sqlite3").resolve(),
+                "conversation_history_enabled": True,
+                "conversation_history_database_path": Path(
+                    "data/conversations.sqlite3"
+                ).resolve(),
                 "jobs_enabled": True,
                 "jobs_database_path": Path("data/jobs.sqlite3").resolve(),
                 "jobs_auto_continue": True,
