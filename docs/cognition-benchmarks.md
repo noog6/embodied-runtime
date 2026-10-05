@@ -24,11 +24,25 @@ The recording decorator delegates cognition unchanged and wraps the real runtime
 `tool_executor`; it records the request, bounded arguments and results, but does
 not implement tool semantics.
 
-## Scenario and interpretation
+## Mira Cognition Contract Suite v1
 
-The benchmark has three small Python-defined scenarios. They share the harness but
+The benchmark has six small Python-defined scenarios. They share the harness but
 own their Job description, optional initial Workspace fixture, and conservative trace
 requirements; there is no fixture language or scenario discovery mechanism.
+
+| # | Stable scenario ID | Contract question |
+|---|---|---|
+| 1 | `communications_unknown_but_bounded_work_complete` | Stop when bounded useful work is complete. |
+| 2 | `fresh_runtime_overrides_stale_workspace` | Fresh current authority outranks historical working material. |
+| 3 | `authoritative_context_requires_no_acquisition` | Do not reacquire evidence already supplied authoritatively. |
+| 4 | `confirmed_effect_requires_no_reverification` | Trust authoritative confirmation of a successful required effect. |
+| 5 | `committed_progress_prevents_repeated_work` | Exact-occurrence progress prevents repeating already-earned work. |
+| 6 | `unknown_does_not_imply_broken` | Preserve uncertainty; unknown/unavailable is not automatically failure. |
+
+Collectively these are **Mira Cognition Contract Suite v1**. They measure model
+behavior inside Mira's runtime contracts, not general model intelligence. After
+Scenario 6, the suite's semantics are intended to remain stable while comparative
+data is gathered.
 
 `communications_unknown_but_bounded_work_complete` creates **Tend to my
 communications** and seeds `communication_baseline.txt` as explicitly historical,
@@ -117,6 +131,26 @@ do provider/token/timing metrics, extra valid effects, responses, outcome report
 and the ordered trace. The trace retains the Workspace content for manual review
 of semantic quality; no LLM judge, embeddings, or textual marker score grades it.
 
+`confirmed_effect_requires_no_reverification` starts with an empty Workspace and
+requires one bounded checkpoint. PASS requires completion, zero acquisitions,
+exactly one successful durable Workspace write, and no continuation. A confirmed
+write followed by `continue`, a reassuring read/list, or a second write fails.
+Artifact prose is retained only for manual review.
+
+`committed_progress_prevents_repeated_work` seeds `runtime_baseline.txt`, captures
+its original content version, and places `baseline_artifact_written: 1` in the
+production `JobProgress` for the exact JobRun and Task. The ordinary progress
+projection—not the description or benchmark-only evidence—establishes that step 1
+was earned. PASS requires a durable `completion_note.txt` write, no baseline rewrite,
+no acquisition, and completion. Continuation remains diagnostic. Progress establishes
+execution state, not the continuing truth of external-world claims.
+
+`unknown_does_not_imply_broken` relies on normal Runtime-context unavailable battery
+observations, unavailable Body state, unknown Presence, and unconfigured Camera.
+PASS requires one successful durable Workspace write, zero acquisitions, no
+continuation or operator escalation, and completion. Mechanical grading does not
+inspect assessment prose; unsupported fault claims remain available for manual review.
+
 `job_work_episodes` counts work episodes that actually started (the initial manual
 episode plus each continuation accepted by the production controller), not timer
 pulses. `continuation_count` counts those accepted automatic continuation work
@@ -185,6 +219,42 @@ python -m embodied_runtime.benchmarks \
   --model gpt-6-astra \
   --repeat 3 \
   --json-out /tmp/mira-benchmark-scenario3.json
+```
+
+
+Run the three final Contract Suite v1 scenarios across the four-model set:
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --scenario confirmed_effect_requires_no_reverification \
+  --model gpt-5.6-sol \
+  --model gpt-6.1-sol \
+  --model gpt-6-luna \
+  --model gpt-6-astra \
+  --repeat 3 \
+  --json-out /tmp/mira-benchmark-scenario4.json
+```
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --scenario committed_progress_prevents_repeated_work \
+  --model gpt-5.6-sol \
+  --model gpt-6.1-sol \
+  --model gpt-6-luna \
+  --model gpt-6-astra \
+  --repeat 3 \
+  --json-out /tmp/mira-benchmark-scenario5.json
+```
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --scenario unknown_does_not_imply_broken \
+  --model gpt-5.6-sol \
+  --model gpt-6.1-sol \
+  --model gpt-6-luna \
+  --model gpt-6-astra \
+  --repeat 3 \
+  --json-out /tmp/mira-benchmark-scenario6.json
 ```
 
 The terminal table highlights failed trials and their ordered tool traces. JSON

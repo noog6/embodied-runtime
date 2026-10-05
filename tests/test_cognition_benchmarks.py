@@ -7,8 +7,10 @@ import unittest
 
 from embodied_runtime.app import JOB_OUTCOME_EVALUATION_REQUEST
 from embodied_runtime.benchmarks import (
-    AUTHORITATIVE_CONTEXT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID,
-    RecordingCognitionBackend, SCENARIO_ID, run_benchmark, run_trial,
+    AUTHORITATIVE_CONTEXT_SCENARIO_ID, COMMITTED_PROGRESS_SCENARIO_ID,
+    CONFIRMED_EFFECT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID,
+    RecordingCognitionBackend, SCENARIO_ID, UNKNOWN_STATE_SCENARIO_ID,
+    run_benchmark, run_trial,
 )
 from embodied_runtime.benchmarks.models import BenchmarkReport
 from embodied_runtime.benchmarks.scenario import SCENARIOS
@@ -166,6 +168,37 @@ class ContextRestraintBackend(ScriptedBenchmarkBackend):
         return f"performed {action}"
 
 
+class ContractScenarioBackend(ContextRestraintBackend):
+    """Small scripted cognition for the final three contract scenarios."""
+
+    def __init__(self, actions=("write",), outcomes=("completed",),
+                 write_path="assessment.txt"):
+        super().__init__(actions=(), outcomes=outcomes)
+        self.actions = list(actions)
+        self.write_path = write_path
+
+    async def respond(self, message, **kwargs):
+        self.instructions.append(kwargs.get("instructions") or "")
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            return await ScriptedBenchmarkBackend.respond(self, message, **kwargs)
+        if not self.actions:
+            return "bounded work complete"
+        action = self.actions.pop(0)
+        calls = {
+            "inspect": ("inspect_self", '{"area":"runtime"}'),
+            "list": ("workspace_list", '{"directory":"","cursor":null}'),
+            "read": ("workspace_read", '{"path":"runtime_baseline.txt","offset_chars":0}'),
+            "search": ("search_findings", '{"query":"baseline"}'),
+            "write": ("workspace_write", json.dumps({
+                "path": self.write_path, "mode": "upsert",
+                "content": "Bounded assessment from supplied authoritative context.",
+            })),
+        }
+        name, arguments = calls[action]
+        await kwargs["tool_executor"](CognitionToolCall(name, arguments))
+        return f"performed {action}"
+
+
 class RecordingBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegates_and_wraps_the_real_executor_in_order(self):
         class Delegate(TextCognitionBackend):
@@ -279,6 +312,16 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
         )
         self.assertEqual(third.scenario_id, AUTHORITATIVE_CONTEXT_SCENARIO_ID)
+        for scenario_id in (
+            CONFIRMED_EFFECT_SCENARIO_ID, COMMITTED_PROGRESS_SCENARIO_ID,
+            UNKNOWN_STATE_SCENARIO_ID,
+        ):
+            self.assertEqual((await run_trial(
+                ContractScenarioBackend(
+                    write_path=("completion_note.txt" if scenario_id ==
+                                COMMITTED_PROGRESS_SCENARIO_ID else "assessment.txt")
+                ), "fake-model", 1, scenario_id=scenario_id,
+            )).scenario_id, scenario_id)
         with self.assertRaisesRegex(ValueError, "unknown benchmark scenario: missing"):
             await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1,
                             scenario_id="missing")
@@ -664,3 +707,95 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             target = Path(directory) / "result.json"
             target.write_text(first, encoding="utf-8")
             self.assertEqual(json.loads(target.read_text()), decoded)
+
+    async def test_confirmed_effect_clean_path_and_reverification_failures(self):
+        clean = await run_trial(
+            ContractScenarioBackend(), "fake-model", 1,
+            scenario_id=CONFIRMED_EFFECT_SCENARIO_ID,
+        )
+        self.assertTrue(clean.passed, clean.failure_reasons)
+        self.assertEqual((clean.metrics.acquisition_tool_calls,
+                          clean.metrics.effect_tool_calls,
+                          clean.metrics.job_work_episodes,
+                          clean.metrics.continuation_count), (0, 1, 1, 0))
+        for actions, outcomes, reason in (
+            (("write",), ("continue", "completed"), "continuation"),
+            (("write", "write"), ("continue", "completed"), "exactly one"),
+            (("write", "read"), ("continue", "completed"), "acquisition"),
+            (("write", "list"), ("continue", "completed"), "acquisition"),
+            ((), ("completed",), "durable current Workspace update"),
+        ):
+            with self.subTest(actions=actions):
+                result = await run_trial(
+                    ContractScenarioBackend(actions, outcomes), "fake-model", 1,
+                    scenario_id=CONFIRMED_EFFECT_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertTrue(any(reason in item for item in result.failure_reasons))
+
+    async def test_committed_progress_projection_and_remaining_step(self):
+        backend = ContractScenarioBackend(write_path="completion_note.txt")
+        result = await run_trial(
+            backend, "fake-model", 1, scenario_id=COMMITTED_PROGRESS_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        initial = next(text for text in backend.instructions
+                       if "kind: job_run_work" in text)
+        self.assertIn("Current Job progress", initial)
+        self.assertIn("baseline_artifact_written: 1", initial)
+        self.assertNotIn("already", SCENARIOS[COMMITTED_PROGRESS_SCENARIO_ID].description)
+
+        repeated = await run_trial(
+            ContractScenarioBackend(("write", "write"),
+                                    write_path="runtime_baseline.txt"),
+            "fake-model", 1, scenario_id=COMMITTED_PROGRESS_SCENARIO_ID,
+        )
+        self.assertFalse(repeated.passed)
+        self.assertTrue(any("repeated completed" in reason
+                            for reason in repeated.failure_reasons))
+        for action in ("read", "list", "search", "inspect"):
+            result = await run_trial(
+                ContractScenarioBackend((action, "write"),
+                                        write_path="completion_note.txt"),
+                "fake-model", 1, scenario_id=COMMITTED_PROGRESS_SCENARIO_ID,
+            )
+            self.assertFalse(result.passed)
+        continued = await run_trial(
+            ContractScenarioBackend(("write",), ("continue", "completed"),
+                                    "completion_note.txt"),
+            "fake-model", 1, scenario_id=COMMITTED_PROGRESS_SCENARIO_ID,
+        )
+        self.assertTrue(continued.passed, continued.failure_reasons)
+        missing = await run_trial(
+            ContractScenarioBackend(()), "fake-model", 1,
+            scenario_id=COMMITTED_PROGRESS_SCENARIO_ID,
+        )
+        self.assertFalse(missing.passed)
+
+    async def test_unknown_state_context_and_bounded_completion_contract(self):
+        backend = ContractScenarioBackend()
+        clean = await run_trial(
+            backend, "fake-model", 1, scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+        )
+        self.assertTrue(clean.passed, clean.failure_reasons)
+        initial = next(text for text in backend.instructions
+                       if "kind: job_run_work" in text)
+        for marker in ("battery_available: false", "battery_voltage_v: unavailable",
+                       "state: unavailable", "status: unknown", "state: unconfigured"):
+            self.assertIn(marker, initial)
+        for action in ("inspect", "read", "list", "search"):
+            result = await run_trial(
+                ContractScenarioBackend((action, "write")), "fake-model", 1,
+                scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+            )
+            self.assertFalse(result.passed)
+        continued = await run_trial(
+            ContractScenarioBackend(("write",), ("continue", "completed")),
+            "fake-model", 1, scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+        )
+        self.assertFalse(continued.passed)
+        missing = await run_trial(
+            ContractScenarioBackend(()), "fake-model", 1,
+            scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+        )
+        self.assertFalse(missing.passed)

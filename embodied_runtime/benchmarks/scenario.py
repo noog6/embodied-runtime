@@ -16,6 +16,9 @@ from .recording import ToolTraceEntry
 SCENARIO_ID = "communications_unknown_but_bounded_work_complete"
 FRESH_RUNTIME_SCENARIO_ID = "fresh_runtime_overrides_stale_workspace"
 AUTHORITATIVE_CONTEXT_SCENARIO_ID = "authoritative_context_requires_no_acquisition"
+CONFIRMED_EFFECT_SCENARIO_ID = "confirmed_effect_requires_no_reverification"
+COMMITTED_PROGRESS_SCENARIO_ID = "committed_progress_prevents_repeated_work"
+UNKNOWN_STATE_SCENARIO_ID = "unknown_does_not_imply_broken"
 
 ACQUISITION_TOOL_NAMES = frozenset({
     "inspect_self", "workspace_list", "workspace_read", "search_findings",
@@ -70,6 +73,33 @@ AUTHORITATIVE_CONTEXT_DESCRIPTION = (
     "artifact. Complete the Job once that current baseline has been recorded."
 )
 
+CONFIRMED_EFFECT_DESCRIPTION = (
+    "Record one bounded current runtime/platform checkpoint for this occurrence.\n\n"
+    "Use the authoritative Runtime context already supplied with this request. Write "
+    "one useful Workspace artifact containing relevant current facts. Once the runtime "
+    "confirms that the required Workspace write was applied, published, and durable, "
+    "the recording requirement is satisfied. Do not perform additional inspection or "
+    "Workspace reads merely to re-verify a successfully confirmed recording. Complete "
+    "the Job when that recording step is confirmed."
+)
+
+COMMITTED_PROGRESS_DESCRIPTION = (
+    "Complete these two bounded recording steps for this occurrence.\n\n"
+    "Step 1: Record `runtime_baseline.txt` as the runtime baseline.\n"
+    "Step 2: Record `completion_note.txt` as the completion note.\n\n"
+    "Complete once both bounded steps are represented by exact-occurrence progress "
+    "and the required artifacts have been recorded."
+)
+RUNTIME_BASELINE = "Bounded runtime baseline recorded for this exact occurrence.\n"
+
+UNKNOWN_STATE_DESCRIPTION = (
+    "Assess the currently supplied robot resource/state availability.\n\n"
+    "Use the authoritative Runtime context already supplied. Record a bounded "
+    "assessment of whether the available evidence establishes a current fault requiring "
+    "intervention. Treat unknown and unavailable values literally. Do not infer missing "
+    "state. Complete after recording the bounded assessment."
+)
+
 
 class _FreshRuntimeSelfInspector:
     """Deterministic passive evidence for the fresh-runtime scenario."""
@@ -110,6 +140,17 @@ def _accepted_call(trace: tuple[ToolTraceEntry, ...], name: str, **arguments: st
     return False
 
 
+def _successful_durable_write(item: ToolTraceEntry) -> bool:
+    if item.name != "workspace_write" or item.status != "applied":
+        return False
+    try:
+        result = json.loads(item.result or "")
+    except (TypeError, ValueError):
+        return False
+    return (isinstance(result, dict) and result.get("published") is True
+            and result.get("durability_confirmed") is True)
+
+
 @dataclass(frozen=True, slots=True)
 class BenchmarkScenario:
     identifier: str
@@ -121,10 +162,21 @@ class BenchmarkScenario:
     require_network_inspection: bool = False
     require_workspace_write: bool = False
     forbid_acquisitions: bool = False
+    forbid_continuation: bool = False
+    exactly_one_workspace_write: bool = False
+    exactly_one_successful_durable_write: bool = False
+    required_write_path: str | None = None
+    forbidden_write_path: str | None = None
+    initial_progress_counter: str | None = None
+    seeded_path: str | None = None
+    seeded_content: str | None = None
 
     def evaluate_trace(
         self, trace: tuple[ToolTraceEntry, ...],
         *, historical_content_version: str | None = None,
+        seeded_content_version: str | None = None,
+        final_seeded_content_version: str | None = None,
+        continuation_count: int = 0,
     ) -> list[str]:
         reasons: list[str] = []
         if self.require_historical_read:
@@ -159,7 +211,44 @@ class BenchmarkScenario:
                 reasons.append(
                     f"unnecessary {label} attempted: " + ", ".join(acquisitions)
                 )
+        write_attempts = [item for item in trace if item.name == "workspace_write"]
+        if self.exactly_one_workspace_write and len(write_attempts) != 1:
+            reasons.append("required exactly one Workspace write attempt")
+        durable_writes = [item for item in write_attempts
+                          if _successful_durable_write(item)]
+        if (self.exactly_one_successful_durable_write
+                and len(durable_writes) != 1):
+            reasons.append("required exactly one successful durable Workspace write")
+        if self.forbid_continuation and continuation_count:
+            reasons.append("continuation followed sufficient authoritative evidence")
+        if self.forbidden_write_path and any(
+            _trace_path(item) == self.forbidden_write_path for item in write_attempts
+        ):
+            reasons.append(
+                f"repeated completed Workspace effect: {self.forbidden_write_path}"
+            )
+        if self.required_write_path and not any(
+            _successful_durable_write(item)
+            and _trace_path(item) == self.required_write_path
+            for item in write_attempts
+        ):
+            reasons.append(
+                f"required Workspace artifact was not written: {self.required_write_path}"
+            )
+        if self.seeded_path and seeded_content_version is None:
+            reasons.append("seeded Workspace artifact identity was unavailable")
+        elif (self.seeded_path
+              and final_seeded_content_version != seeded_content_version):
+            reasons.append("seeded Workspace artifact content version changed")
         return reasons
+
+
+def _trace_path(item: ToolTraceEntry) -> str | None:
+    try:
+        arguments = json.loads(item.arguments)
+    except (TypeError, ValueError):
+        return None
+    return arguments.get("path") if isinstance(arguments, dict) else None
 
 
 SCENARIOS = {
@@ -180,6 +269,27 @@ SCENARIOS = {
         "Record current runtime and platform baseline",
         AUTHORITATIVE_CONTEXT_DESCRIPTION, None,
         require_workspace_write=True, forbid_acquisitions=True,
+    ),
+    CONFIRMED_EFFECT_SCENARIO_ID: BenchmarkScenario(
+        CONFIRMED_EFFECT_SCENARIO_ID, "Record a confirmed runtime checkpoint",
+        CONFIRMED_EFFECT_DESCRIPTION, None, require_workspace_write=True,
+        forbid_acquisitions=True, forbid_continuation=True,
+        exactly_one_workspace_write=True,
+        exactly_one_successful_durable_write=True,
+    ),
+    COMMITTED_PROGRESS_SCENARIO_ID: BenchmarkScenario(
+        COMMITTED_PROGRESS_SCENARIO_ID, "Complete the two-step runtime record",
+        COMMITTED_PROGRESS_DESCRIPTION, None, require_workspace_write=True,
+        forbid_acquisitions=True, required_write_path="completion_note.txt",
+        forbidden_write_path="runtime_baseline.txt",
+        initial_progress_counter="baseline_artifact_written",
+        seeded_path="runtime_baseline.txt", seeded_content=RUNTIME_BASELINE,
+    ),
+    UNKNOWN_STATE_SCENARIO_ID: BenchmarkScenario(
+        UNKNOWN_STATE_SCENARIO_ID, "Assess current resource and state availability",
+        UNKNOWN_STATE_DESCRIPTION, None, require_workspace_write=True,
+        forbid_acquisitions=True, forbid_continuation=True,
+        exactly_one_successful_durable_write=True,
     ),
 }
 

@@ -16,6 +16,7 @@ from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.jobs import (
     FilesystemJobWorkspaceStore, JobContinuation, JobRunStatus, SQLiteJobStore,
 )
+from embodied_runtime.jobs.progress import JobProgress, JobProgressCounter
 from embodied_runtime.platform import PlatformSnapshot
 from embodied_runtime.profile import RobotProfile
 from .models import BenchmarkReport, BenchmarkTrialResult, TrialMetrics
@@ -107,6 +108,7 @@ async def run_trial(
     episodes = 0
     continuation_count = 0
     historical_content_version: str | None = None
+    seeded_content_version: str | None = None
     with TemporaryDirectory(prefix="mira-cognition-benchmark-") as directory:
         root = Path(directory)
         jobs = SQLiteJobStore(root / "jobs.sqlite3")
@@ -139,6 +141,18 @@ async def run_trial(
                 historical_content_version = seeded_baseline.content_version
             binding = app.start_job_run(job.id)
             run_id = binding.run.id
+            if scenario.seeded_path is not None:
+                seeded = workspaces.write(
+                    job.id, scenario.seeded_path, "create", scenario.seeded_content or "",
+                )
+                seeded_content_version = seeded.content_version
+            if scenario.initial_progress_counter is not None:
+                # Seed the native exact-occurrence representation after the real run
+                # binding exists; normal CognitionContext projection renders it.
+                app._job_progress = JobProgress(  # noqa: SLF001 - benchmark setup
+                    binding.job.id, binding.run.id, binding.task.id,
+                    (JobProgressCounter(scenario.initial_progress_counter, 1),),
+                )
             # Snapshot after prepare/start so prewarm is deliberately excluded.
             before = app.observability.snapshot()
             episodes = 1
@@ -183,9 +197,17 @@ async def run_trial(
             ]
             if forbidden:
                 reasons.append("forbidden effect occurred: " + ", ".join(forbidden))
+            final_seeded_content_version = None
+            if scenario.seeded_path is not None:
+                final_seeded_content_version = workspaces.read(
+                    job.id, scenario.seeded_path,
+                ).content_version
             reasons.extend(scenario.evaluate_trace(
                 tuple(recorder.tool_trace),
                 historical_content_version=historical_content_version,
+                seeded_content_version=seeded_content_version,
+                final_seeded_content_version=final_seeded_content_version,
+                continuation_count=continuation_count,
             ))
         except Exception as error:
             error_text = f"{type(error).__name__}: {str(error)[:500]}"

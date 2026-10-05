@@ -4,13 +4,16 @@ from .models import BenchmarkReport, BenchmarkTrialResult, TrialMetrics
 from .recording import RecordingCognitionBackend
 from .runner import render_report, run_benchmark, run_trial
 from .scenario import (
-    AUTHORITATIVE_CONTEXT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID, SCENARIOS,
-    SCENARIO_ID,
+    AUTHORITATIVE_CONTEXT_SCENARIO_ID, COMMITTED_PROGRESS_SCENARIO_ID,
+    CONFIRMED_EFFECT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID, SCENARIOS,
+    SCENARIO_ID, UNKNOWN_STATE_SCENARIO_ID,
 )
 
 __all__ = [
     "BenchmarkReport", "BenchmarkTrialResult", "RecordingCognitionBackend",
-    "AUTHORITATIVE_CONTEXT_SCENARIO_ID", "FRESH_RUNTIME_SCENARIO_ID", "SCENARIOS",
+    "AUTHORITATIVE_CONTEXT_SCENARIO_ID", "COMMITTED_PROGRESS_SCENARIO_ID",
+    "CONFIRMED_EFFECT_SCENARIO_ID", "FRESH_RUNTIME_SCENARIO_ID", "SCENARIOS",
+    "UNKNOWN_STATE_SCENARIO_ID",
     "SCENARIO_ID", "TrialMetrics",
     "render_report", "run_benchmark", "run_trial",
 ]
