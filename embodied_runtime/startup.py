@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 
 from embodied_runtime.cli import parse_launch_arguments, validate_launch_dependencies
 from embodied_runtime.config import ConfigurationError, LaunchConfiguration
@@ -126,7 +127,7 @@ _SERVICE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _ENVIRONMENT_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
 TWILIO_ENVIRONMENT = (
     "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
-    "MIRA_SMS_OPERATOR_NUMBER", "TWILIO_WEBHOOK_URL",
+    "MIRA_SMS_OPERATOR_NUMBER", "TWILIO_WEBHOOK_URL", "TWILIO_PUBLIC_MEDIA_BASE_URL",
 )
 _HOSTNAME = re.compile(
     r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -319,6 +320,7 @@ def environment_presence(
     result = {name: bool(environ.get(name)) for name in required_environment(deployment)}
     if deployment.with_ngrok:
         result["TWILIO_WEBHOOK_URL"] = True  # deterministically derived
+        result["TWILIO_PUBLIC_MEDIA_BASE_URL"] = True
         result["NGROK_AUTHTOKEN"] = bool(environ.get("NGROK_AUTHTOKEN"))
     return result
 
@@ -349,9 +351,13 @@ def serialize_environment(
     for name in required_environment(deployment):
         if not _ENVIRONMENT_NAME.fullmatch(name):
             raise StartupError(f"unsafe environment variable name: {name!r}")
-        value = (deployment.public_webhook_url
-                 if name == "TWILIO_WEBHOOK_URL" and deployment.with_ngrok
-                 else environ.get(name))
+        if deployment.with_ngrok and name == "TWILIO_WEBHOOK_URL":
+            value = deployment.public_webhook_url
+        elif deployment.with_ngrok and name == "TWILIO_PUBLIC_MEDIA_BASE_URL":
+            parsed = urlsplit(deployment.public_webhook_url)
+            value = f"{parsed.scheme}://{parsed.netloc}"
+        else:
+            value = environ.get(name)
         if not value:
             raise StartupError(f"required environment variable is missing: {name}")
         if any(character in value for character in ("\x00", "\n", "\r")):

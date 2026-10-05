@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import logging
 import os
 import re
+import secrets
+import time
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -20,6 +22,9 @@ from embodied_runtime.attachments import (
 from embodied_runtime.interaction import (
     InteractionCadence, InteractionChannel, InteractionContext,
     InteractionInitiator, InteractionMode, OperatorMessage, OperatorMessageSink,
+)
+from embodied_runtime.outbound_images import (
+    ImageDeliveryEvidence, MAX_OUTBOUND_IMAGE_BYTES, OutboundImage,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -40,6 +45,10 @@ _REQUIRED_ENV = (
     "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
     "MIRA_SMS_OPERATOR_NUMBER", "TWILIO_WEBHOOK_URL",
 )
+OUTBOUND_MEDIA_TTL_SECONDS = 15 * 60
+OUTBOUND_MEDIA_MAX_ITEMS = 4
+OUTBOUND_MEDIA_MAX_BYTES = 12 * 1024 * 1024
+OUTBOUND_MEDIA_PATH = "/outbound-media/"
 
 
 class SmsConfigurationError(ValueError):
@@ -60,6 +69,7 @@ class TwilioSmsSettings:
     bind_host: str
     bind_port: int
     webhook_path: str
+    public_media_base_url: str | None = None
 
     @classmethod
     def from_environment(
@@ -84,10 +94,20 @@ class TwilioSmsSettings:
                 "TWILIO_WEBHOOK_URL must be HTTPS with the configured webhook path "
                 "and no credentials, query, or fragment"
             )
+        media_base = values.get("TWILIO_PUBLIC_MEDIA_BASE_URL", "").strip() or None
+        if media_base is not None:
+            media_url = urlsplit(media_base)
+            if (media_url.scheme != "https" or not media_url.netloc or media_url.path not in ("", "/")
+                    or media_url.query or media_url.fragment or media_url.username
+                    or media_url.password):
+                raise SmsConfigurationError(
+                    "TWILIO_PUBLIC_MEDIA_BASE_URL must be an HTTPS origin without a path"
+                )
+            media_base = media_base.rstrip("/")
         return cls(
             values["TWILIO_ACCOUNT_SID"], values["TWILIO_AUTH_TOKEN"],
             twilio_number, operator_number, webhook_url, bind_host, bind_port,
-            webhook_path,
+            webhook_path, media_base,
         )
 
 
@@ -240,6 +260,53 @@ class SmsSender(Protocol):
     def send(self, *, from_: str, to: str, body: str) -> None: ...
 
 
+@dataclass(slots=True)
+class _StagedImage:
+    data: bytes
+    expires_at: float
+
+
+class OutboundMediaStore:
+    """Small in-memory bearer store; it never exposes paths or directory listings."""
+
+    def __init__(self, *, ttl_seconds: float = OUTBOUND_MEDIA_TTL_SECONDS,
+                 max_items: int = OUTBOUND_MEDIA_MAX_ITEMS,
+                 max_bytes: int = OUTBOUND_MEDIA_MAX_BYTES,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.max_items = max_items
+        self.max_bytes = max_bytes
+        self._clock = clock
+        self._items: dict[str, _StagedImage] = {}
+
+    def expire(self) -> None:
+        now = self._clock()
+        for token in tuple(self._items):
+            if self._items[token].expires_at <= now:
+                del self._items[token]
+
+    def stage(self, data: bytes) -> str:
+        self.expire()
+        if (not data or len(data) > MAX_OUTBOUND_IMAGE_BYTES
+                or len(self._items) >= self.max_items
+                or sum(len(item.data) for item in self._items.values()) + len(data) > self.max_bytes):
+            raise RuntimeError("outbound media staging capacity unavailable")
+        token = secrets.token_urlsafe(32)
+        self._items[token] = _StagedImage(bytes(data), self._clock() + self.ttl_seconds)
+        return token
+
+    def get(self, token: str) -> bytes | None:
+        self.expire()
+        item = self._items.get(token)
+        return None if item is None else item.data
+
+    def remove(self, token: str) -> None:
+        self._items.pop(token, None)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+
 @dataclass(frozen=True, slots=True)
 class _Acceptance:
     status: int
@@ -276,6 +343,12 @@ class TwilioSmsGateway:
     def send(self, *, from_: str, to: str, body: str) -> None:
         self._client.messages.create(from_=from_, to=to, body=body)
 
+    def send_media(self, *, from_: str, to: str, body: str,
+                   media_url: str) -> Any:
+        return self._client.messages.create(
+            from_=from_, to=to, body=body or None, media_url=[media_url]
+        )
+
 
 class TwilioSmsService(OperatorMessageSink):
     """Own one aiohttp endpoint, bounded FIFO, dedupe cache, and worker."""
@@ -286,6 +359,7 @@ class TwilioSmsService(OperatorMessageSink):
         *, gateway: SmsSender | Any | None = None,
         media_downloader: MediaDownloader | None = None,
         inbox_size: int = SMS_INBOX_SIZE, dedupe_size: int = SMS_DEDUPE_SIZE,
+        outbound_media: OutboundMediaStore | None = None,
     ) -> None:
         self.settings = settings
         self._request_cognition = request_cognition
@@ -298,6 +372,43 @@ class TwilioSmsService(OperatorMessageSink):
         self._runner: Any = None
         self._worker: asyncio.Task[None] | None = None
         self._accepting = False
+        self._outbound_media = outbound_media or OutboundMediaStore()
+
+    @property
+    def image_delivery_available(self) -> bool:
+        return bool(self._accepting and self._gateway is not None
+                    and self.settings.public_media_base_url)
+
+    async def deliver_image(self, image: OutboundImage) -> ImageDeliveryEvidence:
+        """Stage and submit exactly one JPEG to the configured operator."""
+        if not self.image_delivery_available:
+            raise RuntimeError("outbound MMS is not configured or ready")
+        if image.media_type != "image/jpeg" or not image.data.startswith(b"\xff\xd8\xff"):
+            raise ValueError("outbound MMS requires a valid JPEG image")
+        if not image.data or len(image.data) > MAX_OUTBOUND_IMAGE_BYTES:
+            raise ValueError("outbound image exceeds the byte limit")
+        caption = image.caption.strip()
+        token = self._outbound_media.stage(image.data)
+        media_url = f"{self.settings.public_media_base_url}{OUTBOUND_MEDIA_PATH}{token}.jpg"
+        try:
+            response = await asyncio.to_thread(
+                self._gateway.send_media, from_=self.settings.twilio_number,
+                to=self.settings.operator_number, body=caption, media_url=media_url,
+            )
+        except asyncio.CancelledError:
+            # Submission may already have happened in the worker thread. Retain media
+            # for the fetch window and do not invite an automatic duplicate.
+            raise
+        except (TimeoutError, asyncio.TimeoutError):
+            # A transport timeout can happen after Twilio accepted the POST. Keep
+            # the bearer alive and report uncertainty; never invite an automatic retry.
+            return ImageDeliveryEvidence("uncertain")
+        except Exception:
+            self._outbound_media.remove(token)
+            raise
+        return ImageDeliveryEvidence(
+            "accepted", getattr(response, "sid", None), getattr(response, "status", None)
+        )
 
     @property
     def channel(self) -> InteractionChannel:
@@ -363,6 +474,8 @@ class TwilioSmsService(OperatorMessageSink):
             self._gateway = TwilioSmsGateway(self.settings)
         app = web.Application()
         app.router.add_post(self.settings.webhook_path, self._handle_webhook)
+        app.router.add_route("GET", OUTBOUND_MEDIA_PATH + "{token}.jpg", self._serve_media)
+        app.router.add_route("HEAD", OUTBOUND_MEDIA_PATH + "{token}.jpg", self._serve_media)
         runner = web.AppRunner(app)
         await runner.setup()
         try:
@@ -391,6 +504,23 @@ class TwilioSmsService(OperatorMessageSink):
             await asyncio.gather(worker, return_exceptions=True)
         if runner is not None or worker is not None:
             LOGGER.info("[SMS] status=stopped")
+        self._outbound_media.clear()
+
+    async def _serve_media(self, request: Any) -> Any:
+        from aiohttp import web
+        token = request.match_info.get("token", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token):
+            return web.Response(status=404)
+        data = self._outbound_media.get(token)
+        if data is None:
+            return web.Response(status=404)
+        return web.Response(
+            body=None if request.method == "HEAD" else data,
+            content_type="image/jpeg",
+            headers={"Content-Length": str(len(data)),
+                     "Content-Disposition": 'inline; filename="camera.jpg"',
+                     "Cache-Control": "private, max-age=0, no-store"},
+        )
 
     async def _handle_webhook(self, request: Any) -> Any:
         from aiohttp import web

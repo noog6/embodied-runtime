@@ -1,5 +1,13 @@
 # Architecture
 
+Outbound images use two separate lifetimes. An operator episode owns an opaque
+image reference and exact camera bytes only long enough to authorize its single
+delivery effect. The transport copies those bytes into a bounded, short-lived
+bearer store so Twilio can fetch them after the episode closes. Neither image bytes
+nor bearer URLs enter model results, working memory, conversation history, or
+ordinary logs. Source metadata remains independent of delivery so a future
+Workspace source need not pretend to be a live observation.
+
 ## Semantic earcons
 
 > **Earcons communicate operator-relevant semantic state transitions. They are

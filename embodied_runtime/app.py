@@ -97,6 +97,9 @@ from embodied_runtime.memory import (
 )
 from embodied_runtime.observations import SemanticObservation, SemanticObservationFact
 from embodied_runtime.observability import RunObservability
+from embodied_runtime.outbound_images import (
+    MAX_IMAGE_CAPTION_CHARS, MAX_OUTBOUND_IMAGE_BYTES, OutboundImage, RetainedImage,
+)
 from embodied_runtime.inspection import (
     HostSelfInspector, SELF_INSPECTION_AREAS, SelfInspectionFact,
     SelfInspectionResult, SelfInspector,
@@ -684,6 +687,29 @@ OBSERVE_SCENE_TOOL = CognitionToolDefinition(
         "additionalProperties": False,
     },
 )
+
+CAPTURE_CAMERA_IMAGE_TOOL = CognitionToolDefinition(
+    name="capture_camera_image",
+    description=("Capture and retain exactly one fresh camera JPEG for this operator "
+                 "episode. This does not interpret or send the image."),
+    parameters={"type": "object", "properties": {}, "required": [],
+                "additionalProperties": False},
+)
+
+
+def deliver_image_tool(destinations: Sequence[OperatorDeliveryDestination]) -> CognitionToolDefinition:
+    return CognitionToolDefinition(
+        name="deliver_image",
+        description=("Send one exact image_ref captured in this operator episode to an "
+                     "offered runtime-owned destination. Use only when explicitly requested. "
+                     "Provider acceptance is not handset receipt."),
+        parameters={"type": "object", "properties": {
+            "image_ref": {"type": "string"},
+            "destination": {"type": "string", "enum": [item.name for item in destinations]},
+            "caption": {"type": "string", "maxLength": MAX_IMAGE_CAPTION_CHARS},
+        }, "required": ["image_ref", "destination", "caption"],
+            "additionalProperties": False},
+    )
 
 RECALL_MEMORY_TOOL = CognitionToolDefinition(
     name="recall_memory",
@@ -4179,6 +4205,7 @@ class RobotApplication:
         acquisitions: list[InitiativeAcquisitionOutcome] = []
         acquisition_requests: dict[tuple[str, str], CognitionToolResult] = {}
         report_references: dict[str, RetainedReportSnapshot] = {}
+        image_references: dict[str, RetainedImage] = {}
         delivery_destinations = self._operator_delivery_routes.destinations
         stage_name = "initial"
         try:
@@ -4252,6 +4279,10 @@ class RobotApplication:
                         elif call.name == OBSERVE_SCENE_TOOL.name:
                             result, perception = await self._execute_visual_perception(call)
                             inspection = None
+                        elif call.name == CAPTURE_CAMERA_IMAGE_TOOL.name:
+                            result = self._execute_camera_image_capture(
+                                call, image_references, episode.id)
+                            inspection = perception = None
                         elif call.name == INSPECT_RUN_HISTORY_TOOL.name:
                             result = self._execute_run_history_inspection(
                                 call, episode_id=episode.id)
@@ -4301,6 +4332,11 @@ class RobotApplication:
                         if call.name == "deliver_message":
                             result = await self._execute_deliver_message(
                                 call, tools, delivery_destinations,
+                                episode.trigger_source, episode_id=episode.id,
+                            )
+                        elif call.name == "deliver_image":
+                            result = await self._execute_deliver_image(
+                                call, tools, delivery_destinations, image_references,
                                 episode.trigger_source, episode_id=episode.id,
                             )
                         elif call.name == "deliver_report":
@@ -4474,9 +4510,16 @@ class RobotApplication:
     ) -> tuple[CognitionToolDefinition, ...]:
         destinations = tuple(delivery_destinations or ())
         tools = self.cognition_tools()
+        media_destinations = tuple(item for item in destinations
+            if (route := self._operator_delivery_routes.resolve(item.name)) is not None
+            and bool(getattr(route.sink, "image_delivery_available", False)))
+        if media_destinations and self._camera_capture_available():
+            tools = (*tools, CAPTURE_CAMERA_IMAGE_TOOL)
         if destinations:
             tools = (*tools, deliver_message_tool(destinations),
                      deliver_report_tool(destinations))
+        if media_destinations:
+            tools = (*tools, deliver_image_tool(media_destinations))
         if acquisitions_used >= 2:
             return tuple(tool for tool in tools
                          if tool.name not in self._acquisition_tool_names())
@@ -4521,6 +4564,7 @@ class RobotApplication:
                 "These available effects are destinations to which the operator may explicitly request content be delivered.",
                 "Use deliver_message only when the current request explicitly requests or clearly authorizes delivery.",
                 "Use deliver_report only for an exact report_ref acquired in this episode; never reproduce its body as a message argument.",
+                "For a requested camera picture, use capture_camera_image and then deliver_image with its exact image_ref. Capture alone never authorizes delivery and no visual interpretation is needed.",
                 "The destination is semantic and runtime-owned; do not invent account, recipient, transport, or credential identifiers.",
                 "Write a self-contained message suitable for its destination; the console is plain text and has no assumed Markdown rendering.",
                 "Delivery is separate from the current dialogue response and does not change that response's medium.",
@@ -5598,6 +5642,7 @@ class RobotApplication:
     def _acquisition_tool_names() -> tuple[str, ...]:
         return (INSPECT_SELF_TOOL.name, *(tool.name for tool in DIAGNOSTIC_TOOLS),
                 OBSERVE_SCENE_TOOL.name,
+                CAPTURE_CAMERA_IMAGE_TOOL.name,
                 RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name,
                 INSPECT_JOB_RESULT_TOOL.name, RETRIEVE_REPORT_TOOL.name,
                 SEARCH_FINDINGS_TOOL.name,
@@ -5744,6 +5789,85 @@ class RobotApplication:
             and camera is not None and camera.is_running
             and self._visual_perception_backend is not None
         )
+
+    def _camera_capture_available(self) -> bool:
+        camera = self.camera_backend
+        return self.state is LifecycleState.RUNNING and camera is not None and camera.is_running
+
+    def _execute_camera_image_capture(
+        self, call: CognitionToolCall, references: dict[str, RetainedImage], episode_id: int,
+    ) -> CognitionToolResult:
+        """Capture once under the canonical lease and retain bytes only in this episode."""
+        try:
+            self._tool_arguments(call, set())
+            if not self._camera_capture_available():
+                raise RuntimeError("camera capture is not available")
+            frame = self._capture_camera_frame_for_owner(CAMERA_CAPTURE_OWNER)
+            if (frame.media_type != "image/jpeg" or not frame.data.startswith(b"\xff\xd8\xff")
+                    or not frame.data or len(frame.data) > MAX_OUTBOUND_IMAGE_BYTES):
+                raise ValueError("camera returned an unsupported or oversized image")
+            reference = "img_" + secrets.token_urlsafe(18)
+            captured_at = datetime.fromtimestamp(frame.captured_at_ns / 1_000_000_000, UTC)
+            references[reference] = RetainedImage(
+                reference, episode_id, bytes(frame.data), frame.media_type,
+                frame.width, frame.height, "camera", captured_at,
+            )
+            result = {"status": "applied", "image_ref": reference,
+                      "media_type": frame.media_type, "width": frame.width,
+                      "height": frame.height, "byte_size": len(frame.data),
+                      "source": "camera", "captured_at": captured_at.isoformat()}
+        except ResourceBusyError:
+            result = {"status": "rejected", "reason": "camera_busy"}
+        except Exception as error:
+            result = {"status": "rejected", "reason": str(error)}
+        LOGGER.info("[CAMERA] episode=E%s purpose=outbound_image status=%s",
+                    episode_id, result["status"])
+        return CognitionToolResult(json.dumps(result, sort_keys=True))
+
+    async def _execute_deliver_image(
+        self, call: CognitionToolCall, available: tuple[CognitionToolDefinition, ...],
+        authorized: Sequence[OperatorDeliveryDestination],
+        references: dict[str, RetainedImage], source: str, *, episode_id: int,
+    ) -> CognitionToolResult:
+        try:
+            if not any(item.name == call.name for item in available):
+                raise RuntimeError("tool is not available")
+            arguments = self._tool_arguments(call, {"image_ref", "destination", "caption"})
+            reference, destination, caption = (arguments[name] for name in
+                                                 ("image_ref", "destination", "caption"))
+            if not all(type(value) is str for value in (reference, destination, caption)):
+                raise ValueError("image delivery arguments must be strings")
+            caption = caption.strip()
+            if len(caption) > MAX_IMAGE_CAPTION_CHARS or any(
+                    unicodedata.category(char) == "Cc" for char in caption):
+                raise ValueError("caption is invalid")
+            image = references.get(reference)
+            if image is None or image.episode_id != episode_id:
+                raise ValueError("image_ref is unknown, expired, or from another episode")
+            projected = {item.name: item for item in authorized}
+            if destination not in projected:
+                raise ValueError("destination is not authorized for this operator stage")
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("operator delivery requires a running application")
+            route = self._operator_delivery_routes.resolve(destination)
+            if (route is None or route.destination.channel != projected[destination].channel
+                    or route.sink.channel != route.destination.channel
+                    or not getattr(route.sink, "image_delivery_available", False)):
+                raise RuntimeError("image delivery destination is no longer available")
+            evidence = await route.sink.deliver_image(
+                OutboundImage(image.data, image.media_type, caption))
+            result = {"status": "applied", "destination": destination,
+                      "submission": evidence.status,
+                      "provider_status": evidence.provider_status,
+                      "provider_reference": evidence.provider_reference,
+                      "handset_receipt": "unconfirmed"}
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            result = {"status": "rejected", "reason": str(error)}
+        LOGGER.info("[INTERACTION] episode=E%s mode=image_delivery source=%s status=%s",
+                    episode_id, source, result["status"])
+        return CognitionToolResult(json.dumps(result, sort_keys=True))
 
     async def _execute_cognition_tool(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,

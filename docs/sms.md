@@ -1,5 +1,36 @@
 # Twilio SMS and inbound MMS images
 
+## Outbound camera pictures
+
+When a camera and SMS are enabled, operator dialogue may capture one fresh JPEG and
+send that exact retained frame as an MMS. Capture is a read-only acquisition and
+does not itself authorize sending; delivery is a separate, single operator effect.
+It does not invoke visual interpretation. Provider acceptance only proves that
+Twilio accepted the API request, not that a handset received the message.
+
+Set `TWILIO_PUBLIC_MEDIA_BASE_URL` to the trusted public HTTPS **origin** that maps
+to the SMS HTTP listener (for example, `https://example.ngrok-free.app`, with no
+path). The runtime never derives this origin from request headers. It stages only
+runtime-captured JPEGs at unpredictable bearer URLs under `/outbound-media/` and
+supports Twilio's `GET` and `HEAD` fetches with `image/jpeg`.
+
+Staging is volatile and bounded for small hardware: at most four images and 12 MiB
+total, each no larger than 4 MiB, for 15 minutes. Capacity is rejected rather than
+evicted. Failed provider submissions remove their staged image; accepted or
+uncertain submissions remain for the fetch window. Shutdown removes all bytes and
+nothing is replayed after restart.
+
+Physical acceptance procedure:
+
+1. Configure Twilio and the public HTTPS origin, then expose the existing listener
+   through ngrok.
+2. From SMS, voice, and console in separate turns, ask: “Send me a picture of what
+   you're looking at.”
+3. Verify one MMS arrives at the configured operator number and the normal reply
+   remains on the originating channel.
+4. Test camera contention and a missing public-media setting produce honest
+   failures and no MMS.
+
 SMS is a provider transport mapped to `remote_text`; it is not a new cognition
 authority. A valid Twilio webhook signature authenticates the request received
 from Twilio, not the human holding the originating telephone. P1's transport
