@@ -20,6 +20,10 @@ calls.
 The OpenAI-specific construction is confined to the CLI. The runner accepts any
 `TextCognitionBackend`. Startup/prewarm occurs before the observability baseline,
 so reported provider/token metrics are the scenario delta and exclude prewarm.
+Estimated cost follows that same boundary and excludes startup/prewarm cost. It is
+derived from Mira's versioned built-in public API pricing catalog using Standard
+processing rates; unsupported or unknown pricing is reported as unavailable. This
+is an estimate for comparison and audit, not the billing authority.
 The recording decorator delegates cognition unchanged and wraps the real runtime
 `tool_executor`; it records the request, bounded arguments and results, but does
 not implement tool semantics.
@@ -203,9 +207,11 @@ python -m embodied_runtime.benchmarks \
   --json-out /tmp/mira-benchmark-scenario6.json
 ```
 
-The terminal table highlights failed trials and their ordered tool traces. JSON
-format version `1` contains top-level `created_at`, `scenario_id`, and `trials`.
+The terminal table highlights failed trials and their ordered tool traces, and shows
+per-trial and model estimated costs. JSON format version `2` contains top-level
+`created_at`, `scenario_id`, `pricing_identity`, and `trials`.
 Each trial contains identity, pass/failure/error data, timing, final Job and
-continuation state, metrics, cognition request records, and ordered tool trace.
+continuation state, estimated cost and pricing identity, metrics, cognition request
+records, and ordered tool trace.
 Captured arguments, results, and response text are each limited to 4,000
 characters; credentials and environment variables are never included.

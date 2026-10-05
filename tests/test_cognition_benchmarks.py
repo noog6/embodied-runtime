@@ -10,7 +10,7 @@ from embodied_runtime.benchmarks import (
     AUTHORITATIVE_CONTEXT_SCENARIO_ID, COMMITTED_PROGRESS_SCENARIO_ID,
     CONFIRMED_EFFECT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID,
     RecordingCognitionBackend, SCENARIO_ID, UNKNOWN_STATE_SCENARIO_ID,
-    run_benchmark, run_trial,
+    render_report, run_benchmark, run_trial,
 )
 from embodied_runtime.benchmarks.models import BenchmarkReport
 from embodied_runtime.benchmarks.scenario import SCENARIOS
@@ -73,6 +73,30 @@ class ScriptedBenchmarkBackend(TextCognitionBackend):
             ))
             return "recorded bounded assessment"
         return "bounded work complete"
+
+
+class UsageBenchmarkBackend(ScriptedBenchmarkBackend):
+    identifier = "openai-responses"
+
+    def __init__(self, outcomes=("completed",), *, model="gpt-5.6-sol"):
+        super().__init__(outcomes, workspace=False)
+        self.model = model
+        self.observability = None
+
+    async def prepare(self):
+        self.observability.provider_completed(
+            self.identifier, self.model, "prewarm", input_tokens=100,
+            total_tokens=100,
+        )
+
+    async def respond(self, message, **kwargs):
+        response = await super().respond(message, **kwargs)
+        self.observability.provider_completed(
+            self.identifier, self.model, "benchmark",
+            input_tokens=1_000, cached_input_tokens=100,
+            cache_write_tokens=100, output_tokens=200, total_tokens=1_200,
+        )
+        return response
 
 
 class AuthorityScenarioBackend(ScriptedBenchmarkBackend):
@@ -315,6 +339,47 @@ class FailingContinuationBackend(ScriptedBenchmarkBackend):
 
 
 class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_priced_trial_excludes_prewarm_and_aggregates_requests(self):
+        result = await run_trial(UsageBenchmarkBackend(), "gpt-5.6-sol", 1)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.metrics.provider_requests, 2)
+        # Each measured request costs $0.007740; the $0.000400 prewarm is excluded.
+        self.assertEqual(result.estimated_cost_usd, "0.015480")
+        self.assertEqual(
+            result.pricing_identity, "public-built-in-pricing-2026-10-05",
+        )
+
+    async def test_continuation_and_outcome_requests_aggregate_trial_cost(self):
+        result = await run_trial(
+            UsageBenchmarkBackend(("continue", "completed")), "gpt-5.6-sol", 1,
+        )
+        self.assertTrue(result.passed)
+        self.assertEqual(result.metrics.provider_requests, 4)
+        self.assertEqual(result.estimated_cost_usd, "0.030960")
+
+    async def test_unpriceable_usage_does_not_fail_and_renders_unavailable(self):
+        result = await run_trial(
+            UsageBenchmarkBackend(model="unknown-model"), "unknown-model", 1,
+        )
+        self.assertTrue(result.passed)
+        self.assertIsNone(result.estimated_cost_usd)
+        report = BenchmarkReport(
+            "2026-10-04T12:00:00+00:00", SCENARIO_ID, (result,),
+            result.pricing_identity,
+        )
+        rendered = render_report(report)
+        self.assertIn("est_cost_usd", rendered)
+        self.assertIn("estimated model cost: unavailable", rendered)
+
+    async def test_rendered_model_and_report_totals_sum_trial_estimates(self):
+        report = await run_benchmark(
+            lambda model: UsageBenchmarkBackend(model=model), ["gpt-5.6-sol"], 2,
+        )
+        rendered = render_report(report)
+        self.assertIn("$0.015480", rendered)
+        self.assertIn("estimated model cost: $0.030960", rendered)
+        self.assertIn("estimated report cost: $0.030960", rendered)
+
     async def test_all_scenarios_are_selected_and_unknown_fails_clearly(self):
         first = await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1)
         second = await run_trial(
@@ -890,11 +955,21 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_json_is_deterministic_and_contains_only_plain_values(self):
         trial = await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1)
-        report = BenchmarkReport("2026-10-04T12:00:00+00:00", SCENARIO_ID, (trial,))
+        report = BenchmarkReport(
+            "2026-10-04T12:00:00+00:00", SCENARIO_ID, (trial,),
+            trial.pricing_identity,
+        )
         first = report.to_json()
         self.assertEqual(first, report.to_json())
         decoded = json.loads(first)
-        self.assertEqual(decoded["format_version"], 1)
+        self.assertEqual(decoded["format_version"], 2)
+        self.assertEqual(
+            decoded["pricing_identity"], "public-built-in-pricing-2026-10-05",
+        )
+        self.assertIsNone(decoded["trials"][0]["estimated_cost_usd"])
+        self.assertEqual(
+            decoded["trials"][0]["pricing_identity"], decoded["pricing_identity"],
+        )
         self.assertEqual(decoded["trials"][0]["scenario_id"], SCENARIO_ID)
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "result.json"
