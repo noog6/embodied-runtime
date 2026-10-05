@@ -169,6 +169,22 @@ class GoalApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.active_goal)
         await app.stop()
 
+    async def test_successful_goal_tool_results_project_as_applied(self):
+        app = self.make_app(body=VirtualBodyBackend())
+        await app.start()
+        try:
+            set_result = await app._execute_cognition_tool(CognitionToolCall(
+                "set_goal", '{"description":"projection goal"}'))
+            self.assertEqual(json.loads(set_result.output)["status"], "active")
+            self.assertEqual(app._tool_result_status(set_result), "applied")
+
+            completed_result = await app._execute_cognition_tool(CognitionToolCall(
+                "resolve_goal", '{"outcome":"completed"}'))
+            self.assertEqual(json.loads(completed_result.output)["status"], "completed")
+            self.assertEqual(app._tool_result_status(completed_result), "applied")
+        finally:
+            await app.stop()
+
     async def test_refresh_memory_outcomes_and_final_failure_semantics(self):
         observations = []
         async def set_action(execute, refresh):
