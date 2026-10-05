@@ -1,5 +1,11 @@
 # Secrets and API keys
 
+`TWILIO_PUBLIC_MEDIA_BASE_URL` is optional and is not a secret, but it is trusted
+configuration: set it to the externally reachable HTTPS origin to enable outbound
+MMS media. Existing SMS-only configurations may omit it. Never use
+an inbound `Host` or forwarding header to construct it. Outbound media paths are
+temporary bearer credentials and must be treated as sensitive.
+
 embodied-runtime uses environment variables as its process interface for
 secrets. In particular, OpenAI cognition expects `OPENAI_API_KEY`. An
 environment variable delivers a value to a process; it is not persistent
@@ -215,6 +221,7 @@ export TWILIO_AUTH_TOKEN='...'
 export TWILIO_PHONE_NUMBER='+1...'
 export MIRA_SMS_OPERATOR_NUMBER='+1...'
 export TWILIO_WEBHOOK_URL='https://example.ngrok-free.app/sms'
+export TWILIO_PUBLIC_MEDIA_BASE_URL='https://example.ngrok-free.app'
 ```
 
 ```sh
@@ -229,7 +236,7 @@ Verify presence without printing values:
 
 ```sh
 for name in TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_PHONE_NUMBER \
-    MIRA_SMS_OPERATOR_NUMBER TWILIO_WEBHOOK_URL
+    MIRA_SMS_OPERATOR_NUMBER TWILIO_WEBHOOK_URL TWILIO_PUBLIC_MEDIA_BASE_URL
 do
     if printenv "$name" >/dev/null; then
         echo "$name is set"
