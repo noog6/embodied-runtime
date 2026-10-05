@@ -175,6 +175,13 @@ or cancellation failures. Provider diagnostics use a bounded allowlist; for
 example, recognized `insufficient_credits` and `quota_exceeded` codes are logged
 as `reason=credits_exhausted` without response bodies, headers, or credentials.
 
+For local run-cost estimates, ElevenLabs Flash/Turbo uses the versioned public
+API rate of USD $0.05 per 1,000 billed characters. The provider-reported
+`character-cost` value is preferred when the successful synthesis response exposes a
+valid bounded count; requested text length is the fallback estimate when that metadata
+is absent or invalid. Metadata parsing never determines whether speech succeeds, and
+the estimate remains informational rather than an ElevenLabs invoice.
+
 `elevenlabs_tts_speed` accepts numeric values from `0.7` through `1.2`; values
 above `1.0` speak faster. It is sent as request-level `VoiceSettings(speed=...)`
 and neither changes the saved ElevenLabs voice nor overrides stability,

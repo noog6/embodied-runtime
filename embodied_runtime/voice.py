@@ -788,13 +788,26 @@ class FusionHatElevenLabsTTSProvider:
 
         await _await_owned_blocking_operation(disable_speaker)
         synthesis_started = time.perf_counter()
+        billed_characters = len(text)
+        usage_basis = "text_length_estimate"
         try:
-            audio_chunks = self._client.text_to_speech.convert(
-                voice_id=self._voice_id, text=text, model_id=self._model,
-                output_format="wav_24000",
-                voice_settings=self._voice_settings_type(speed=self._speed),
-            )
-            wav_bytes = b"".join([chunk async for chunk in audio_chunks])
+            async with self._client.text_to_speech.with_raw_response.convert(
+                    voice_id=self._voice_id, text=text, model_id=self._model,
+                    output_format="wav_24000",
+                    voice_settings=self._voice_settings_type(speed=self._speed),
+            ) as response:
+                wav_bytes = b"".join([chunk async for chunk in response.data])
+                try:
+                    header = response.headers.get("character-cost")
+                    if (isinstance(header, str) and len(header) <= 7
+                            and header.isascii() and header.isdigit()):
+                        reported = int(header)
+                        if reported <= 1_000_000:
+                            billed_characters = reported
+                            usage_basis = "provider_reported"
+                except Exception:
+                    # Billing metadata must never decide whether speech succeeds.
+                    pass
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -821,8 +834,8 @@ class FusionHatElevenLabsTTSProvider:
         _log_synthesis_completed(synthesis_ms, wav_bytes)
         if self._observability is not None:
             self._observability.tts_synthesized(
-                "elevenlabs", self._model, characters=len(text),
-                duration_ms=synthesis_ms,
+                "elevenlabs", self._model, characters=billed_characters,
+                duration_ms=synthesis_ms, usage_basis=usage_basis,
             )
 
         def play() -> None:
