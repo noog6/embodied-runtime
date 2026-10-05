@@ -5,9 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.cli import (
-    build_job_store, build_persistent_memory_store, build_text_to_speech_provider,
-    main, parse_launch_arguments,
+    build_conversation_history_store, build_job_store, build_persistent_memory_store,
+    build_text_to_speech_provider, main, parse_launch_arguments,
 )
+from embodied_runtime.conversation_history import SQLiteConversationHistoryStore
 from embodied_runtime.jobs import SQLiteJobStore
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.config import (
@@ -67,8 +68,13 @@ class ConfigurationTests(unittest.TestCase):
                 "voice_initial_timeout_seconds": 18,
                 "voice_followup_timeout_seconds": 12,
                 "timezone": "America/Toronto",
+                "cognition_model": "gpt-6.1-sol",
                 "memory_enabled": True,
                 "memory_database_path": Path("data/mira-memory.sqlite3").resolve(),
+                "conversation_history_enabled": True,
+                "conversation_history_database_path": Path(
+                    "data/conversations.sqlite3"
+                ).resolve(),
                 "jobs_enabled": True,
                 "jobs_database_path": Path("data/jobs.sqlite3").resolve(),
                 "jobs_auto_continue": True,
@@ -473,6 +479,37 @@ class ConfigurationTests(unittest.TestCase):
             self.assertTrue(database.is_file())
             entity = store.create_entity("object", "test")
             self.assertEqual(entity.identity, "ENT1")
+            store.close()
+
+    def test_conversation_history_disabled_or_absent_opens_no_database(self):
+        self.assertFalse(self.effective("").conversation_history_enabled)
+        self.assertIsNone(self.effective("").conversation_history_database_path)
+        disabled = self.effective(
+            "[conversation_history]\n"
+            "enabled=false\n"
+            "database_path='missing/conversations.sqlite3'\n"
+        )
+        self.assertFalse(disabled.conversation_history_enabled)
+        self.assertIsNone(disabled.conversation_history_database_path)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "missing" / "conversations.sqlite3"
+            store = build_conversation_history_store(SimpleNamespace(
+                conversation_history_enabled=False,
+                conversation_history_database_path=database,
+            ))
+            self.assertIsNone(store)
+            self.assertFalse(database.parent.exists())
+            self.assertFalse(database.exists())
+
+    def test_conversation_history_composition_enabled_opens_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "missing" / "conversations.sqlite3"
+            store = build_conversation_history_store(SimpleNamespace(
+                conversation_history_enabled=True,
+                conversation_history_database_path=database,
+            ))
+            self.assertIsInstance(store, SQLiteConversationHistoryStore)
+            self.assertTrue(database.is_file())
             store.close()
 
     def test_voice_is_opt_in_with_small_bounded_timeout_config(self):

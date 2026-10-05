@@ -67,6 +67,12 @@ class MemoryFileConfig:
 
 
 @dataclass(frozen=True)
+class ConversationHistoryFileConfig:
+    enabled: bool = False
+    database_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class JobsFileConfig:
     enabled: bool = False
     database_path: Path | None = None
@@ -107,6 +113,7 @@ class RuntimeFileConfiguration:
     voice: VoiceFileConfig = VoiceFileConfig()
     earcons: EarconsFileConfig = EarconsFileConfig()
     memory: MemoryFileConfig = MemoryFileConfig()
+    conversation_history: ConversationHistoryFileConfig = ConversationHistoryFileConfig()
     jobs: JobsFileConfig = JobsFileConfig()
     interaction: InteractionFileConfig = InteractionFileConfig()
     sms: SmsFileConfig = SmsFileConfig()
@@ -148,6 +155,8 @@ class LaunchConfiguration:
     earcons_enabled: bool
     memory_enabled: bool
     memory_database_path: Path | None
+    conversation_history_enabled: bool
+    conversation_history_database_path: Path | None
     jobs_enabled: bool
     jobs_database_path: Path | None
     jobs_auto_continue: bool
@@ -186,6 +195,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     voice_followup_timeout_seconds=10.0,
     earcons_enabled=True,
     memory_enabled=False, memory_database_path=None,
+    conversation_history_enabled=False, conversation_history_database_path=None,
     jobs_enabled=False, jobs_database_path=None, jobs_auto_continue=False,
     jobs_heartbeat_seconds=30.0, jobs_max_auto_steps=3, jobs_max_concurrent_work=1,
     jobs_scheduler_poll_seconds=30.0,
@@ -212,6 +222,7 @@ _VOICE_KEYS = {
 }
 _EARCONS_KEYS = {"enabled"}
 _MEMORY_KEYS = {"enabled", "database_path"}
+_CONVERSATION_HISTORY_KEYS = {"enabled", "database_path"}
 _JOBS_KEYS = {
     "enabled", "database_path", "auto_continue", "heartbeat_seconds",
     "max_auto_steps", "max_concurrent_work",
@@ -245,13 +256,14 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "cognition", "initiative", "voice", "earcons", "memory", "jobs", "interaction", "sms", "power"})
+    _reject_unknown(data, {"runtime", "cognition", "initiative", "voice", "earcons", "memory", "conversation_history", "jobs", "interaction", "sms", "power"})
     runtime = _table(data, "runtime")
     cognition = _table(data, "cognition")
     initiative = _table(data, "initiative")
     voice = _table(data, "voice")
     earcons = _table(data, "earcons")
     memory = _table(data, "memory")
+    conversation_history = _table(data, "conversation_history")
     jobs = _table(data, "jobs")
     interaction = _table(data, "interaction")
     sms = _table(data, "sms")
@@ -262,6 +274,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     _reject_unknown(voice, _VOICE_KEYS, "voice")
     _reject_unknown(earcons, _EARCONS_KEYS, "earcons")
     _reject_unknown(memory, _MEMORY_KEYS, "memory")
+    _reject_unknown(conversation_history, _CONVERSATION_HISTORY_KEYS, "conversation_history")
     _reject_unknown(jobs, _JOBS_KEYS, "jobs")
     _reject_unknown(interaction, _INTERACTION_KEYS, "interaction")
     _reject_unknown(sms, _SMS_KEYS, "sms")
@@ -331,6 +344,32 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         database_path = Path(configured_path).expanduser()
         if not database_path.is_absolute():
             database_path = (path.parent / database_path).resolve()
+
+    if ("enabled" in conversation_history
+            and not isinstance(conversation_history["enabled"], bool)):
+        raise ConfigurationError("conversation_history.enabled must be boolean")
+    if ("database_path" in conversation_history
+            and not isinstance(conversation_history["database_path"], str)):
+        raise ConfigurationError("conversation_history.database_path must be a string")
+    conversation_history_enabled = conversation_history.get("enabled", False)
+    conversation_history_configured_path = conversation_history.get("database_path")
+    if conversation_history_enabled and (
+        conversation_history_configured_path is None
+        or not conversation_history_configured_path.strip()
+    ):
+        raise ConfigurationError(
+            "conversation_history.database_path must be a non-empty string when enabled"
+        )
+    conversation_history_database_path = None
+    if (conversation_history_configured_path is not None
+            and conversation_history_configured_path.strip()):
+        conversation_history_database_path = Path(
+            conversation_history_configured_path
+        ).expanduser()
+        if not conversation_history_database_path.is_absolute():
+            conversation_history_database_path = (
+                path.parent / conversation_history_database_path
+            ).resolve()
 
     if "enabled" in jobs and not isinstance(jobs["enabled"], bool):
         raise ConfigurationError("jobs.enabled must be boolean")
@@ -458,6 +497,9 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         InitiativeFileConfig(**initiative),
         VoiceFileConfig(**voice), EarconsFileConfig(earcons.get("enabled", True)),
         MemoryFileConfig(memory_enabled, database_path),
+        ConversationHistoryFileConfig(
+            conversation_history_enabled, conversation_history_database_path
+        ),
         JobsFileConfig(
             jobs_enabled, jobs_database_path, jobs.get("auto_continue", False),
             float(heartbeat_seconds), max_auto_steps, max_concurrent_work,
@@ -481,6 +523,7 @@ def resolve_launch_configuration(
     voice = file_config.voice
     earcons = file_config.earcons
     memory = file_config.memory
+    conversation_history = file_config.conversation_history
     jobs = file_config.jobs
     interaction = file_config.interaction
     sms = file_config.sms
@@ -561,6 +604,10 @@ def resolve_launch_configuration(
         ),
         memory_enabled=memory.enabled,
         memory_database_path=memory.database_path if memory.enabled else None,
+        conversation_history_enabled=conversation_history.enabled,
+        conversation_history_database_path=(
+            conversation_history.database_path if conversation_history.enabled else None
+        ),
         jobs_enabled=jobs.enabled,
         jobs_database_path=jobs.database_path if jobs.enabled else None,
         jobs_auto_continue=jobs.auto_continue,

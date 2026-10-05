@@ -12,7 +12,7 @@ import secrets
 import unicodedata
 from time import monotonic, monotonic_ns
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from embodied_runtime.body.base import BodyBackend
@@ -43,6 +43,10 @@ from embodied_runtime.cognition import (
 )
 from embodied_runtime.cognition.finding_context import (
     FindingContextSelector, render_finding_context,
+)
+from embodied_runtime.conversation_history import (
+    MAX_CROSS_CHANNEL_RECORDS, MAX_SAME_CHANNEL_RECORDS,
+    ConversationHistoryStore, NewConversationTurn, render_conversation_history,
 )
 from embodied_runtime.events import (
     ApplicationStarted,
@@ -1057,6 +1061,8 @@ class RobotApplication:
         interaction_environment: InteractionEnvironment = InteractionEnvironment.WORKSTATION,
         sms_service: object | None = None,
         earcon_player: EarconPlayer | None = None,
+        conversation_history_store: ConversationHistoryStore | None = None,
+        conversation_session_id: str | None = None,
     ) -> None:
         self.profile = profile
         self.observability = observability or RunObservability()
@@ -1120,6 +1126,9 @@ class RobotApplication:
         self.working_memory = (
             working_memory if working_memory is not None else WorkingMemory()
         )
+        self.conversation_history = conversation_history_store
+        self._conversation_session_id = conversation_session_id or uuid4().hex
+        self._conversation_history_closed = False
         self.persistent_memory = persistent_memory_store
         self.jobs = job_store
         self.job_workspaces = job_workspace_store
@@ -3938,6 +3947,10 @@ class RobotApplication:
         except BaseException as error:
             failure = failure or error
         try:
+            self._close_conversation_history()
+        except BaseException as error:
+            failure = failure or error
+        try:
             self._close_job_workspace_store()
         except BaseException as error:
             failure = failure or error
@@ -3955,6 +3968,13 @@ class RobotApplication:
             return
         self._persistent_memory_closed = True
         self.persistent_memory.close()
+
+    def _close_conversation_history(self) -> None:
+        """Release the application-owned conversation database once."""
+        if self.conversation_history is None or self._conversation_history_closed:
+            return
+        self._conversation_history_closed = True
+        self.conversation_history.close()
 
     async def _stop_job_work(self) -> None:
         """Cancel and join every context-owned task before volatile cleanup."""
@@ -4122,6 +4142,10 @@ class RobotApplication:
         """Execute an episode while retaining its interaction-layer identity."""
         prior_memory = self.working_memory.snapshot()
         finding_context = self._select_operator_finding_context(message, episode.id)
+        conversation_context = self._select_conversation_context(interaction)
+        historical_context = "\n\n".join(
+            section for section in (finding_context, conversation_context) if section
+        )
         tool_outcomes: list[WorkingMemoryToolOutcome] = []
         acquisitions: list[InitiativeAcquisitionOutcome] = []
         acquisition_requests: dict[tuple[str, str], CognitionToolResult] = {}
@@ -4283,14 +4307,14 @@ class RobotApplication:
                     instructions=self._operator_episode_instructions(
                         episode, message, prior_memory, acquisitions, interaction,
                         delivery_destinations, has_image_attachment=bool(image_attachments),
-                        finding_context=finding_context,
+                        finding_context=historical_context,
                     ),
                     tools=tools,
                     tool_executor=execute_tool if tools else None,
                     refreshed_instructions=lambda: self._operator_episode_instructions(
                         episode, message, prior_memory, acquisitions, interaction,
                         delivery_destinations, has_image_attachment=bool(image_attachments),
-                        finding_context=finding_context,
+                        finding_context=historical_context,
                     ),
                 )
                 if image_attachments:
@@ -4338,13 +4362,52 @@ class RobotApplication:
                     result.observed_at,
                     (("focus", result.focus), ("description", result.description)),
                 ))
+        completed_at = self._aware_wall_clock()
         self.working_memory.append(
             message, response, tool_outcomes,
-            completed_at=self._aware_wall_clock(), observations=observations,
+            completed_at=completed_at, observations=observations,
+            channel=interaction.channel if interaction is not None else None,
         )
+        if self.conversation_history is not None and interaction is not None:
+            try:
+                self.conversation_history.append(NewConversationTurn(
+                    self._conversation_session_id, completed_at, interaction.channel,
+                    message, response,
+                ))
+            except Exception as error:
+                LOGGER.warning(
+                    "[CONVERSATION_HISTORY] status=persist_failed error=%s",
+                    type(error).__name__,
+                )
         self._last_operator_turn_completed_monotonic = self._monotonic()
         await self._finish_operator_episode(episode, "handled")
         return response
+
+    def _select_conversation_context(
+        self, interaction: InteractionContext | None,
+    ) -> str:
+        """Select only prior-session dialogue for explicit operator dialogue."""
+        if self.conversation_history is None or interaction is None:
+            return ""
+        try:
+            records = self.conversation_history.select_prior_session(
+                self._conversation_session_id, interaction.channel,
+                same_channel_limit=MAX_SAME_CHANNEL_RECORDS,
+                cross_channel_limit=MAX_CROSS_CHANNEL_RECORDS,
+            )
+        except Exception as error:
+            LOGGER.warning(
+                "[CONTEXT] source=conversation_history status=unavailable error=%s",
+                type(error).__name__,
+            )
+            return ""
+        same = sum(record.channel == interaction.channel for record in records)
+        LOGGER.info(
+            "[CONTEXT] source=conversation_history status=selected "
+            "current_channel=%s same_channel=%s cross_channel=%s selected=%s",
+            interaction.channel.value, same, len(records) - same, len(records),
+        )
+        return render_conversation_history(records)
 
     async def _stop_operator_cognition(self) -> None:
         """Cancel and join the sole active operator cognition during shutdown."""

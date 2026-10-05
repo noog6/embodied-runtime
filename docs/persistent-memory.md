@@ -4,6 +4,8 @@ Working memory is volatile recent conversational context. Persistent memory is
 durable, explicitly accepted knowledge. Cognition can access the latter only
 through bounded capabilities: `recall_memory` is a deliberate read-only
 acquisition, while `remember` is an operator-grounded durable semantic effect.
+Durable ordinary dialogue instead belongs to the distinct bounded
+[conversation-history](conversation-history.md) store and is not semantic memory.
 
 ## Operator-grounded admission
 
