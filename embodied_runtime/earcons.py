@@ -114,24 +114,32 @@ class EarconPlayer:
         )
 
     def _record(self, cue: Earcon, status: EarconAttemptStatus,
-                reason: str | None = None) -> None:
+                reason: str | None = None) -> EarconActivity:
         activity = EarconActivity(cue, status, datetime.now(UTC), reason)
         self._last_attempt = activity
         if status is EarconAttemptStatus.PLAYED:
             self._last_played = activity
+        return activity
 
     async def play(self, cue: Earcon | str) -> bool:
+        """Compatibility API returning whether this invocation played."""
+        return (await self.play_result(cue)).status is EarconAttemptStatus.PLAYED
+
+    async def play_result(self, cue: Earcon | str) -> EarconActivity:
+        """Attempt one cue and return evidence belonging to this invocation."""
         cue = Earcon(cue)
         if self._output is None:
-            self._record(cue, EarconAttemptStatus.SKIPPED, "output_unavailable")
+            activity = self._record(
+                cue, EarconAttemptStatus.SKIPPED, "output_unavailable"
+            )
             LOGGER.info("[EARCON] cue=%s status=skipped reason=disabled", cue.value)
-            return False
+            return activity
         try:
             lease = self._resources.acquire(SPEAKER_RESOURCE, EARCON_SPEAKER_OWNER)
         except ResourceBusyError:
-            self._record(cue, EarconAttemptStatus.SKIPPED, "speaker_busy")
+            activity = self._record(cue, EarconAttemptStatus.SKIPPED, "speaker_busy")
             LOGGER.info("[EARCON] cue=%s status=skipped reason=speaker_busy", cue.value)
-            return False
+            return activity
         try:
             await self._output.play_wav(earcon_wav(cue))
         except asyncio.CancelledError:
@@ -139,16 +147,16 @@ class EarconPlayer:
             LOGGER.info("[EARCON] cue=%s status=failed error=CancelledError", cue.value)
             raise
         except Exception as error:
-            self._record(cue, EarconAttemptStatus.FAILED, "output_error")
+            activity = self._record(cue, EarconAttemptStatus.FAILED, "output_error")
             LOGGER.warning(
                 "[EARCON] cue=%s status=failed error=%s",
                 cue.value, type(error).__name__,
             )
-            return False
+            return activity
         else:
-            self._record(cue, EarconAttemptStatus.PLAYED)
+            activity = self._record(cue, EarconAttemptStatus.PLAYED)
             LOGGER.info("[EARCON] cue=%s status=played", cue.value)
-            return True
+            return activity
         finally:
             self._resources.release(lease)
 

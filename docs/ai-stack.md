@@ -53,11 +53,13 @@ immediately before every request. Authoritative state remains runtime-owned and
 is neither handed to nor queried by the cognition backend. Each request remains
 independent. AI intent is advisory: the runtime decides whether and how an
 action occurs. Autonomous semantic capabilities are explicitly projected:
-`orient_body` remains limited to a nonphysical body, while `address_operator`
-is independent of body physicality. Without continuation, the runtime accepts at most one initiative
+`orient_body` remains limited to a nonphysical body, `address_operator`
+is independent of body physicality, and `play_earcon` requires action permission
+and configured semantic earcon output. Without continuation, the runtime accepts at most one initiative
 capability request per episode. Cognition-driven physical actuation is not
-approved. No model-controlled or persistent memory, images, Realtime, or audio
-capability is added. See
+approved. The named earcon effect is not arbitrary or generated audio and exposes
+no file, URL, frequency, volume, duration, sequencing, or queue control. No
+model-controlled or persistent memory, images, or Realtime capability is added. See
 [OpenAI text cognition setup](cognition-openai.md).
 
 Realtime, chained, and hybrid approaches remain open candidates.
@@ -82,7 +84,8 @@ a provider-neutral attention stimulus. Initiative now has independent capability
   read-only `inspect_self`, `observe_scene`, `recall_memory`, or
   `inspect_run_history` attempts where available, and
   permits the single bounded `schedule_followup` semantic effect;
-- `--initiative-actions` permits `orient_body` only on a nonphysical body;
+- `--initiative-actions` permits `orient_body` only on a nonphysical body and
+  permits `play_earcon` when earcon output is enabled;
 - `--initiative-messages` permits `address_operator` only with a configured sink;
 - enabling action and message permissions offers those effects alongside
   scheduling, but without continuation the runtime accepts at most one request total;
@@ -98,6 +101,14 @@ volatile effects: they do not enter WorkingMemory, RuntimeState, EventBus histor
 or a transcript, and establish no pending answer or reply correlation. Attention
 continues to own only selection, one-in-flight lifecycle, cancellation, and
 latest diagnostics. There is no polling, retry, unbounded effect sequence, or physical autonomy.
+
+`play_earcon` is an ordinary semantic effect, never an acquisition. It consumes
+the same one operator-effect budget and participates in autonomous distinct-effect
+continuation (at most two effects), so different cue arguments cannot bypass the
+episode limits. Its awaited, invocation-local result distinguishes confirmed
+runtime playback from a busy or unavailable skip and an output failure.
+Confirmation does not prove audibility to a person, and a cue's meaning does not
+manufacture the lifecycle event it conventionally represents.
 
 ## Direct speech-to-speech
 

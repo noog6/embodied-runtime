@@ -13,11 +13,13 @@ autonomous JobRun; and `needs_operator` means that JobRun entered the explicit
 `wait_for_operator` state. `wait_for_event`, delayed continuations, and startup
 reconciliation are intentionally silent.
 
-The application lifecycle and Job coordination authorities select these cues;
-they are deterministic harness behavior and are not exposed as cognition tools
-or model-selected actions. Cognition requests, tool calls, acquisitions,
-continuation steps, scheduler polls, heartbeats, and observations are likewise
-intentionally silent. `EarconPlayer` only performs safe named playback: it
+The application lifecycle and Job coordination authorities select their automatic
+cues deterministically. Cognition may also request exactly one catalog cue through
+the `play_earcon(cue)` semantic effect when output and its episode's action authority
+are available. The requested meaning is descriptive rather than lifecycle authority:
+`ready` cannot establish readiness and `work_completed` cannot complete a Job.
+Other cognition requests, acquisitions, scheduler polls, heartbeats, and observations
+remain silent. `EarconPlayer` only performs safe named playback: it
 acquires the canonical `audio.speaker` lease without waiting or retrying, holds
 that exact lease through local playback, and releases it in `finally`. A busy
 speaker or playback failure is logged and never changes the underlying semantic
@@ -38,8 +40,12 @@ These boundaries are intentionally distinct:
    cue and `EarconPlayer` attempts it under normal resource arbitration.
 2. **Earcon awareness (current):** cognition may inspect meanings and recent
    runtime evidence through the existing read-only self-inspection acquisition.
-3. **Model-selectable earcons (future, out of scope):** cognition selecting or
-   requesting a cue is not implemented; there is no playback cognition effect.
+3. **Model-selectable earcons (current):** operator cognition and permitted
+   autonomous/Job cognition may spend an ordinary semantic-effect slot on one
+   deliberately selected catalog cue. The effect is projected only with configured
+   output and is revalidated at execution; temporary speaker contention is a
+   request-local skip, not permanent capability loss. Results are invocation-local:
+   `applied` confirms runtime playback, while `skipped` and `failed` never do.
 
 Earcons are deliberately lossy, immediate representations of state—not a
 guaranteed notification channel. Playback never waits behind TTS, retries, or

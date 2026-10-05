@@ -1,10 +1,12 @@
 import asyncio
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from embodied_runtime.app import ApplicationOptions, RobotApplication
+from embodied_runtime.app import ApplicationOptions, PLAY_EARCON_TOOL, RobotApplication
+from embodied_runtime.cognition import ActiveGoal, CognitionToolCall
 from embodied_runtime.earcons import (
     EARCON_CATALOG, Earcon, EarconAttemptStatus, EarconPlayer, SPEAKER_RESOURCE,
 )
@@ -140,6 +142,51 @@ class EarconPlayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(snapshot.last_attempt.status, EarconAttemptStatus.SKIPPED)
         self.assertEqual(snapshot.last_attempt.reason, "output_unavailable")
         self.assertIsNone(snapshot.last_played)
+
+    async def test_result_is_invocation_local_during_overlap(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class BlockingOutput(RecordingOutput):
+            async def play_wav(self, wav):
+                await super().play_wav(wav)
+                started.set()
+                await release.wait()
+
+        resources = ResourceArbiter()
+        player = EarconPlayer(resources, BlockingOutput(resources))
+        first = asyncio.create_task(player.play_result(Earcon.READY))
+        await started.wait()
+        second = await player.play_result(Earcon.WORK_STARTED)
+        release.set()
+        first_result = await first
+
+        self.assertIs(first_result.status, EarconAttemptStatus.PLAYED)
+        self.assertEqual(first_result.cue, Earcon.READY)
+        self.assertIs(second.status, EarconAttemptStatus.SKIPPED)
+        self.assertEqual(second.reason, "speaker_busy")
+
+    async def test_cancellation_propagates_and_releases_exact_lease(self):
+        started = asyncio.Event()
+
+        class CancelledOutput(RecordingOutput):
+            async def play_wav(self, wav):
+                await super().play_wav(wav)
+                started.set()
+                await asyncio.Event().wait()
+
+        resources = ResourceArbiter()
+        player = EarconPlayer(resources, CancelledOutput(resources))
+        task = asyncio.create_task(player.play_result(Earcon.READY))
+        await started.wait()
+        self.assertEqual(
+            resources.lease_for(SPEAKER_RESOURCE).owner,
+            ResourceOwner("runtime", "earcons"),
+        )
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIsNone(resources.lease_for(SPEAKER_RESOURCE))
+        self.assertEqual(player.snapshot().last_attempt.reason, "cancelled")
 
     async def test_wake_engagement_uses_named_earcon_exactly_once(self):
         class VoiceInput:
@@ -351,3 +398,83 @@ class SemanticEarconTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.calls, 0)
         self.assertFalse(app._earcon_tasks)
         await app.stop()
+
+
+class ModelSelectableEarconTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.resources = ResourceArbiter()
+        self.output = RecordingOutput(self.resources)
+        self.app = RobotApplication(
+            RobotProfile("test", "Test"), VirtualHardwareBackend(),
+            ApplicationOptions(initiative_enabled=True, initiative_actions_enabled=True),
+            platform_provider=StaticPlatform(), resource_arbiter=self.resources,
+            earcon_player=EarconPlayer(self.resources, self.output),
+        )
+        await self.app.start()
+        self.output.calls = 0
+
+    async def asyncTearDown(self):
+        await self.app.stop()
+
+    async def execute(self, arguments):
+        return await self.app._execute_cognition_tool(
+            CognitionToolCall("play_earcon", arguments)
+        )
+
+    async def test_catalog_drives_projection_and_confirmed_result(self):
+        tool = next(tool for tool in self.app.cognition_tools()
+                    if tool.name == "play_earcon")
+        self.assertIs(tool, PLAY_EARCON_TOOL)
+        self.assertEqual(
+            tool.parameters["properties"]["cue"]["enum"],
+            [item.cue.value for item in EARCON_CATALOG],
+        )
+        result = await self.execute('{"cue":"ready"}')
+        self.assertEqual(
+            json.loads(result.output),
+            {"cue": "ready", "meaning": next(
+                item.meaning for item in EARCON_CATALOG if item.cue is Earcon.READY
+            ), "playback_confirmed": True, "status": "applied"},
+        )
+
+    async def test_invalid_names_aliases_and_extra_arguments_are_rejected(self):
+        for arguments in (
+            '{"cue":"READY"}', '{"cue":"ready","volume":1}', '{}', '[]',
+        ):
+            with self.subTest(arguments=arguments):
+                result = await self.execute(arguments)
+                self.assertEqual(json.loads(result.output)["status"], "rejected")
+        self.assertEqual(self.output.calls, 0)
+
+    async def test_contention_and_output_failure_are_not_applied(self):
+        lease = self.resources.acquire(
+            SPEAKER_RESOURCE, ResourceOwner("test", "speech")
+        )
+        skipped = json.loads((await self.execute('{"cue":"ready"}')).output)
+        self.resources.release(lease)
+        self.assertEqual((skipped["status"], skipped["reason"]),
+                         ("skipped", "speaker_busy"))
+        self.assertFalse(skipped["playback_confirmed"])
+
+        self.output.fail = True
+        failed = json.loads((await self.execute('{"cue":"ready"}')).output)
+        self.assertEqual((failed["status"], failed["reason"]),
+                         ("failed", "output_error"))
+        self.assertFalse(failed["playback_confirmed"])
+
+    async def test_projection_obeys_output_and_autonomous_action_authority(self):
+        muted = RobotApplication(
+            RobotProfile("muted", "Muted"), VirtualHardwareBackend(),
+            platform_provider=StaticPlatform(),
+            earcon_player=EarconPlayer(ResourceArbiter(), None),
+        )
+        await muted.start()
+        self.assertNotIn("play_earcon", [tool.name for tool in muted.cognition_tools()])
+        await muted.stop()
+
+        self.app._active_goal = ActiveGoal(1, "test")
+        self.assertIn("play_earcon", [tool.name for tool in self.app.effect_tools()])
+        self.app.options = ApplicationOptions(
+            initiative_enabled=True, initiative_actions_enabled=False
+        )
+        self.assertNotIn("play_earcon", [tool.name for tool in self.app.effect_tools()])
