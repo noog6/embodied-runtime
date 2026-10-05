@@ -14,7 +14,8 @@ from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.cognition import TextCognitionBackend
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.jobs import (
-    FilesystemJobWorkspaceStore, JobContinuation, JobRunStatus, SQLiteJobStore,
+    FilesystemJobWorkspaceStore, JobContinuation, JobProgressUpdate, JobRunStatus,
+    SQLiteJobStore,
 )
 from embodied_runtime.platform import PlatformSnapshot
 from embodied_runtime.profile import RobotProfile
@@ -107,6 +108,8 @@ async def run_trial(
     episodes = 0
     continuation_count = 0
     historical_content_version: str | None = None
+    seeded_content_version: str | None = None
+    seeded_artifact_path: str | None = None
     with TemporaryDirectory(prefix="mira-cognition-benchmark-") as directory:
         root = Path(directory)
         jobs = SQLiteJobStore(root / "jobs.sqlite3")
@@ -139,6 +142,19 @@ async def run_trial(
                 historical_content_version = seeded_baseline.content_version
             binding = app.start_job_run(job.id)
             run_id = binding.run.id
+            if scenario.seeded_artifact is not None:
+                seeded_artifact_path, content = scenario.seeded_artifact
+                seeded = workspaces.write(job.id, seeded_artifact_path, "create", content)
+                seeded_content_version = seeded.content_version
+            if scenario.initial_progress_counter is not None:
+                progress = app.job_progress
+                if progress is None:
+                    raise RuntimeError("current Job progress was not initialized")
+                # Benchmark setup uses the same exact-occurrence production value and
+                # increment operation that accepted runtime evidence commits.
+                app._job_progress = progress.increment(JobProgressUpdate(
+                    scenario.initial_progress_counter, "effect_1",
+                ))
             # Snapshot after prepare/start so prewarm is deliberately excluded.
             before = app.observability.snapshot()
             episodes = 1
@@ -186,6 +202,14 @@ async def run_trial(
             reasons.extend(scenario.evaluate_trace(
                 tuple(recorder.tool_trace),
                 historical_content_version=historical_content_version,
+                seeded_content_version=seeded_content_version,
+                final_seeded_content_version=(
+                    None if seeded_artifact_path is None else
+                    (artifact.content_version if (artifact := workspaces.read(
+                        job.id, seeded_artifact_path,
+                    )) is not None else None)
+                ),
+                continuation_count=continuation_count,
             ))
         except Exception as error:
             error_text = f"{type(error).__name__}: {str(error)[:500]}"
