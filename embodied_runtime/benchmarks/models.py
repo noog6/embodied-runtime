@@ -7,7 +7,7 @@ import json
 
 from .recording import CognitionRequestRecord, ToolTraceEntry
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +32,8 @@ class BenchmarkTrialResult:
     failure_reasons: tuple[str, ...]
     error: str | None
     wall_duration_seconds: float
+    estimated_cost_usd: str | None
+    pricing_identity: str
     final_job_run_status: str | None
     final_disposition: str | None
     final_continuation_state: str | None
@@ -51,6 +53,7 @@ class BenchmarkReport:
     created_at: str
     scenario_id: str
     trials: tuple[BenchmarkTrialResult, ...]
+    pricing_identity: str
     format_version: int = FORMAT_VERSION
 
     def as_dict(self) -> dict[str, object]:
@@ -58,6 +61,7 @@ class BenchmarkReport:
             "format_version": self.format_version,
             "created_at": self.created_at,
             "scenario_id": self.scenario_id,
+            "pricing_identity": self.pricing_identity,
             "trials": [trial.as_dict() for trial in self.trials],
         }
 

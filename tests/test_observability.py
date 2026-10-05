@@ -82,15 +82,27 @@ def test_cost_uses_mutually_exclusive_input_categories_and_rejects_bad_usage():
     assert unpriced_write.snapshot()["cost"]["status"] == "unavailable"
 
 
-def test_built_in_pricing_has_only_the_supported_openai_responses_model():
-    assert BUILT_IN_PRICING.identity == "public-built-in-pricing-2026-10-02"
-    assert tuple(BUILT_IN_PRICING.rates) == (("openai-responses", "gpt-5.6-luna"),)
-    rate = BUILT_IN_PRICING.rates[("openai-responses", "gpt-5.6-luna")]
-    assert rate.input_per_million == Decimal("0.20")
-    assert rate.cached_input_per_million == Decimal("0.02")
-    assert rate.cache_write_per_million == Decimal("0.25")
-    assert rate.output_per_million == Decimal("1.20")
-    assert rate.max_input_tokens == 272_000
+def test_built_in_pricing_has_expected_openai_responses_rates():
+    assert BUILT_IN_PRICING.identity == "public-built-in-pricing-2026-10-05"
+    expected = {
+        "gpt-5.6-luna": ("0.20", "0.02", "0.25", "1.20"),
+        "gpt-5.6-sol": ("4.00", "0.40", "5.00", "20.00"),
+        "gpt-6.1-sol": ("2.00", "0.10", "2.50", "10.00"),
+        "gpt-6-luna": ("0.10", "0.01", "0.125", "0.50"),
+        "gpt-6-astra": ("10.00", "1.00", "12.50", "50.00"),
+    }
+    assert set(BUILT_IN_PRICING.rates) == {
+        ("openai-responses", model) for model in expected
+    }
+    for model, values in expected.items():
+        rate = BUILT_IN_PRICING.rates[("openai-responses", model)]
+        assert (
+            rate.input_per_million,
+            rate.cached_input_per_million,
+            rate.cache_write_per_million,
+            rate.output_per_million,
+        ) == tuple(Decimal(value) for value in values)
+        assert rate.max_input_tokens == 272_000
 
 
 def test_built_in_pricing_calculates_real_provider_usage_without_double_counting():
@@ -109,18 +121,19 @@ def test_built_in_pricing_calculates_real_provider_usage_without_double_counting
 
 
 def test_built_in_pricing_fails_closed_above_per_request_context_limit():
-    at_limit, _ = make(pricing=BUILT_IN_PRICING)
-    at_limit.provider_completed(
-        "openai-responses", "gpt-5.6-luna", "initial", input_tokens=272_000,
-    )
-    assert at_limit.snapshot()["cost"]["status"] == "estimated"
+    for model in ("gpt-5.6-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"):
+        at_limit, _ = make(pricing=BUILT_IN_PRICING)
+        at_limit.provider_completed(
+            "openai-responses", model, "initial", input_tokens=272_000,
+        )
+        assert at_limit.snapshot()["cost"]["status"] == "estimated"
 
-    above_limit, _ = make(pricing=BUILT_IN_PRICING)
-    above_limit.provider_completed(
-        "openai-responses", "gpt-5.6-luna", "initial", input_tokens=272_001,
-    )
-    assert above_limit.snapshot()["cost"]["status"] == "unavailable"
-    assert above_limit.snapshot()["cost"]["estimated_usd"] is None
+        above_limit, _ = make(pricing=BUILT_IN_PRICING)
+        above_limit.provider_completed(
+            "openai-responses", model, "initial", input_tokens=272_001,
+        )
+        assert above_limit.snapshot()["cost"]["status"] == "unavailable"
+        assert above_limit.snapshot()["cost"]["estimated_usd"] is None
 
     mixed, _ = make(pricing=BUILT_IN_PRICING)
     mixed.provider_completed(
@@ -135,7 +148,7 @@ def test_built_in_pricing_fails_closed_above_per_request_context_limit():
 def test_built_in_pricing_does_not_fall_back_for_model_override():
     observed, _ = make(pricing=BUILT_IN_PRICING)
     observed.provider_completed(
-        "openai-responses", "gpt-5.6-sol", "initial", input_tokens=1,
+        "openai-responses", "gpt-5.6-sol-alias", "initial", input_tokens=1,
     )
     cost = observed.snapshot()["cost"]
     assert cost["status"] == "unavailable"
