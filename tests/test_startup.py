@@ -331,6 +331,10 @@ webhook_path = "{webhook_path}"
         runtime = serialize_environment(deployment, environment).decode()
         ingress = serialize_ngrok_environment(deployment, environment).decode()
         self.assertIn('TWILIO_WEBHOOK_URL="https://mira-example.ngrok-free.app/sms"', runtime)
+        self.assertIn(
+            'TWILIO_PUBLIC_MEDIA_BASE_URL="https://mira-example.ngrok-free.app"',
+            runtime,
+        )
         self.assertNotIn("NGROK_AUTHTOKEN", runtime)
         self.assertEqual(ingress, 'NGROK_AUTHTOKEN="ngrok-secret"\n')
         self.assertNotIn("twilio-secret", ingress)
@@ -420,6 +424,24 @@ webhook_path = "{webhook_path}"
     def test_sms_requires_complete_twilio_catalog(self) -> None:
         deployment = self.deployment(with_sms=True)
         self.assertEqual(required_environment(deployment), TWILIO_ENVIRONMENT)
+        self.assertNotIn("TWILIO_PUBLIC_MEDIA_BASE_URL", TWILIO_ENVIRONMENT)
+
+    def test_sms_media_origin_is_optional_and_exported_only_when_supplied(self) -> None:
+        deployment = self.deployment(config=self.config(sms=True), capture_env=True)
+        required = {
+            "TWILIO_ACCOUNT_SID": "sid", "TWILIO_AUTH_TOKEN": "token",
+            "TWILIO_PHONE_NUMBER": "+15550001",
+            "MIRA_SMS_OPERATOR_NUMBER": "+15550002",
+            "TWILIO_WEBHOOK_URL": "https://example.invalid/sms",
+        }
+        without_media = serialize_environment(deployment, required).decode()
+        self.assertNotIn("TWILIO_PUBLIC_MEDIA_BASE_URL", without_media)
+        with_media = serialize_environment(deployment, {
+            **required, "TWILIO_PUBLIC_MEDIA_BASE_URL": "https://media.example",
+        }).decode()
+        self.assertIn(
+            'TWILIO_PUBLIC_MEDIA_BASE_URL="https://media.example"', with_media,
+        )
 
     def test_capture_contains_only_required_approved_values(self) -> None:
         deployment = self.deployment(

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import logging
 import os
 import re
+import secrets
+import time
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -20,6 +22,9 @@ from embodied_runtime.attachments import (
 from embodied_runtime.interaction import (
     InteractionCadence, InteractionChannel, InteractionContext,
     InteractionInitiator, InteractionMode, OperatorMessage, OperatorMessageSink,
+)
+from embodied_runtime.outbound_images import (
+    ImageDeliveryEvidence, MAX_OUTBOUND_IMAGE_BYTES, OutboundImage,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -40,6 +45,11 @@ _REQUIRED_ENV = (
     "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
     "MIRA_SMS_OPERATOR_NUMBER", "TWILIO_WEBHOOK_URL",
 )
+OUTBOUND_MEDIA_TTL_SECONDS = 15 * 60
+OUTBOUND_MEDIA_MAX_ITEMS = 4
+OUTBOUND_MEDIA_MAX_BYTES = 12 * 1024 * 1024
+OUTBOUND_MEDIA_PATH = "/outbound-media/"
+OUTBOUND_MEDIA_REAP_INTERVAL_SECONDS = 60
 
 
 class SmsConfigurationError(ValueError):
@@ -60,6 +70,7 @@ class TwilioSmsSettings:
     bind_host: str
     bind_port: int
     webhook_path: str
+    public_media_base_url: str | None = None
 
     @classmethod
     def from_environment(
@@ -84,10 +95,20 @@ class TwilioSmsSettings:
                 "TWILIO_WEBHOOK_URL must be HTTPS with the configured webhook path "
                 "and no credentials, query, or fragment"
             )
+        media_base = values.get("TWILIO_PUBLIC_MEDIA_BASE_URL", "").strip() or None
+        if media_base is not None:
+            media_url = urlsplit(media_base)
+            if (media_url.scheme != "https" or not media_url.netloc or media_url.path not in ("", "/")
+                    or media_url.query or media_url.fragment or media_url.username
+                    or media_url.password):
+                raise SmsConfigurationError(
+                    "TWILIO_PUBLIC_MEDIA_BASE_URL must be an HTTPS origin without a path"
+                )
+            media_base = media_base.rstrip("/")
         return cls(
             values["TWILIO_ACCOUNT_SID"], values["TWILIO_AUTH_TOKEN"],
             twilio_number, operator_number, webhook_url, bind_host, bind_port,
-            webhook_path,
+            webhook_path, media_base,
         )
 
 
@@ -240,6 +261,80 @@ class SmsSender(Protocol):
     def send(self, *, from_: str, to: str, body: str) -> None: ...
 
 
+@dataclass(slots=True)
+class _StagedImage:
+    data: bytes
+    expires_at: float
+
+
+class OutboundMediaStore:
+    """Small in-memory bearer store; it never exposes paths or directory listings."""
+
+    def __init__(self, *, ttl_seconds: float = OUTBOUND_MEDIA_TTL_SECONDS,
+                 max_items: int = OUTBOUND_MEDIA_MAX_ITEMS,
+                 max_bytes: int = OUTBOUND_MEDIA_MAX_BYTES,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.max_items = max_items
+        self.max_bytes = max_bytes
+        self._clock = clock
+        self._items: dict[str, _StagedImage] = {}
+
+    def expire(self) -> None:
+        now = self._clock()
+        for token in tuple(self._items):
+            if self._items[token].expires_at <= now:
+                del self._items[token]
+
+    def stage(self, data: bytes) -> str:
+        self.expire()
+        if (not data or len(data) > MAX_OUTBOUND_IMAGE_BYTES
+                or len(self._items) >= self.max_items
+                or sum(len(item.data) for item in self._items.values()) + len(data) > self.max_bytes):
+            raise RuntimeError("outbound media staging capacity unavailable")
+        token = secrets.token_urlsafe(32)
+        self._items[token] = _StagedImage(bytes(data), self._clock() + self.ttl_seconds)
+        return token
+
+    def get(self, token: str) -> bytes | None:
+        self.expire()
+        item = self._items.get(token)
+        return None if item is None else item.data
+
+    def remove(self, token: str) -> None:
+        self._items.pop(token, None)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    @property
+    def retained_count(self) -> int:
+        self.expire()
+        return len(self._items)
+
+
+def _provider_failure_is_rejection(error: BaseException) -> bool:
+    """Classify only explicit Twilio HTTP responses as established rejection.
+
+    Connection and read failures are ambiguous because the POST may have reached
+    Twilio.  Avoid importing an optional SDK merely to classify its exception.
+    """
+    classes = type(error).__mro__
+    if any(item.__name__ == "TwilioRestException"
+           and item.__module__.startswith("twilio.") for item in classes):
+        return True
+    status = getattr(error, "status", None)
+    return type(status) is int and 400 <= status <= 599
+
+
+def _bounded_provider_value(value: object, limit: int) -> str | None:
+    if type(value) is not str or not value or len(value) > limit:
+        return None
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return None
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class _Acceptance:
     status: int
@@ -276,6 +371,12 @@ class TwilioSmsGateway:
     def send(self, *, from_: str, to: str, body: str) -> None:
         self._client.messages.create(from_=from_, to=to, body=body)
 
+    def send_media(self, *, from_: str, to: str, body: str,
+                   media_url: str) -> Any:
+        return self._client.messages.create(
+            from_=from_, to=to, body=body or None, media_url=[media_url]
+        )
+
 
 class TwilioSmsService(OperatorMessageSink):
     """Own one aiohttp endpoint, bounded FIFO, dedupe cache, and worker."""
@@ -286,6 +387,8 @@ class TwilioSmsService(OperatorMessageSink):
         *, gateway: SmsSender | Any | None = None,
         media_downloader: MediaDownloader | None = None,
         inbox_size: int = SMS_INBOX_SIZE, dedupe_size: int = SMS_DEDUPE_SIZE,
+        outbound_media: OutboundMediaStore | None = None,
+        media_reap_interval_seconds: float = OUTBOUND_MEDIA_REAP_INTERVAL_SECONDS,
     ) -> None:
         self.settings = settings
         self._request_cognition = request_cognition
@@ -297,7 +400,48 @@ class TwilioSmsService(OperatorMessageSink):
         self._accepted_fifo: deque[str] = deque()
         self._runner: Any = None
         self._worker: asyncio.Task[None] | None = None
+        self._media_reaper: asyncio.Task[None] | None = None
         self._accepting = False
+        self._outbound_media = outbound_media or OutboundMediaStore()
+        self._media_reap_interval_seconds = media_reap_interval_seconds
+
+    @property
+    def image_delivery_available(self) -> bool:
+        return bool(self._accepting and self._gateway is not None
+                    and self.settings.public_media_base_url)
+
+    async def deliver_image(self, image: OutboundImage) -> ImageDeliveryEvidence:
+        """Stage and submit exactly one JPEG to the configured operator."""
+        if not self.image_delivery_available:
+            raise RuntimeError("outbound MMS is not configured or ready")
+        if image.media_type != "image/jpeg" or not image.data.startswith(b"\xff\xd8\xff"):
+            raise ValueError("outbound MMS requires a valid JPEG image")
+        if not image.data or len(image.data) > MAX_OUTBOUND_IMAGE_BYTES:
+            raise ValueError("outbound image exceeds the byte limit")
+        caption = image.caption.strip()
+        token = self._outbound_media.stage(image.data)
+        media_url = f"{self.settings.public_media_base_url}{OUTBOUND_MEDIA_PATH}{token}.jpg"
+        try:
+            response = await asyncio.to_thread(
+                self._gateway.send_media, from_=self.settings.twilio_number,
+                to=self.settings.operator_number, body=caption, media_url=media_url,
+            )
+        except asyncio.CancelledError:
+            # Submission may already have happened in the worker thread. Retain media
+            # for the fetch window and do not invite an automatic duplicate.
+            raise
+        except Exception as error:
+            if _provider_failure_is_rejection(error):
+                self._outbound_media.remove(token)
+                return ImageDeliveryEvidence("rejected", reason="provider_rejected")
+            # Timeouts, connection failures, and unknown transport errors may happen
+            # after submission. Retain the bearer and never automatically resend.
+            return ImageDeliveryEvidence("uncertain", reason="submission_uncertain")
+        return ImageDeliveryEvidence(
+            "accepted",
+            _bounded_provider_value(getattr(response, "sid", None), 64),
+            _bounded_provider_value(getattr(response, "status", None), 32),
+        )
 
     @property
     def channel(self) -> InteractionChannel:
@@ -363,7 +507,11 @@ class TwilioSmsService(OperatorMessageSink):
             self._gateway = TwilioSmsGateway(self.settings)
         app = web.Application()
         app.router.add_post(self.settings.webhook_path, self._handle_webhook)
-        runner = web.AppRunner(app)
+        app.router.add_route("GET", OUTBOUND_MEDIA_PATH + "{token}.jpg", self._serve_media)
+        app.router.add_route("HEAD", OUTBOUND_MEDIA_PATH + "{token}.jpg", self._serve_media)
+        # Bearer paths are credentials. Disable aiohttp's request-line access log;
+        # _serve_media emits only sanitized method/status metadata.
+        runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         try:
             site = web.TCPSite(runner, self.settings.bind_host, self.settings.bind_port)
@@ -374,6 +522,9 @@ class TwilioSmsService(OperatorMessageSink):
         self._runner = runner
         self._accepting = True
         self._worker = asyncio.create_task(self._run_worker(), name="sms-remote-text")
+        self._media_reaper = asyncio.create_task(
+            self._reap_outbound_media(), name="sms-outbound-media-reaper"
+        )
         LOGGER.info("[SMS] backend=twilio bind=%s:%s path=%s status=ready",
                     self.settings.bind_host, self.settings.bind_port,
                     self.settings.webhook_path)
@@ -389,8 +540,38 @@ class TwilioSmsService(OperatorMessageSink):
         if worker is not None:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
+        reaper, self._media_reaper = self._media_reaper, None
+        if reaper is not None:
+            reaper.cancel()
+            await asyncio.gather(reaper, return_exceptions=True)
         if runner is not None or worker is not None:
             LOGGER.info("[SMS] status=stopped")
+        self._outbound_media.clear()
+
+    async def _serve_media(self, request: Any) -> Any:
+        from aiohttp import web
+        token = request.match_info.get("token", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token):
+            LOGGER.info("[SMS] outbound_media method=%s status=not_found", request.method)
+            return web.Response(status=404)
+        data = self._outbound_media.get(token)
+        if data is None:
+            LOGGER.info("[SMS] outbound_media method=%s status=not_found", request.method)
+            return web.Response(status=404)
+        LOGGER.info("[SMS] outbound_media method=%s status=served bytes=%s",
+                    request.method, len(data))
+        return web.Response(
+            body=None if request.method == "HEAD" else data,
+            content_type="image/jpeg",
+            headers={"Content-Length": str(len(data)),
+                     "Content-Disposition": 'inline; filename="camera.jpg"',
+                     "Cache-Control": "private, max-age=0, no-store"},
+        )
+
+    async def _reap_outbound_media(self) -> None:
+        while True:
+            await asyncio.sleep(self._media_reap_interval_seconds)
+            self._outbound_media.expire()
 
     async def _handle_webhook(self, request: Any) -> Any:
         from aiohttp import web

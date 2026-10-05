@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 
 from embodied_runtime.cli import parse_launch_arguments, validate_launch_dependencies
 from embodied_runtime.config import ConfigurationError, LaunchConfiguration
@@ -319,7 +320,10 @@ def environment_presence(
     result = {name: bool(environ.get(name)) for name in required_environment(deployment)}
     if deployment.with_ngrok:
         result["TWILIO_WEBHOOK_URL"] = True  # deterministically derived
+        result["TWILIO_PUBLIC_MEDIA_BASE_URL"] = True
         result["NGROK_AUTHTOKEN"] = bool(environ.get("NGROK_AUTHTOKEN"))
+    elif deployment.launch.sms_enabled and environ.get("TWILIO_PUBLIC_MEDIA_BASE_URL"):
+        result["TWILIO_PUBLIC_MEDIA_BASE_URL"] = True
     return result
 
 
@@ -349,15 +353,28 @@ def serialize_environment(
     for name in required_environment(deployment):
         if not _ENVIRONMENT_NAME.fullmatch(name):
             raise StartupError(f"unsafe environment variable name: {name!r}")
-        value = (deployment.public_webhook_url
-                 if name == "TWILIO_WEBHOOK_URL" and deployment.with_ngrok
-                 else environ.get(name))
+        if deployment.with_ngrok and name == "TWILIO_WEBHOOK_URL":
+            value = deployment.public_webhook_url
+        else:
+            value = environ.get(name)
         if not value:
             raise StartupError(f"required environment variable is missing: {name}")
         if any(character in value for character in ("\x00", "\n", "\r")):
             raise StartupError(f"environment value cannot be safely stored: {name}")
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'{name}="{escaped}"\n')
+    if deployment.launch.sms_enabled:
+        media_base = environ.get("TWILIO_PUBLIC_MEDIA_BASE_URL")
+        if deployment.with_ngrok:
+            parsed = urlsplit(deployment.public_webhook_url)
+            media_base = f"{parsed.scheme}://{parsed.netloc}"
+        if media_base:
+            if any(character in media_base for character in ("\x00", "\n", "\r")):
+                raise StartupError(
+                    "environment value cannot be safely stored: TWILIO_PUBLIC_MEDIA_BASE_URL"
+                )
+            escaped = media_base.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'TWILIO_PUBLIC_MEDIA_BASE_URL="{escaped}"\n')
     return "".join(lines).encode()
 
 
