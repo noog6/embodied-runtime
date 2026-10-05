@@ -50,8 +50,8 @@ cognition.
 The bytes exist only for the current request and are never written to WorkingMemory,
 persistent memory, Job Workspaces, or run-history content. The attachment is
 operator-supplied interaction input, not a camera observation, and consumes no
-scene acquisition. Mira replies by ordinary text SMS; outbound MMS is not
-implemented.
+scene acquisition. Mira replies by ordinary text SMS unless the operator explicitly invokes the
+outbound camera-picture flow described below.
 
 Replies longer than 1,600
 characters are not truncated or split; the runtime makes at most one send using a
@@ -69,3 +69,37 @@ private-value availability, never those values. Cognition-facing
 `inspect_run_history` withholds content-bearing `text=` lines before matching, so the
 raw logging does not create a conversation-history retrieval path; run history remains
 operational evidence rather than a conversation replay or archive.
+
+## Outbound camera pictures
+
+When SMS and a camera are enabled, an operator may explicitly ask through SMS,
+voice, or the console for a fresh camera picture to be sent to the configured
+operator number. Set `TWILIO_PUBLIC_MEDIA_BASE_URL` to the trusted public HTTPS
+origin that reaches the SMS HTTP listener (for example the HTTPS origin printed
+by an ngrok tunnel). Do not include a path; the runtime appends an unpredictable
+`/outbound-media/<bearer>` path. The origin is configuration, never inferred from
+request headers.
+
+Only JPEG camera captures are supported. A capture is retained only inside the
+current operator episode; sending uses those exact bytes and does not run visual
+interpretation. Accepted media is staged in memory for 15 minutes so Twilio can
+fetch it more than once. Staging is capped at four images and 12 MiB total, is
+not restored after restart, rejects overflow, and is cleared at shutdown. Bearer
+URLs must be treated as secrets. Twilio API acceptance means submission/queuing,
+not confirmation that the handset received the MMS. There is no retry or replay.
+
+This follows Twilio's documented outbound MMS model: `MediaUrl` must be publicly
+reachable and Twilio copies the fetched image into its Message media resource.
+Twilio documents a 5 MiB aggregate media limit and distinct queued, sent,
+delivered, failed, and undelivered states; the runtime therefore reports only
+the initial provider state returned by submission. See the official
+[MMS sending guide](https://www.twilio.com/docs/messaging/tutorials/how-to-send-sms-messages),
+[Message resource](https://www.twilio.com/docs/messaging/api/message-resource),
+and [Media resource](https://www.twilio.com/docs/messaging/api/media-resource).
+
+Physical acceptance: start the configured HTTPS tunnel and runtime, ask through
+each enabled operator channel to “send me a picture of what you’re looking at,”
+verify one MMS arrives at the configured operator phone, and compare it with the
+camera scene. Also verify a capture-only request sends nothing, and stop the
+tunnel after testing. This procedure sends a real message and must not be run as
+an automated development check.

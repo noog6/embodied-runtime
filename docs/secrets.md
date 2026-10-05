@@ -215,6 +215,7 @@ export TWILIO_AUTH_TOKEN='...'
 export TWILIO_PHONE_NUMBER='+1...'
 export MIRA_SMS_OPERATOR_NUMBER='+1...'
 export TWILIO_WEBHOOK_URL='https://example.ngrok-free.app/sms'
+export TWILIO_PUBLIC_MEDIA_BASE_URL='https://example.ngrok-free.app'
 ```
 
 ```sh

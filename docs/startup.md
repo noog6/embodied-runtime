@@ -94,6 +94,8 @@ Provider requirements are calculated from the effective launch:
 - enabled ElevenLabs TTS requires `ELEVENLABS_API_KEY`;
 - effective SMS requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
   `TWILIO_PHONE_NUMBER`, `MIRA_SMS_OPERATOR_NUMBER`, and `TWILIO_WEBHOOK_URL`.
+  Outbound camera MMS additionally requires `TWILIO_PUBLIC_MEDIA_BASE_URL`, the
+  trusted public HTTPS origin (without a path) for the same HTTP listener.
 
 Diagnostics report only `set` or `missing`. `--capture-env` is the explicit
 request to copy only those allowlisted, required values from the current

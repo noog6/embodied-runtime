@@ -603,3 +603,12 @@ does not append ordinary conversational turns.
 Phase 3 can admit multiple eligible contexts only after adding an explicit Job
 cognition capacity, bounded autonomous attention admission, multi-Job trigger
 arbitration, and policy for genuinely shared resources.
+
+## Outbound image boundary
+
+Outbound images use two separate lifetimes. A provider-neutral immutable image
+value and opaque reference are scoped to one operator cognition episode. A
+successful delivery stages the same bytes in a small transport-owned memory
+store long enough for an MMS provider to fetch them after that episode ends.
+Camera acquisition uses the canonical camera resource lease and is distinct
+from both visual interpretation and the explicitly authorized delivery effect.
