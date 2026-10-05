@@ -411,7 +411,9 @@ INSPECT_SELF_TOOL = CognitionToolDefinition(
     name="inspect_self",
     description=(
         "Read one bounded runtime-owned local condition. Use only when a missing "
-        "local fact is materially relevant. This is read-only and is not an effect."
+        "local fact is materially relevant. The earcons area describes short, "
+        "non-speech runtime cues and recent runtime playback evidence; playback "
+        "does not prove a person heard it. This is read-only and is not an effect."
     ),
     parameters={
         "type": "object",
@@ -6777,7 +6779,7 @@ class RobotApplication:
             arguments = self._tool_arguments(call, {"area"})
             value = arguments["area"]
             if type(value) is not str or value not in SELF_INSPECTION_AREAS:
-                raise ValueError("area must be network, storage, camera, or runtime")
+                raise ValueError("area must be network, storage, camera, runtime, or earcons")
             area = value
             LOGGER.info("[INSPECTION] area=%s status=requested", area)
             if self.state is not LifecycleState.RUNNING:
@@ -7122,6 +7124,33 @@ class RobotApplication:
                 SelfInspectionFact("visual_perception_enabled", str(self._visual_perception_backend is not None).lower()),
                 SelfInspectionFact("visual_perception_backend", "none" if self._visual_perception_backend is None else self._visual_perception_backend.identifier),
             ))
+        if area == "earcons":
+            snapshot = self.earcons.snapshot()
+            facts = [
+                SelfInspectionFact("output_available", str(snapshot.output_available).lower()),
+                SelfInspectionFact("evidence_scope", "runtime playback; human perception is not established"),
+            ]
+            for definition in snapshot.catalog:
+                facts.append(SelfInspectionFact(
+                    f"available_cue.{definition.cue.value}.meaning", definition.meaning
+                ))
+            for label, activity in (("last_attempt", snapshot.last_attempt),
+                                    ("last_played", snapshot.last_played)):
+                facts.append(SelfInspectionFact(f"{label}.available", str(activity is not None).lower()))
+                if activity is not None:
+                    facts.extend((
+                        SelfInspectionFact(f"{label}.cue", activity.cue.value),
+                        SelfInspectionFact(
+                            f"{label}.meaning",
+                            next(item.meaning for item in snapshot.catalog
+                                 if item.cue is activity.cue),
+                        ),
+                        SelfInspectionFact(f"{label}.status", activity.status.value),
+                        SelfInspectionFact(f"{label}.observed_at", activity.observed_at.isoformat(timespec="seconds")),
+                    ))
+                    if activity.reason is not None:
+                        facts.append(SelfInspectionFact(f"{label}.reason", activity.reason))
+            return SelfInspectionResult(area, tuple(facts))
         body = self.body_backend
         return SelfInspectionResult(area, (
             SelfInspectionFact("lifecycle", self.state.value),

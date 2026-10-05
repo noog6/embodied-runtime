@@ -23,6 +23,24 @@ that exact lease through local playback, and releases it in `finally`. A busy
 speaker or playback failure is logged and never changes the underlying semantic
 transition.
 
+The same immutable semantic catalog now supplies both tone generation and the
+model-facing meanings, so playback and awareness cannot maintain drifting cue
+lists. `inspect_self(area="earcons")` is a read-only view of that catalog and
+ephemeral current-process activity. `last_attempt` records whether the newest
+request was `played`, `skipped` (including unavailable output or a busy
+speaker), or `failed`; `last_played` advances only after output confirms
+successful playback. Runtime confirmation does not establish that a human
+heard the cue. Inspection neither acquires the speaker nor emits audio.
+
+These boundaries are intentionally distinct:
+
+1. **Harness-selected earcons (current):** a runtime event selects a semantic
+   cue and `EarconPlayer` attempts it under normal resource arbitration.
+2. **Earcon awareness (current):** cognition may inspect meanings and recent
+   runtime evidence through the existing read-only self-inspection acquisition.
+3. **Model-selectable earcons (future, out of scope):** cognition selecting or
+   requesting a cue is not implemented; there is no playback cognition effect.
+
 Earcons are deliberately lossy, immediate representations of state—not a
 guaranteed notification channel. Playback never waits behind TTS, retries, or
 enters a durable/in-memory backlog. If `audio.speaker` is occupied at the

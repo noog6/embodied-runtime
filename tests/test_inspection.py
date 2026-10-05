@@ -87,7 +87,7 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
     def test_exact_schema(self):
         self.assertEqual(INSPECT_SELF_TOOL.parameters, {
             "type": "object", "properties": {"area": {"type": "string", "enum": [
-                "network", "storage", "camera", "runtime",
+                "network", "storage", "camera", "runtime", "earcons",
             ]}}, "required": ["area"], "additionalProperties": False,
         })
 

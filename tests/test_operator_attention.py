@@ -554,6 +554,26 @@ class OperatorAttentionTests(unittest.IsolatedAsyncioTestCase):
                          ["inspect_self", "inspect_self"])
         await app.stop()
 
+    async def test_operator_can_acquire_semantic_earcon_evidence_once(self):
+        backend = ScriptedBackend((("inspect_self", {"area": "earcons"}),))
+        app = self.app(backend)
+        await app.start()  # The no-output player records the ready attempt as skipped.
+
+        self.assertEqual(await app.request_cognition("What was that sound?"), "final answer")
+
+        evidence = json.loads(backend.results[0].output)
+        facts = {fact["name"]: fact["value"] for fact in evidence["facts"]}
+        self.assertEqual(facts["available_cue.ready.meaning"],
+                         "the runtime became ready for normal operation")
+        self.assertEqual(facts["last_attempt.cue"], "ready")
+        self.assertEqual(facts["last_attempt.status"], "skipped")
+        self.assertEqual(facts["last_attempt.reason"], "output_unavailable")
+        self.assertEqual(facts["last_played.available"], "false")
+        self.assertIn("inspect_self", backend.requests[0][2])
+        self.assertEqual([item.name for item in app.working_memory.snapshot()[0].tool_outcomes],
+                         ["inspect_self"])
+        await app.stop()
+
     async def test_history_mixes_with_self_and_is_not_offered_as_third_acquisition(self):
         history = CountingHistoryReader()
         backend = ScriptedBackend((

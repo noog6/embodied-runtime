@@ -8,7 +8,7 @@ import socket
 from typing import Protocol
 
 
-SELF_INSPECTION_AREAS = ("network", "storage", "camera", "runtime")
+SELF_INSPECTION_AREAS = ("network", "storage", "camera", "runtime", "earcons")
 MAX_NETWORK_INTERFACES = 8
 
 
