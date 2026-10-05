@@ -82,6 +82,10 @@ enabled = true
 enabled = true
 database_path = "../data/mira-memory.sqlite3"
 
+[conversation_history]
+enabled = true
+database_path = "../data/conversations.sqlite3"
+
 [jobs]
 enabled = true
 database_path = "../data/jobs.sqlite3"
@@ -91,6 +95,10 @@ max_auto_steps = 3
 max_concurrent_work = 1
 scheduler_poll_seconds = 30
 ```
+
+`conversation_history` is optional and disabled when absent. When enabled its
+non-empty SQLite path is required. It provides bounded prior-session dialogue
+continuity; see [Conversation history](conversation-history.md).
 
 `interaction.environment` is one of `workstation`, `companion`, `unattended`,
 or `remote`, and defaults to `workstation`. It is a fixed runtime interaction
