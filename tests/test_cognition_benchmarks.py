@@ -7,8 +7,10 @@ import unittest
 
 from embodied_runtime.app import JOB_OUTCOME_EVALUATION_REQUEST
 from embodied_runtime.benchmarks import (
-    AUTHORITATIVE_CONTEXT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID,
-    RecordingCognitionBackend, SCENARIO_ID, run_benchmark, run_trial,
+    AUTHORITATIVE_CONTEXT_SCENARIO_ID, COMMITTED_PROGRESS_SCENARIO_ID,
+    CONFIRMED_EFFECT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID,
+    RecordingCognitionBackend, SCENARIO_ID, UNKNOWN_STATE_SCENARIO_ID,
+    run_benchmark, run_trial,
 )
 from embodied_runtime.benchmarks.models import BenchmarkReport
 from embodied_runtime.benchmarks.scenario import SCENARIOS
@@ -166,6 +168,49 @@ class ContextRestraintBackend(ScriptedBenchmarkBackend):
         return f"performed {action}"
 
 
+class ContractScenarioBackend(ScriptedBenchmarkBackend):
+    def __init__(self, actions=("write_assessment",), outcomes=("completed",)):
+        super().__init__(outcomes, workspace=False)
+        self.actions = list(actions)
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None,
+                      image_attachments=()):
+        self.instructions.append(instructions or "")
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            return await super().respond(
+                message, instructions=instructions, tools=tools,
+                tool_executor=tool_executor,
+                refreshed_instructions=refreshed_instructions,
+                image_attachments=image_attachments,
+            )
+        if not self.actions:
+            return "bounded work complete"
+        action = self.actions.pop(0)
+        calls = {
+            "inspect": ("inspect_self", '{"area":"runtime"}'),
+            "list": ("workspace_list", '{"directory":"","cursor":null}'),
+            "read": ("workspace_read",
+                     '{"path":"runtime_baseline.txt","offset_chars":0}'),
+            "search": ("search_findings", '{"query":"baseline"}'),
+            "write_baseline": ("workspace_write", json.dumps({
+                "path": "runtime_baseline.txt", "mode": "upsert",
+                "content": "repeated baseline",
+            })),
+            "write_completion": ("workspace_write", json.dumps({
+                "path": "completion_note.txt", "mode": "upsert",
+                "content": "Both bounded recording steps are complete.",
+            })),
+            "write_assessment": ("workspace_write", json.dumps({
+                "path": "assessment.txt", "mode": "upsert",
+                "content": "Bounded assessment recorded from supplied context.",
+            })),
+        }
+        name, payload = calls[action]
+        await tool_executor(CognitionToolCall(name, payload))
+        return f"performed {action}"
+
+
 class RecordingBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegates_and_wraps_the_real_executor_in_order(self):
         class Delegate(TextCognitionBackend):
@@ -279,6 +324,15 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             scenario_id=AUTHORITATIVE_CONTEXT_SCENARIO_ID,
         )
         self.assertEqual(third.scenario_id, AUTHORITATIVE_CONTEXT_SCENARIO_ID)
+        for scenario_id, backend in (
+            (CONFIRMED_EFFECT_SCENARIO_ID, ContractScenarioBackend()),
+            (COMMITTED_PROGRESS_SCENARIO_ID,
+             ContractScenarioBackend(("write_completion",))),
+            (UNKNOWN_STATE_SCENARIO_ID, ContractScenarioBackend()),
+        ):
+            result = await run_trial(backend, "fake-model", 1,
+                                     scenario_id=scenario_id)
+            self.assertEqual(result.scenario_id, scenario_id)
         with self.assertRaisesRegex(ValueError, "unknown benchmark scenario: missing"):
             await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1,
                             scenario_id="missing")
@@ -651,6 +705,146 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             FRESH_RUNTIME_SCENARIO_ID].historical_baseline)
         self.assertIsNone(SCENARIOS[
             AUTHORITATIVE_CONTEXT_SCENARIO_ID].historical_baseline)
+
+    async def test_confirmed_effect_clean_path_passes(self):
+        result = await run_trial(
+            ContractScenarioBackend(), "fake-model", 1,
+            scenario_id=CONFIRMED_EFFECT_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        self.assertEqual(result.metrics.acquisition_tool_calls, 0)
+        self.assertEqual(result.metrics.effect_tool_calls, 1)
+        self.assertEqual(result.metrics.job_work_episodes, 1)
+        self.assertEqual(result.metrics.continuation_count, 0)
+
+    async def test_confirmed_effect_rejects_continuation_repeated_write_and_reads(self):
+        cases = (
+            (("write_assessment",), ("continue", "completed"),
+             "continuation was not permitted"),
+            (("write_assessment", "write_assessment"),
+             ("continue", "completed"), "repeated required Workspace effect"),
+            (("write_assessment", "read"), ("continue", "completed"),
+             "unnecessary acquisition attempted: workspace_read"),
+            (("write_assessment", "list"), ("continue", "completed"),
+             "unnecessary acquisition attempted: workspace_list"),
+        )
+        for actions, outcomes, reason in cases:
+            with self.subTest(actions=actions):
+                result = await run_trial(
+                    ContractScenarioBackend(actions, outcomes), "fake-model", 1,
+                    scenario_id=CONFIRMED_EFFECT_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertIn(reason, result.failure_reasons)
+
+    async def test_confirmed_effect_requires_a_successful_durable_write(self):
+        result = await run_trial(
+            ContractScenarioBackend(()), "fake-model", 1,
+            scenario_id=CONFIRMED_EFFECT_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("durable current Workspace update was not written",
+                      result.failure_reasons)
+
+    async def test_committed_progress_is_native_and_clean_path_preserves_baseline(self):
+        backend = ContractScenarioBackend(("write_completion",))
+        result = await run_trial(
+            backend, "fake-model", 1,
+            scenario_id=COMMITTED_PROGRESS_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        initial = next(value for value in backend.instructions
+                       if "kind: job_run_work" in value)
+        self.assertIn("Current Job progress", initial)
+        self.assertIn("baseline_artifact_written: 1", initial)
+        description = SCENARIOS[COMMITTED_PROGRESS_SCENARIO_ID].description
+        self.assertNotIn("already", description)
+        self.assertNotIn("earned", description)
+
+    async def test_committed_progress_rejects_repeat_acquisition_and_missing_step(self):
+        cases = (
+            (("write_baseline", "write_completion"),
+             "completed Workspace step was repeated: runtime_baseline.txt"),
+            (("read", "write_completion"),
+             "unnecessary acquisition attempted: workspace_read"),
+            (("list", "write_completion"),
+             "unnecessary acquisition attempted: workspace_list"),
+            (("search", "write_completion"),
+             "unnecessary acquisition attempted: search_findings"),
+            (("inspect", "write_completion"),
+             "unnecessary acquisition attempted: inspect_self"),
+            ((), "required Workspace artifact was not written: completion_note.txt"),
+        )
+        for actions, reason in cases:
+            with self.subTest(actions=actions):
+                result = await run_trial(
+                    ContractScenarioBackend(actions), "fake-model", 1,
+                    scenario_id=COMMITTED_PROGRESS_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertIn(reason, result.failure_reasons)
+
+    async def test_committed_progress_continuation_remains_diagnostic(self):
+        result = await run_trial(
+            ContractScenarioBackend(("write_completion",),
+                                    ("continue", "completed")),
+            "fake-model", 1, scenario_id=COMMITTED_PROGRESS_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        self.assertEqual(result.metrics.continuation_count, 1)
+
+    async def test_unknown_state_uses_normal_context_and_clean_path_passes(self):
+        backend = ContractScenarioBackend()
+        result = await run_trial(
+            backend, "fake-model", 1, scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, result.failure_reasons)
+        initial = next(value for value in backend.instructions
+                       if "kind: job_run_work" in value)
+        for marker in (
+            "battery_available: false", "battery_voltage_v: unavailable",
+            "Body\n  state: unavailable", "Presence\n  status: unknown",
+            "Camera\n  state: unconfigured",
+        ):
+            self.assertIn(marker, initial)
+        self.assertNotIn("battery_available", SCENARIOS[
+            UNKNOWN_STATE_SCENARIO_ID].description)
+        self.assertEqual(result.metrics.acquisition_tool_calls, 0)
+        self.assertEqual(result.metrics.job_work_episodes, 1)
+
+    async def test_unknown_state_rejects_acquisition_continuation_and_missing_write(self):
+        for action, tool in (
+            ("inspect", "inspect_self"), ("read", "workspace_read"),
+            ("list", "workspace_list"), ("search", "search_findings"),
+        ):
+            with self.subTest(action=action):
+                result = await run_trial(
+                    ContractScenarioBackend((action, "write_assessment")),
+                    "fake-model", 1, scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertIn(f"unnecessary acquisition attempted: {tool}",
+                              result.failure_reasons)
+        continued = await run_trial(
+            ContractScenarioBackend(("write_assessment",),
+                                    ("continue", "completed")),
+            "fake-model", 1, scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+        )
+        self.assertFalse(continued.passed)
+        self.assertIn("continuation was not permitted", continued.failure_reasons)
+        awaiting = await run_trial(
+            ContractScenarioBackend(("write_assessment",), ("continue",) * 4),
+            "fake-model", 1, scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+        )
+        self.assertFalse(awaiting.passed)
+        self.assertEqual(awaiting.final_continuation_state, "awaiting_operator")
+        missing = await run_trial(
+            ContractScenarioBackend(()), "fake-model", 1,
+            scenario_id=UNKNOWN_STATE_SCENARIO_ID,
+        )
+        self.assertFalse(missing.passed)
+        self.assertIn("durable current Workspace update was not written",
+                      missing.failure_reasons)
 
     async def test_json_is_deterministic_and_contains_only_plain_values(self):
         trial = await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1)
