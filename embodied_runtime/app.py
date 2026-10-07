@@ -2587,29 +2587,40 @@ class RobotApplication:
         if exact is not None and exact.execution_state == "parked":
             task_binding = exact.task_binding
             continuation = exact.continuation
-            if (task_binding is None or continuation is None
+            if (task_binding is None or task_binding.task is not exact.binding.task
                     or task_binding.task.status is not TaskStatus.PAUSED
-                    or continuation.task_id != exact.task_id):
+                    or (continuation is not None
+                        and (continuation.job_id, continuation.run_id, continuation.task_id)
+                        != (exact.job_id, exact.run_id, exact.task_id))):
                 exact.continuation = None
-                exact.execution_state = "runnable"
-                if self._parked_job_run_id == exact.run_id:
-                    self._parked_job_run_id = None
                 raise RuntimeError("parked JobRun authority is stale: binding_changed")
             assert self.jobs is not None
             authoritative_job = self.jobs.get_job(exact.job_id)
             authoritative_run = self.jobs.get_run(exact.run_id)
             if (authoritative_job is None or not authoritative_job.enabled
+                    or authoritative_job.id != exact.job_id
                     or authoritative_run is None
+                    or authoritative_run.job_id != exact.job_id
                     or authoritative_run.status is not JobRunStatus.RUNNING):
-                self._clear_job_continuation("authority_stale")
-                exact.task_binding = None
-                exact.execution_state = "terminal"
-                if self._parked_job_run_id == exact.run_id:
-                    self._parked_job_run_id = None
-                if self._foreground_job_run_id == exact.run_id:
-                    self._foreground_job_run_id = None
-                self._remove_job_execution_context(exact.run_id)
+                # Revoke execution permission, not ownership of a known live Run.
+                # Disabled/missing Job authority leaves its paused exact context
+                # available for terminal control and shutdown reconciliation.
+                exact.continuation = None
+                if (authoritative_run is None
+                        or authoritative_run.job_id != exact.job_id
+                        or authoritative_run.status not in (
+                            JobRunStatus.PENDING, JobRunStatus.RUNNING)):
+                    exact.task_binding = None
+                    exact.execution_state = "terminal"
+                    self._remove_job_execution_context(exact.run_id)
+                LOGGER.warning(
+                    "[JOBS] job=JOB%s run=RUN%s continuation=restore_rejected "
+                    "reason=authority_stale",
+                    exact.job_id, exact.run_id,
+                )
                 raise RuntimeError("parked JobRun authority is stale: authority_stale")
+            # Explicit restoration may have no continuation after authority was
+            # rejected. Only a later accepted work outcome can grant new steps.
             running = task_binding.task.transition_to(TaskStatus.RUNNING)
             normalized = validate_goal_description(running.goal.description)
             goal = ActiveGoal(self._next_goal_id, normalized)

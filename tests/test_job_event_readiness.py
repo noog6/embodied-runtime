@@ -331,7 +331,8 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.store.set_job_enabled(parked.job.id, False)
         await self.publish_presence(app)
         self.assertIsNone(app.job_continuation)
-        self.assertIsNone(app._parked_job_run)
+        self.assertEqual(app._parked_job_run.binding.run.id, parked.run.id)
+        self.assertIsNotNone(app._context_for_run(parked.run.id))
         self.assertIs(self.store.get_run(parked.run.id).status, JobRunStatus.RUNNING)
         await app.stop()
 
@@ -360,7 +361,8 @@ class JobEventReadinessTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "authority is stale"):
             await app.work_current_job_once()
         self.assertIsNone(app.job_continuation)
-        self.assertIsNone(app._parked_job_run)
+        self.assertIs(app._parked_job_run.binding.task.status, TaskStatus.PAUSED)
+        self.assertIsNotNone(app._context_for_run(app._parked_job_run.binding.run.id))
         await app.stop()
 
     async def test_event_is_sticky_while_paused_and_diagnostic_is_bounded(self):

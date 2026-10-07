@@ -283,11 +283,16 @@ class JobContinuationRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self.pulse()
         await self.pulse()
         self.assertEqual(len(self.backend.requests), 2)
+        if change == "disable":
+            self.assertIs(self.app._context_for_run(context.run_id), context)
+            self.assertEqual(context.execution_state, "parked")
+            self.assertIs(context.binding.task.status, TaskStatus.PAUSED)
+            self.assertIsNone(context.continuation)
+            await self.app.finish_job_run_by_id(context.run_id, JobRunStatus.STOPPED)
         self.assertEqual(self.app.job_execution_contexts, ())
         self.assertEqual(self.app.job_work_slots_occupied, 0)
         self.assertFalse(self.app.episode_coordinator.current_autonomous_episodes)
-        self.assertIs(self.store.get_run(context.run_id).status,
-                      JobRunStatus.RUNNING if change == "disable" else JobRunStatus.STOPPED)
+        self.assertIs(self.store.get_run(context.run_id).status, JobRunStatus.STOPPED)
 
     async def test_disabled_job_is_revalidated_before_recovery(self):
         await self.authority_change_after_failure("disable")
