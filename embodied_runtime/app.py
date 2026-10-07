@@ -1023,6 +1023,7 @@ class JobExecutionContext:
     active_work_task: asyncio.Task[object] | None = None
     progress: JobProgress | None = None
     execution_state: str = "runnable"
+    continuation_offer_failed: bool = False
 
     def __post_init__(self) -> None:
         if (self.task_binding is not None
@@ -2744,6 +2745,23 @@ class RobotApplication:
             token = self._job_execution_context.set(context)
             try:
                 self._offer_exact_job_continuation(trigger=trigger)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Isolate each offer so a failed authority read neither kills
+                # polling nor starves later Runs. JobStore has no common backend
+                # error type. Do not change authority or retry within this offer;
+                # the ordinary gate revalidates it at the next opportunity.
+                if not context.continuation_offer_failed:
+                    LOGGER.exception(
+                        "[JOBS] job=JOB%s run=RUN%s continuation=offer_failed source=%s",
+                        context.job_id, context.run_id, trigger,
+                    )
+                context.continuation_offer_failed = True
+            else:
+                # One traceback per consecutive failure streak, bounded by the
+                # lifetime of this exact context rather than a growing retry map.
+                context.continuation_offer_failed = False
             finally:
                 self._job_execution_context.reset(token)
 
@@ -2818,6 +2836,10 @@ class RobotApplication:
             try:
                 current = self._restore_parked_job_run()
             except RuntimeError:
+                # Stale authority revokes its grant before rejecting restore.
+                # A backend RuntimeError must reach the per-context error boundary.
+                if self._job_continuation is not None:
+                    raise
                 return
             task_binding = self._current_task_binding
         if (task_binding is None or task_binding.active_goal is None
