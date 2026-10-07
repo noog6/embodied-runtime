@@ -276,6 +276,14 @@ an explicit `job work` can grant a fresh burst. An automatic provider failure
 also moves to `awaiting_operator` and is not automatically retried. Terminal
 Job operations clear the record.
 
+An error while offering one context is isolated from other contexts and the
+heartbeat. A failed pre-execution authority read leaves the exact parked binding,
+readiness, progress, and automatic budget unchanged. A later ordinary opportunity
+rechecks current authority and admission rules; stopping the Run or disabling the
+Job still prevents work. The first error in each consecutive offer failure streak
+is logged with a traceback. There is no immediate retry loop or retry queue, and
+cancellation still terminates polling.
+
 Continuation is session-local, volatile, bounded,
 operator-fair, and non-recovering. The heartbeat neither scans durable running
 rows nor discovers or starts enabled Jobs. Restart does not resume work, and
