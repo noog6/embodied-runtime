@@ -379,9 +379,21 @@ does not satisfy operator readiness.
 
 Before restoration, the runtime re-reads the Job and JobRun and requires the Job to
 still exist and be enabled, the Run to still exist in `running`, and every
-Job/Run/Task continuation identifier to match. A stale, disabled, missing, or
-terminal authority clears only that volatile parked binding and fails closed. The
-runtime does not scan durable runs for replacement work.
+Job/Run/Task binding and any continuation identifier to match. A transient authority
+read failure leaves the exact parked context and valid grant unchanged. Definitive
+rejection revokes the automatic grant without running cognition. A disabled or
+missing Job leaves its known nonterminal Run's paused Task, exact identity, and
+progress available for terminal administration and shutdown reconciliation. An
+absent Run, mismatched durable ownership, or already-terminal durable Run permits
+detaching that stale context; an immutable terminal result is not rewritten. A stale
+Task binding likewise rejects execution while retaining the Run for reconciliation.
+The runtime does not scan durable runs for replacement work.
+
+Re-enabling after rejected restoration leaves retained work parked with no automatic
+grant. Explicit `job work` or Task resume revalidates current authority; resume alone
+does not rearm the revoked grant. Only an accepted explicit work outcome may grant
+a fresh automatic budget. The old occurrence must be terminalized before another
+occurrence of the same Job can start.
 
 There is deliberately only one parked-continuation slot. If a second occurrence asks
 to continue while that slot is occupied, the original parked authority is preserved
@@ -581,8 +593,9 @@ interrupted occurrence has `finished_at`, needs no result report, remains
 visible in JobRun history, and is excluded from latest-completed-result lookup.
 
 Shutdown first stops the continuation heartbeat, cancels and joins in-flight
-Job work, and clears continuation. If the current durable occurrence is still
-`pending` or `running` after that quiescence, shutdown marks it `interrupted`
+Job work, and clears continuation. Each known durable occurrence still in
+`pending` or `running` after that quiescence, including retained work whose
+restoration was rejected, is marked `interrupted`
 without cognition, a result report, or a model-authored summary. It then
 releases the current Task's volatile ActiveGoal and resources and clears both
 Task and JobRun bindings before closing the store. A legitimate terminal result
@@ -616,6 +629,8 @@ an exact `RUN<n>` selector; selector-less compatibility is allowed only when one
 live occurrence is unambiguous. Exact control cancels and joins that Run's active
 cognition before terminalizing its Task and durable result. Disabling a Job
 prevents future activation but deliberately does not stop an already-live Run.
+Rejected restoration retains a known nonterminal Run for exact terminal control;
+it does not silently stop it or discard its last usable owner.
 Exact stop, complete, and fail decisions may also terminalize a parked Run; the
 runtime does not start autonomous cognition merely to apply that operator decision.
 

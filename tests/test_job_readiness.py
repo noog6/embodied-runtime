@@ -487,11 +487,15 @@ class JobReadinessTests(unittest.IsolatedAsyncioTestCase):
         await self.start_job(app)
         job_id = app.current_job_run.job.id
         await app.work_current_job_once()
+        context = app._context_for_run(app.current_job_run.run.id)
         self.store.set_job_enabled(job_id, False)
         with self.assertRaisesRegex(RuntimeError, "authority is stale"):
             await app.work_current_job_once()
         self.assertIsNone(app.job_continuation)
-        self.assertIsNone(app._parked_job_run)
+        self.assertIs(app._context_for_run(context.run_id), context)
+        self.assertIs(app._parked_job_run.binding, context.binding)
+        self.assertIs(context.binding.task.status, TaskStatus.PAUSED)
+        self.assertEqual(len(backend.requests), 2)
         await app.stop()
 
     async def test_invalid_cross_field_combinations_do_not_arm(self):
