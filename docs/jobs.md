@@ -552,7 +552,11 @@ stopped summaries are outcomes; failed summaries are errors.
 Task terminalization precedes durable JobRun terminalization. If persistence
 then fails, the terminal Task is not restarted: the volatile binding is retained
 fail-closed so the same terminal intent can be retried, while a conflicting
-terminal retry is rejected.
+terminal retry is rejected. Exact Run-ID retry validates the target's retained
+terminal Task snapshot, released Task activation binding, and durable ownership;
+an unrelated live Run's foreground or active Task does not block or authorize it.
+Retry persists the decision without replaying cognition or effects. Already-terminal
+durable results remain immutable under the store's existing transition rules.
 
 ## Catalogs, assignment, and claims
 
