@@ -2167,7 +2167,9 @@ class RobotApplication:
                 raise RuntimeError(
                     f"JobRun terminal retry must remain {task.status.value}"
                 )
-            if self.current_task is not None:
+            # Terminalization must release this context's live Task activation.
+            # A sibling's foreground Task is unrelated to this retained retry.
+            if context.task_binding is not None:
                 raise RuntimeError("current JobRun Task binding is inconsistent")
         else:
             task_binding = context.task_binding
