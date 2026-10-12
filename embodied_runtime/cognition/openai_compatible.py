@@ -98,11 +98,12 @@ class OpenAICompatibleBackend(TextCognitionBackend):
             arguments["tool_choice"] = "none"
         if self._openrouter:
             arguments["extra_body"] = {"provider": {"require_parameters": True, "allow_fallbacks": False}}
+        # Client setup failures are not attempted outbound provider calls.
+        client = self._get_client()
         started = time.perf_counter()
         response = None
         caught = None
         try:
-            client = self._get_client()
             # A wall deadline bounds the entire SDK call, including a stalled fake
             # or endpoint. Zero SDK retries prevents hidden interaction replay.
             async with asyncio.timeout(self.config.request_timeout_seconds):
@@ -147,24 +148,12 @@ class OpenAICompatibleBackend(TextCognitionBackend):
                 counts["output_tokens"], counts["total_tokens"], category,
             )
             if self.observability is not None:
-                metadata = dict(protocol=self.protocol, endpoint=self.endpoint, returned_model=returned)
-                if caught is None:
-                    self.observability.provider_completed(
-                        self.identifier, self.model, stage, duration_ms=duration,
-                        input_tokens=counts["input_tokens"] or 0,
-                        cached_input_tokens=cached or 0,
-                        cache_write_tokens=counts["cache_write_tokens"] or 0,
-                        output_tokens=counts["output_tokens"] or 0,
-                        total_tokens=counts["total_tokens"] or 0,
-                        usage_available=available, raw_usage=counts, **metadata,
-                    )
-                else:
-                    self.observability.provider_failed(
-                        self.identifier, self.model, stage, duration_ms=duration,
-                        error=category, status=status, failure_category=category,
-                        usage=counts if response is not None else None,
-                        **metadata,
-                    )
+                self.observability.provider_call(
+                    self.identifier, self.model, stage, duration_ms=duration,
+                    status=status, error=category, failure_category=category,
+                    usage=counts if response is not None else None,
+                    protocol=self.protocol, endpoint=self.endpoint, returned_model=returned,
+                )
 
     @staticmethod
     def _decode(response: Any, *, allow_tool: bool) -> tuple[str | None, dict[str, Any] | None]:

@@ -35,16 +35,93 @@ def test_zero_snapshot_and_unknown_cost():
     }
 
 
-def test_provider_usage_distinguishes_cached_tokens_and_failure_has_no_usage():
+def test_provider_failure_counts_attempt_and_marks_aggregate_usage_unavailable():
     observed, _ = make()
     observed.provider_completed("provider", "model", "initial", input_tokens=20,
                                 cached_input_tokens=7, output_tokens=3,
                                 total_tokens=23, duration_ms=14)
     observed.provider_failed("provider", "model", "continuation", duration_ms=2)
-    metrics = observed.snapshot()["metrics"]
-    assert (metrics["provider_requests"], metrics["provider_failures"]) == (1, 1)
+    snapshot = observed.snapshot()
+    metrics = snapshot["metrics"]
+    assert (metrics["provider_requests"], metrics["provider_failures"]) == (2, 1)
+    assert metrics["provider_duration_ms"] == 16
     assert (metrics["input_tokens"], metrics["cached_input_tokens"],
-            metrics["output_tokens"], metrics["total_tokens"]) == (20, 7, 3, 23)
+            metrics["output_tokens"], metrics["total_tokens"]) == (None, None, None, None)
+    assert snapshot["provider_usage"][0]["requests"] == 2
+    assert snapshot["provider_usage"][0]["duration_ms"] == 16
+    assert not snapshot["provider_usage"][0]["usage_available"]
+    assert snapshot["provider_calls"][0]["usage"]["total_tokens"] == 23
+    assert snapshot["provider_calls"][1]["usage"] is None
+    assert snapshot["cost"]["estimated_usd"] is None
+
+
+def test_rejected_output_counts_reported_usage_duration_and_cost_once():
+    pricing = PricingCatalog({("p", "m"): TokenPrice(
+        Decimal("1"), Decimal("0.25"), Decimal("2"), Decimal("1.5"))}, "v1")
+    observed, _ = make(pricing=pricing)
+    observed.provider_completed("p", "m", "initial", duration_ms=14)
+    observed.provider_failed("p", "m", "continuation", duration_ms=27,
+                             failure_category="truncated", usage={
+                                 "input_tokens": 1_000_000, "cached_input_tokens": 200_000,
+                                 "cache_write_tokens": 100_000, "output_tokens": 500_000,
+                                 "total_tokens": 1_500_000,
+                             })
+    snapshot = observed.snapshot()
+    metrics = snapshot["metrics"]
+    assert metrics["provider_requests"] == 2
+    assert metrics["provider_failures"] == 1
+    assert metrics["provider_duration_ms"] == 41
+    assert metrics["input_tokens"] == 1_000_000
+    assert metrics["total_tokens"] == 1_500_000
+    assert snapshot["provider_usage"][0]["requests"] == 2
+    assert snapshot["provider_usage"][0]["duration_ms"] == 41
+    assert snapshot["provider_usage"][0]["usage_available"]
+    assert snapshot["cost"]["estimated_usd"] == "1.900000"
+    assert snapshot["dimensions"]["provider_models"]["p/m"] == 2
+    assert snapshot["dimensions"]["provider_stages"] == {"initial": 1, "continuation": 1}
+    calls = snapshot["provider_calls"]
+    assert len(calls) == 2
+    assert calls[1]["status"] == "failed"
+    assert calls[1]["failure_category"] == "truncated"
+    assert calls[1]["usage_available"]
+    assert [event.status for event in observed.events(component="cognition")] == ["completed", "failed"]
+
+
+def test_timeout_without_response_never_becomes_zero_usage_or_estimated_cost():
+    observed, _ = make(pricing=BUILT_IN_PRICING)
+    observed.provider_failed("openai-responses", "gpt-6-luna", "initial", duration_ms=50,
+                             failure_category="timeout")
+    snapshot = observed.snapshot()
+    assert snapshot["metrics"]["provider_requests"] == 1
+    assert snapshot["metrics"]["provider_failures"] == 1
+    assert snapshot["metrics"]["provider_duration_ms"] == 50
+    assert snapshot["metrics"]["total_tokens"] is None
+    assert snapshot["provider_usage"][0]["requests"] == 1
+    assert snapshot["provider_usage"][0]["total_tokens"] is None
+    assert not snapshot["provider_usage"][0]["usage_available"]
+    assert snapshot["cost"]["status"] == "unavailable"
+    observed.provider_completed("openai-responses", "gpt-6-luna", "continuation", input_tokens=5)
+    later = observed.snapshot()
+    assert later["metrics"]["provider_requests"] == 2
+    assert later["metrics"]["total_tokens"] is None
+    assert later["cost"]["status"] == "unavailable"
+
+
+def test_rejected_partial_or_invalid_usage_remains_visible_and_unavailable():
+    for usage, expected_input in (
+        ({"input_tokens": 7, "output_tokens": 2}, 7),
+        ({"input_tokens": True, "output_tokens": 2, "total_tokens": 3}, None),
+        ({"input_tokens": -1, "output_tokens": 2, "total_tokens": 1}, None),
+    ):
+        observed, _ = make()
+        observed.provider_failed("p", "m", "initial", usage=usage,
+                                 failure_category="malformed_response")
+        snapshot = observed.snapshot()
+        assert snapshot["metrics"]["provider_requests"] == 1
+        assert snapshot["metrics"]["total_tokens"] is None
+        assert snapshot["provider_calls"][0]["usage"]["input_tokens"] == expected_input
+        assert snapshot["provider_calls"][0]["usage"]["output_tokens"] == 2
+        assert not snapshot["provider_calls"][0]["usage_available"]
 
 
 def test_configured_cost_and_missing_price_are_explicit():

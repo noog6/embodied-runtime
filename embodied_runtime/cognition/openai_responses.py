@@ -1,6 +1,7 @@
 """Text cognition through the OpenAI Responses API."""
 
 from collections.abc import Sequence
+import asyncio
 import base64
 from typing import Any
 import logging
@@ -101,9 +102,10 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         started = time.perf_counter()
         try:
             response = await client.responses.create(**arguments)
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
+            status = "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
             self._log_provider_request(
-                kind, ordinal, cold, "failed", started, message_chars,
+                kind, ordinal, cold, status, started, message_chars,
                 instruction_chars, tools,
             )
             if self.observability is not None:
@@ -113,6 +115,7 @@ class OpenAIResponsesBackend(TextCognitionBackend):
                     error=type(error).__name__,
                     protocol=self.protocol, endpoint=self.endpoint,
                     failure_category=failure_category(error),
+                    status=status,
                 )
             raise
         self._log_provider_request(
@@ -125,6 +128,13 @@ class OpenAIResponsesBackend(TextCognitionBackend):
             def token(name: str, owner: Any = usage) -> int:
                 value = getattr(owner, name, 0) if owner is not None else 0
                 return value if type(value) is int and value >= 0 else 0
+            raw_usage = None if usage is None else {
+                name: value if type(value := getattr(usage, name, None)) is int and value >= 0 else None
+                for name in ("input_tokens", "output_tokens", "total_tokens")
+            }
+            if raw_usage is not None:
+                raw_usage.update(cached_input_tokens=token("cached_tokens", details),
+                                 cache_write_tokens=token("cache_write_tokens", details))
             self.observability.provider_completed(
                 self.identifier, self.model, kind,
                 input_tokens=token("input_tokens"),
@@ -136,6 +146,7 @@ class OpenAIResponsesBackend(TextCognitionBackend):
                 usage_available=self._usage_available(response),
                 protocol=self.protocol, endpoint=self.endpoint,
                 returned_model=getattr(response, "model", None),
+                raw_usage=raw_usage,
             )
         return response
 

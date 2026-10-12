@@ -222,5 +222,9 @@ misleading zero for unreported usage. These changes do not change scenario seman
 Existing fields retain their names; consumers must accept `null` token counts and
 ignore additive fields. Unknown pricing remains unavailable, and compatible calls
 never inherit direct OpenAI prices merely from a model name.
+`provider_requests` counts all outbound attempts after prewarm, including failed
+or cancelled calls. Reported usage counts even when the response is rejected;
+an attempt with unknown usage makes token totals unavailable. Response acceptance
+and scenario pass/fail remain separate from provider accounting.
 Captured arguments, results, and response text are each limited to 4,000
 characters; credentials and environment variables are never included.

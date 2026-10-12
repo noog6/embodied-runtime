@@ -21,6 +21,9 @@ MAX_EVENT_STRING = 160
 MAX_EVENT_METADATA_ITEMS = 12
 MAX_EVENT_IDENTIFIERS = 8
 DEFAULT_EVENT_CAPACITY = 200
+TOKEN_FIELDS = (
+    "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "total_tokens",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +164,7 @@ class RunObservability:
                            protocol: str | None = None, endpoint: str | None = None,
                            returned_model: str | None = None,
                            raw_usage: Mapping[str, int | None] | None = None) -> None:
+        """Compatibility entry point for an accepted provider response."""
         values = (input_tokens, cached_input_tokens, cache_write_tokens,
                   output_tokens, duration_ms)
         if any(type(value) is not int or value < 0 for value in values):
@@ -168,6 +172,44 @@ class RunObservability:
         total = input_tokens + output_tokens if total_tokens is None else total_tokens
         if type(total) is not int or total < 0:
             return
+        usage = dict(raw_usage) if raw_usage is not None else {
+            name: value if usage_available else None for name, value in (
+                ("input_tokens", input_tokens), ("cached_input_tokens", cached_input_tokens),
+                ("cache_write_tokens", cache_write_tokens), ("output_tokens", output_tokens),
+                ("total_tokens", total),
+            )
+        }
+        self.provider_call(
+            provider, model, stage, duration_ms=duration_ms, usage=usage,
+            usage_available=usage_available, protocol=protocol, endpoint=endpoint,
+            returned_model=returned_model,
+        )
+
+    def provider_call(self, provider: str, model: str | None, stage: str, *,
+                      status: str = "completed", duration_ms: int = 0,
+                      usage: Mapping[str, int | None] | None = None,
+                      usage_available: bool | None = None,
+                      protocol: str | None = None, endpoint: str | None = None,
+                      returned_model: str | None = None, error: str | None = None,
+                      failure_category: str | None = None) -> None:
+        """Account once per attempted outbound call, regardless of output acceptance.
+
+        Reported tokens remain usage even when output is rejected. Missing usage
+        makes aggregate tokens and cost unavailable; it never implies zero use.
+        """
+        if status not in {"completed", "failed", "cancelled"} or type(duration_ms) is not int or duration_ms < 0:
+            return
+        counts = {
+            name: value if type(value := (usage or {}).get(name)) is int and value >= 0 else None
+            for name in (*TOKEN_FIELDS, "reasoning_tokens")
+        }
+        available = usage_available is not False and all(
+            counts[name] is not None for name in ("input_tokens", "output_tokens", "total_tokens")
+        )
+        missing = {name for name in TOKEN_FIELDS if counts[name] is None}
+        input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, total = (
+            counts[name] or 0 for name in TOKEN_FIELDS
+        )
         key = (self._short(provider), self._short(model or "unknown"))
         with self._lock:
             if self._final is not None:
@@ -178,37 +220,28 @@ class RunObservability:
                                 ("output_tokens", output_tokens), ("total_tokens", total),
                                 ("provider_duration_ms", duration_ms)):
                 self._counters[name] += value
+            if status != "completed":
+                self._counters["provider_failures"] += 1
             self._dimensions["provider_models"]["/".join(key)] += 1
             self._dimensions["provider_stages"][self._short(stage)] += 1
             bucket = self._provider_usage.setdefault(key, Counter())
-            if not usage_available:
+            if not available:
                 self._missing_usage.add(key)
-            if raw_usage is not None:
-                missing = {name for name in (
-                    "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "total_tokens"
-                ) if raw_usage.get(name) is None}
-                self._missing_token_fields.setdefault(key, set()).update(missing)
-                if missing:
-                    self._unpriceable_usage.add(key)
+            self._missing_token_fields.setdefault(key, set()).update(missing)
             record = {
                 "backend": provider, "protocol": protocol, "endpoint": endpoint,
                 "requested_model": model, "returned_model": returned_model,
-                "stage": stage, "status": "completed", "duration_ms": duration_ms,
-                "usage_available": usage_available, "failure_category": None,
-                "usage": dict(raw_usage) if raw_usage is not None else {
-                    name: value if usage_available else None for name, value in (
-                        ("input_tokens", input_tokens), ("cached_input_tokens", cached_input_tokens),
-                        ("cache_write_tokens", cache_write_tokens), ("output_tokens", output_tokens),
-                        ("total_tokens", total),
-                    )
-                },
+                "stage": stage, "status": status, "duration_ms": duration_ms,
+                "usage_available": available, "failure_category": failure_category or error,
+                "usage": ({name: counts[name] for name in usage if name in counts}
+                          if usage is not None else None),
             }
             self._provider_calls.append({
                 name: self._short(value) if isinstance(value, str) else value
                 for name, value in record.items()
             })
             rate = self._pricing.rates.get(key) if self._pricing is not None else None
-            if (not usage_available
+            if (not available or missing
                     or cached_input_tokens + cache_write_tokens > input_tokens
                     or total != input_tokens + output_tokens
                     or (rate is not None and rate.max_input_tokens is not None
@@ -220,10 +253,11 @@ class RunObservability:
                                  ("output_tokens", output_tokens),
                                  ("total_tokens", total), ("duration_ms", duration_ms)):
                 bucket[field] += value
-        self.event("cognition", "provider_request", "completed", source=provider,
+        self.event("cognition", "provider_request", status, source=provider,
+                   severity="info" if status == "completed" else "error", error=error,
                    duration_ms=duration_ms, metadata={"model": model or "unknown", "stage": stage,
                        "protocol": protocol, "endpoint": endpoint, "returned_model": returned_model,
-                       "usage_available": usage_available})
+                       "usage_available": available, "failure_category": failure_category or error})
 
     def provider_failed(self, provider: str, model: str | None, stage: str, *,
                         duration_ms: int = 0, error: str | None = None,
@@ -231,28 +265,12 @@ class RunObservability:
                         returned_model: str | None = None, status: str = "failed",
                         failure_category: str | None = None,
                         usage: Mapping[str, int | None] | None = None) -> None:
-        self.increment("provider_failures")
-        with self._lock:
-            if self._final is None:
-                record = {
-                    "backend": provider, "protocol": protocol, "endpoint": endpoint,
-                    "requested_model": model, "returned_model": returned_model,
-                    "stage": stage, "status": status, "duration_ms": duration_ms,
-                    "usage_available": usage is not None and all(
-                        type(usage.get(name)) is int for name in ("input_tokens", "output_tokens", "total_tokens")
-                    ),
-                    "failure_category": failure_category or error,
-                    "usage": dict(usage) if usage is not None else None,
-                }
-                self._provider_calls.append({
-                    name: self._short(value) if isinstance(value, str) else value
-                    for name, value in record.items()
-                })
-        self.event("cognition", "provider_request", status, severity="error",
-                   source=provider, duration_ms=duration_ms, error=error,
-                   metadata={"model": model or "unknown", "stage": stage,
-                       "protocol": protocol, "endpoint": endpoint, "returned_model": returned_model,
-                       "failure_category": failure_category or error})
+        """Compatibility entry point for a failed or cancelled provider call."""
+        self.provider_call(
+            provider, model, stage, status=status, duration_ms=duration_ms,
+            error=error, protocol=protocol, endpoint=endpoint, returned_model=returned_model,
+            failure_category=failure_category, usage=usage,
+        )
 
     def tts_synthesized(self, provider: str, model: str, *, characters: int,
                         duration_ms: int = 0,
@@ -361,9 +379,8 @@ class RunObservability:
                     "stopped_at": stopped.isoformat() if status else None,
                     "elapsed_seconds": max(0.0, self._monotonic() - self._started_monotonic),
                     "status": status or "running", "shutdown": shutdown},
-            "metrics": {name: None if (self._missing_usage and name in {
-                "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "total_tokens"
-            }) or any(name in fields for fields in self._missing_token_fields.values())
+            "metrics": {name: None if (self._missing_usage and name in TOKEN_FIELDS)
+                or any(name in fields for fields in self._missing_token_fields.values())
                 else value for name, value in self._counters.items()},
             "provider_calls": list(self._provider_calls),
             "dimensions": {key: dict(value) for key, value in self._dimensions.items()},

@@ -433,10 +433,13 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
         module = ModuleType("openai")
         module.AsyncOpenAI = Mock()
         with patch.dict(sys.modules, {"openai": module}), patch.dict(os.environ, {}, clear=True):
-            backend = OpenAICompatibleBackend(config=CONFIG)
+            observed = RunObservability()
+            backend = OpenAICompatibleBackend(config=CONFIG, observability=observed)
             with self.assertRaisesRegex(CognitionError, "credential environment variable"):
                 await backend.prepare()
             module.AsyncOpenAI.assert_not_called()
+            self.assertEqual(observed.snapshot()["metrics"]["provider_requests"], 0)
+            self.assertEqual(observed.snapshot()["provider_calls"], [])
         backend, fake, _ = self.make(response())
         await backend.prepare()
         await backend.prepare()
@@ -523,6 +526,97 @@ class CompatibleBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trial.tool_trace[0].status, "applied")
         self.assertEqual(trial.metrics.effect_tool_calls, 1)
         self.assertEqual(len(fake.requests), 3)
+
+    async def test_rejected_continuation_accounts_usage_in_runtime_and_benchmark(self):
+        prewarm_usage = {"prompt_tokens": 1_000, "completion_tokens": 500, "total_tokens": 1_500,
+                         "prompt_tokens_details": {"cached_tokens": 200, "cache_write_tokens": 0}}
+        initial_usage = {**USAGE, "prompt_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 0}}
+        final_usage = {"prompt_tokens": 20, "completion_tokens": 7, "total_tokens": 27,
+                       "prompt_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 0}}
+        malformed = response("unusable", usage=final_usage)
+        malformed["choices"] = []
+        for final, category in (
+            (response("partial", finish="length", usage=final_usage), "truncated"),
+            (response("refused", refusal="refused", usage=final_usage), "refused"),
+            (malformed, "malformed_response"),
+        ):
+            with self.subTest(category=category):
+                fake = FakeCompletions(
+                    response("ready", usage=prewarm_usage),
+                    response(None, calls=[call("workspace_write", json.dumps({
+                        "path": "assessment.txt", "mode": "upsert", "content": "bounded",
+                    }))], usage=initial_usage), final,
+                )
+                backend = OpenAICompatibleBackend(config=CONFIG, client=client(fake))
+                trial = await run_trial(backend, CONFIG.model, 1)
+                self.assertFalse(trial.passed)
+                self.assertEqual(trial.failure_category, category)
+                self.assertEqual(trial.metrics.provider_requests, 2)
+                self.assertEqual(len(trial.provider_calls), 2)
+                self.assertTrue(trial.metrics.usage_available)
+                self.assertEqual((trial.metrics.input_tokens, trial.metrics.output_tokens,
+                                  trial.metrics.cached_input_tokens), (30, 10, 7))
+                self.assertEqual(trial.provider_calls[-1]["status"], "failed")
+                self.assertEqual(trial.provider_calls[-1]["usage"]["total_tokens"], 27)
+                snapshot = backend.observability.snapshot()
+                metrics = snapshot["metrics"]
+                self.assertEqual(metrics["provider_requests"], 3)
+                self.assertEqual(metrics["provider_failures"], 1)
+                self.assertEqual((metrics["input_tokens"], metrics["output_tokens"],
+                                  metrics["total_tokens"], metrics["cached_input_tokens"]),
+                                 (1_030, 510, 1_540, 207))
+                usage = snapshot["provider_usage"][0]
+                self.assertEqual(usage["requests"], 3)
+                self.assertEqual(usage["total_tokens"], 1_540)
+                self.assertEqual(metrics["provider_duration_ms"],
+                                 sum(item["duration_ms"] for item in snapshot["provider_calls"]))
+                self.assertEqual(usage["duration_ms"], metrics["provider_duration_ms"])
+                self.assertEqual(len(fake.requests), 3)
+                self.assertEqual(len(trial.tool_trace), 1)
+                self.assertEqual(trial.tool_trace[0].status, "applied")
+                self.assertEqual(trial.metrics.effect_tool_calls, 1)
+
+    async def test_continuation_timeout_accounts_attempt_and_marks_usage_unknown(self):
+        fake = FakeCompletions(
+            response("ready"), response(None, calls=[call("workspace_write", json.dumps({
+                "path": "assessment.txt", "mode": "upsert", "content": "bounded",
+            }))]), TimeoutError("continuation timed out"),
+        )
+        backend = OpenAICompatibleBackend(config=CONFIG, client=client(fake))
+        trial = await run_trial(backend, CONFIG.model, 1)
+        self.assertFalse(trial.passed)
+        self.assertEqual(trial.failure_category, "timeout")
+        self.assertEqual(trial.metrics.provider_requests, 2)
+        self.assertEqual(len(trial.provider_calls), 2)
+        self.assertFalse(trial.metrics.usage_available)
+        self.assertIsNone(trial.metrics.input_tokens)
+        self.assertIsNone(trial.metrics.output_tokens)
+        snapshot = backend.observability.snapshot()
+        self.assertEqual(snapshot["metrics"]["provider_requests"], 3)
+        self.assertEqual(snapshot["metrics"]["provider_failures"], 1)
+        for name in ("input_tokens", "output_tokens", "total_tokens"):
+            self.assertIsNone(snapshot["metrics"][name])
+            self.assertIsNone(snapshot["provider_usage"][0][name])
+        self.assertFalse(snapshot["provider_usage"][0]["usage_available"])
+        self.assertEqual(snapshot["provider_usage"][0]["requests"], 3)
+        self.assertIsNone(snapshot["cost"]["estimated_usd"])
+        self.assertEqual(snapshot["metrics"]["provider_duration_ms"],
+                         sum(item["duration_ms"] for item in snapshot["provider_calls"]))
+        self.assertEqual(len(fake.requests), 3)
+        self.assertEqual(len(trial.tool_trace), 1)
+        self.assertEqual(trial.tool_trace[0].status, "applied")
+
+    async def test_initial_timeout_counts_attempt_with_no_usage_or_effect(self):
+        fake = FakeCompletions(response("ready"), TimeoutError("initial timed out"))
+        backend = OpenAICompatibleBackend(config=CONFIG, client=client(fake))
+        trial = await run_trial(backend, CONFIG.model, 1)
+        self.assertFalse(trial.passed)
+        self.assertEqual(trial.metrics.provider_requests, 1)
+        snapshot = backend.observability.snapshot()
+        self.assertEqual(snapshot["metrics"]["provider_requests"], 2)
+        self.assertIsNone(snapshot["metrics"]["total_tokens"])
+        self.assertFalse(snapshot["provider_usage"][0]["usage_available"])
+        self.assertEqual(trial.tool_trace, ())
 
     async def test_unoffered_tool_is_rejected_by_runtime_executor(self):
         fake = FakeCompletions(response("ready"), response(None, calls=[call("forbidden_tool")]), response("rejected"))

@@ -117,6 +117,11 @@ fields and adds `protocol`, secret-free endpoint origin, `returned_models`,
 call records requested/returned model, stage, status, duration, normalized raw
 usage, usage availability, and failure category. Prewarm is excluded from trial
 metrics and provider-call records. Protocol is `responses` or `chat-completions`.
+Request and duration totals include every outbound attempt once, regardless of
+response acceptance. Usage returned with refused, truncated, or malformed output
+is retained in the aggregate totals. Timeouts and other attempts without reported
+usage make token totals unavailable. Client setup failures before a call are not
+counted as outbound attempts.
 Endpoint identity includes scheme, hostname, and port; paths, credentials, queries,
 and fragments are never diagnostic identity. URLs with userinfo, queries, or
 fragments are rejected before client construction.

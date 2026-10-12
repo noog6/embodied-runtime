@@ -683,7 +683,7 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["cost"]["status"], "unavailable")
         self.assertIsNone(snapshot["cost"]["estimated_usd"])
 
-    async def test_provider_authority_failure_adds_no_usage(self):
+    async def test_provider_failure_counts_attempt_with_unavailable_usage(self):
         observed = RunObservability()
         backend = OpenAIResponsesBackend(
             client=SimpleNamespace(responses=FakeResponses(error=RuntimeError("no"))),
@@ -693,8 +693,23 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
             await backend.respond("hello")
         metrics = observed.snapshot()["metrics"]
         self.assertEqual(metrics["provider_failures"], 1)
-        self.assertEqual(metrics["provider_requests"], 0)
-        self.assertEqual(metrics["total_tokens"], 0)
+        self.assertEqual(metrics["provider_requests"], 1)
+        self.assertIsNone(metrics["total_tokens"])
+        self.assertFalse(observed.snapshot()["provider_usage"][0]["usage_available"])
+
+    async def test_provider_cancellation_is_counted_and_propagated(self):
+        responses = FakeResponses(error=asyncio.CancelledError())
+        observed = RunObservability()
+        backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses),
+                                         observability=observed)
+        with self.assertRaises(asyncio.CancelledError):
+            await backend.respond("hello")
+        snapshot = observed.snapshot()
+        self.assertEqual(snapshot["metrics"]["provider_requests"], 1)
+        self.assertEqual(snapshot["metrics"]["provider_failures"], 1)
+        self.assertIsNone(snapshot["metrics"]["total_tokens"])
+        self.assertEqual(len(snapshot["provider_calls"]), 1)
+        self.assertEqual(snapshot["provider_calls"][0]["status"], "cancelled")
 
     async def test_prepare_eagerly_initializes_once_and_prewarm_is_minimal(self):
         responses = FakeResponses(results=[SimpleNamespace(

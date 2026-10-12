@@ -19,13 +19,18 @@ protocol, endpoint origin, requested/returned model, stage, duration, status,
 failure category, usage availability, and normalized raw tokens. `provider_usage`
 now includes `usage_available`; unreported token totals are `null` in that bucket
 and aggregate metrics, rather than zero. Numeric totals retain their existing
-meaning when all completed requests reported usage. Per-call records preserve
+meaning when all attempted requests reported usage. Per-call records preserve
 partial usage separately from estimated cost. Compatible endpoint identities
 omit paths, userinfo, query strings, and fragments. No provider bodies, prompts,
 reasoning blocks, or tool results enter these diagnostic records.
 For compatible calls, missing optional cache-token fields also remain `null`; counters do not fill
-them with assumed zeros. Aggregate provider counters cover completed requests;
-failed calls, including any reported usage, remain explicit in `provider_calls`.
+them with assumed zeros. `provider_requests`, `provider_duration_ms`, dimensions,
+and per-model request/duration totals include every attempted outbound call once,
+including failed or cancelled calls. Reported tokens count even when the response
+is truncated, refused, or malformed. Missing usage from any attempt makes aggregate
+token totals and estimated cost unavailable; known per-call counts remain visible
+in `provider_calls`. Client setup failures before an outbound attempt are not
+provider calls.
 
 The `interruptions` counter is incremented once only when the top-level process result
 is the authoritative interrupted exit code (130). Task cancellation and lower-level
