@@ -985,7 +985,7 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         first = report.to_json()
         self.assertEqual(first, report.to_json())
         decoded = json.loads(first)
-        self.assertEqual(decoded["format_version"], 2)
+        self.assertEqual(decoded["format_version"], 3)
         self.assertEqual(
             decoded["pricing_identity"], "public-built-in-pricing-2026-10-05",
         )

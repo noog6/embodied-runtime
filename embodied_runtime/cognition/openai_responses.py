@@ -18,6 +18,7 @@ from embodied_runtime.cognition.base import (
 )
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.attachments import ImageAttachment
+from embodied_runtime.cognition.provider_diagnostics import endpoint_identity, failure_category
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 PREWARM_INPUT = "Reply ready."
@@ -28,11 +29,13 @@ class OpenAIResponsesBackend(TextCognitionBackend):
     """A lazy, asynchronous OpenAI Responses text adapter."""
 
     identifier = "openai-responses"
+    protocol = "responses"
     supports_image_input = True
 
     def __init__(self, *, model: str | None = None, client: Any = None,
                  observability: RunObservability | None = None) -> None:
         self.model = model or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
+        self.endpoint = endpoint_identity(os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
         self._client = client
         self._client_init_measured = client is not None
         self._provider_request_ordinal = 0
@@ -53,7 +56,7 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         except CognitionError:
             raise
         except Exception as error:
-            raise CognitionError("OpenAI Responses preparation failed") from error
+            raise CognitionError("OpenAI Responses preparation failed", category=failure_category(error)) from None
 
     def _get_client(self) -> Any:
         if self._client is not None:
@@ -65,14 +68,14 @@ class OpenAIResponsesBackend(TextCognitionBackend):
             self._log_client_init("failed", started)
             raise CognitionUnavailableError(
                 "OpenAI cognition is unavailable; install the 'openai' optional dependency"
-            ) from error
+            ) from None
         try:
             self._client = AsyncOpenAI()
         except Exception as error:
             self._log_client_init("failed", started)
             raise CognitionUnavailableError(
                 "OpenAI cognition is unavailable; check OPENAI_API_KEY"
-            ) from error
+            ) from None
         self._log_client_init("completed", started)
         return self._client
 
@@ -108,6 +111,8 @@ class OpenAIResponsesBackend(TextCognitionBackend):
                     self.identifier, self.model, kind,
                     duration_ms=int((time.perf_counter() - started) * 1_000),
                     error=type(error).__name__,
+                    protocol=self.protocol, endpoint=self.endpoint,
+                    failure_category=failure_category(error),
                 )
             raise
         self._log_provider_request(
@@ -119,7 +124,7 @@ class OpenAIResponsesBackend(TextCognitionBackend):
             details = getattr(usage, "input_tokens_details", None)
             def token(name: str, owner: Any = usage) -> int:
                 value = getattr(owner, name, 0) if owner is not None else 0
-                return value if isinstance(value, int) and not isinstance(value, bool) else 0
+                return value if type(value) is int and value >= 0 else 0
             self.observability.provider_completed(
                 self.identifier, self.model, kind,
                 input_tokens=token("input_tokens"),
@@ -128,11 +133,9 @@ class OpenAIResponsesBackend(TextCognitionBackend):
                 output_tokens=token("output_tokens"),
                 total_tokens=token("total_tokens"),
                 duration_ms=int((time.perf_counter() - started) * 1_000),
-                usage_available=(usage is not None and all(
-                    isinstance(getattr(usage, name, None), int)
-                    and not isinstance(getattr(usage, name, None), bool)
-                    for name in ("input_tokens", "output_tokens", "total_tokens")
-                )),
+                usage_available=self._usage_available(response),
+                protocol=self.protocol, endpoint=self.endpoint,
+                returned_model=getattr(response, "model", None),
             )
         return response
 
@@ -143,6 +146,8 @@ class OpenAIResponsesBackend(TextCognitionBackend):
     ) -> None:
         fields = [
             f"[COGNITION] backend={self.identifier}",
+            f"protocol={self.protocol}", f"endpoint={self.endpoint}",
+            f"model={self.model}",
             f"provider_request={kind}", f"ordinal={ordinal}",
             f"cold={str(cold).lower()}", f"status={status}",
             f"duration_ms={int((time.perf_counter() - started) * 1_000)}",
@@ -151,8 +156,18 @@ class OpenAIResponsesBackend(TextCognitionBackend):
             fields.append(f"message_chars={message_chars}")
         fields.extend((f"instruction_chars={instruction_chars}", f"tools={tools}"))
         if response is not None:
+            fields.append(f"returned_model={getattr(response, 'model', None)}")
+            fields.append(f"usage_available={str(self._usage_available(response)).lower()}")
             fields.extend(self._usage_fields(response))
         LOGGER.info(" ".join(fields))
+
+    @staticmethod
+    def _usage_available(response: Any) -> bool:
+        usage = getattr(response, "usage", None)
+        return usage is not None and all(
+            type(value := getattr(usage, name, None)) is int and value >= 0
+            for name in ("input_tokens", "output_tokens", "total_tokens")
+        )
 
     @staticmethod
     def _usage_fields(response: Any) -> list[str]:
@@ -246,7 +261,7 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         except CognitionError:
             raise
         except Exception as error:
-            raise CognitionError("OpenAI Responses request failed") from error
+            raise CognitionError("OpenAI Responses request failed", category=failure_category(error)) from None
 
     @staticmethod
     def _provider_tool(tool: CognitionToolDefinition) -> dict[str, Any]:

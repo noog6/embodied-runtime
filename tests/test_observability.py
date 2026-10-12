@@ -202,9 +202,10 @@ def test_finalize_once_freezes_late_updates_and_writes_safe_summary(tmp_path):
     assert first["run"]["status"] == "interrupted"
     persisted = json.loads((tmp_path / "summary.json").read_text())
     serialized = json.dumps(persisted)
-    assert persisted["schema_version"] == 3
+    assert persisted["schema_version"] == 4
     assert persisted["provider_usage"] == [{
         "provider": "p", "model": "m", "requests": 1,
+        "usage_available": True,
         "input_tokens": 2, "cached_input_tokens": 0,
         "cache_write_tokens": 0, "output_tokens": 0,
         "total_tokens": 2, "duration_ms": 0,

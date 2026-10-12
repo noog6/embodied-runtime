@@ -11,6 +11,10 @@ from embodied_runtime.attachments import ImageAttachment
 class CognitionError(RuntimeError):
     """A text cognition request could not be completed."""
 
+    def __init__(self, message: str, *, category: str = "cognition_error") -> None:
+        super().__init__(message)
+        self.category = category
+
 
 class CognitionUnavailableError(CognitionError):
     """The configured cognition backend is unavailable."""

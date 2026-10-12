@@ -28,6 +28,8 @@ Granular flags remain available for focused experiments and diagnostics.
 Optional provider setup is documented in [OpenAI text cognition
 setup](docs/cognition-openai.md), including the linked [Secrets and API
 keys](docs/secrets.md) procedure for local credential storage and delivery.
+The same bounded Jobs can also use [OpenRouter via compatible Chat Completions](docs/cognition-compatible.md)
+with an explicitly configured endpoint, credential variable, and tool-capable model.
 
 The local console projects the running runtime's current state and provides
 two deliberately narrow development controls. For example, enter `status`,

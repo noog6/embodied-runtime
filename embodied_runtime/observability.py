@@ -101,6 +101,9 @@ class RunObservability:
         self._provider_usage: dict[tuple[str, str], Counter[str]] = {}
         self._tts_usage: dict[tuple[str, str, str], Counter[str]] = {}
         self._unpriceable_usage: set[tuple[str, str]] = set()
+        self._missing_usage: set[tuple[str, str]] = set()
+        self._missing_token_fields: dict[tuple[str, str], set[str]] = {}
+        self._provider_calls: deque[dict[str, object]] = deque(maxlen=event_capacity)
         self._events: deque[RuntimeEvent] = deque(maxlen=event_capacity)
         self._lock = Lock()
         self._final: dict[str, Any] | None = None
@@ -154,7 +157,10 @@ class RunObservability:
                            input_tokens: int = 0, cached_input_tokens: int = 0,
                            cache_write_tokens: int = 0,
                            output_tokens: int = 0, total_tokens: int | None = None,
-                           duration_ms: int = 0, usage_available: bool = True) -> None:
+                           duration_ms: int = 0, usage_available: bool = True,
+                           protocol: str | None = None, endpoint: str | None = None,
+                           returned_model: str | None = None,
+                           raw_usage: Mapping[str, int | None] | None = None) -> None:
         values = (input_tokens, cached_input_tokens, cache_write_tokens,
                   output_tokens, duration_ms)
         if any(type(value) is not int or value < 0 for value in values):
@@ -175,6 +181,32 @@ class RunObservability:
             self._dimensions["provider_models"]["/".join(key)] += 1
             self._dimensions["provider_stages"][self._short(stage)] += 1
             bucket = self._provider_usage.setdefault(key, Counter())
+            if not usage_available:
+                self._missing_usage.add(key)
+            if raw_usage is not None:
+                missing = {name for name in (
+                    "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "total_tokens"
+                ) if raw_usage.get(name) is None}
+                self._missing_token_fields.setdefault(key, set()).update(missing)
+                if missing:
+                    self._unpriceable_usage.add(key)
+            record = {
+                "backend": provider, "protocol": protocol, "endpoint": endpoint,
+                "requested_model": model, "returned_model": returned_model,
+                "stage": stage, "status": "completed", "duration_ms": duration_ms,
+                "usage_available": usage_available, "failure_category": None,
+                "usage": dict(raw_usage) if raw_usage is not None else {
+                    name: value if usage_available else None for name, value in (
+                        ("input_tokens", input_tokens), ("cached_input_tokens", cached_input_tokens),
+                        ("cache_write_tokens", cache_write_tokens), ("output_tokens", output_tokens),
+                        ("total_tokens", total),
+                    )
+                },
+            }
+            self._provider_calls.append({
+                name: self._short(value) if isinstance(value, str) else value
+                for name, value in record.items()
+            })
             rate = self._pricing.rates.get(key) if self._pricing is not None else None
             if (not usage_available
                     or cached_input_tokens + cache_write_tokens > input_tokens
@@ -189,14 +221,38 @@ class RunObservability:
                                  ("total_tokens", total), ("duration_ms", duration_ms)):
                 bucket[field] += value
         self.event("cognition", "provider_request", "completed", source=provider,
-                   duration_ms=duration_ms, metadata={"model": model or "unknown", "stage": stage})
+                   duration_ms=duration_ms, metadata={"model": model or "unknown", "stage": stage,
+                       "protocol": protocol, "endpoint": endpoint, "returned_model": returned_model,
+                       "usage_available": usage_available})
 
     def provider_failed(self, provider: str, model: str | None, stage: str, *,
-                        duration_ms: int = 0, error: str | None = None) -> None:
+                        duration_ms: int = 0, error: str | None = None,
+                        protocol: str | None = None, endpoint: str | None = None,
+                        returned_model: str | None = None, status: str = "failed",
+                        failure_category: str | None = None,
+                        usage: Mapping[str, int | None] | None = None) -> None:
         self.increment("provider_failures")
-        self.event("cognition", "provider_request", "failed", severity="error",
+        with self._lock:
+            if self._final is None:
+                record = {
+                    "backend": provider, "protocol": protocol, "endpoint": endpoint,
+                    "requested_model": model, "returned_model": returned_model,
+                    "stage": stage, "status": status, "duration_ms": duration_ms,
+                    "usage_available": usage is not None and all(
+                        type(usage.get(name)) is int for name in ("input_tokens", "output_tokens", "total_tokens")
+                    ),
+                    "failure_category": failure_category or error,
+                    "usage": dict(usage) if usage is not None else None,
+                }
+                self._provider_calls.append({
+                    name: self._short(value) if isinstance(value, str) else value
+                    for name, value in record.items()
+                })
+        self.event("cognition", "provider_request", status, severity="error",
                    source=provider, duration_ms=duration_ms, error=error,
-                   metadata={"model": model or "unknown", "stage": stage})
+                   metadata={"model": model or "unknown", "stage": stage,
+                       "protocol": protocol, "endpoint": endpoint, "returned_model": returned_model,
+                       "failure_category": failure_category or error})
 
     def tts_synthesized(self, provider: str, model: str, *, characters: int,
                         duration_ms: int = 0,
@@ -300,16 +356,23 @@ class RunObservability:
     def _build_snapshot_locked(self, stopped: datetime, status: str | None,
                                shutdown: str | None) -> dict[str, Any]:
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "run": {"run_id": self.run_id, "started_at": self._started_at.isoformat(),
                     "stopped_at": stopped.isoformat() if status else None,
                     "elapsed_seconds": max(0.0, self._monotonic() - self._started_monotonic),
                     "status": status or "running", "shutdown": shutdown},
-            "metrics": dict(self._counters),
+            "metrics": {name: None if (self._missing_usage and name in {
+                "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "total_tokens"
+            }) or any(name in fields for fields in self._missing_token_fields.values())
+                else value for name, value in self._counters.items()},
+            "provider_calls": list(self._provider_calls),
             "dimensions": {key: dict(value) for key, value in self._dimensions.items()},
             "provider_usage": [
                 {"provider": provider, "model": model,
-                 **{field: usage[field] for field in (
+                 "usage_available": (provider, model) not in self._missing_usage,
+                 **{field: None if ((provider, model) in self._missing_usage and field.endswith("tokens"))
+                    or field in self._missing_token_fields.get((provider, model), ())
+                    else usage[field] for field in (
                      "requests", "input_tokens", "cached_input_tokens",
                      "cache_write_tokens", "output_tokens", "total_tokens",
                      "duration_ms")}}
@@ -368,12 +431,14 @@ class RunObservability:
             "estimated_usd", "unavailable"
         )
         tts_cost = components.get("tts", {}).get("estimated_usd", "unavailable")
+        def tokens(name: str) -> object:
+            return metrics[name] if metrics[name] is not None else "unavailable"
         return "\n".join((line, title.center(64, "="), "", "Runtime",
             f"  duration:             {duration}", f"  status:               {run['status']}", "",
             "Cognition", f"  provider_requests:    {metrics['provider_requests']}",
-            f"  input_tokens:         {metrics['input_tokens']}",
-            f"  cached_input_tokens:  {metrics['cached_input_tokens']}",
-            f"  output_tokens:        {metrics['output_tokens']}",
+            f"  input_tokens:         {tokens('input_tokens')}",
+            f"  cached_input_tokens:  {tokens('cached_input_tokens')}",
+            f"  output_tokens:        {tokens('output_tokens')}",
             f"  cognition_cost_usd:   {cognition_cost}",
             f"  tts_cost_usd:         {tts_cost}",
             f"  estimated_cost_usd:   {value}", "", "Voice",

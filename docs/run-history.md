@@ -14,6 +14,19 @@ transcripts, credentials, media, or model responses. Summary writing is best eff
 cannot prevent
 ordinary shutdown; `run.json` remains the authority for existing run-history status.
 
+Summary schema version 4 adds bounded `provider_calls` metadata with backend,
+protocol, endpoint origin, requested/returned model, stage, duration, status,
+failure category, usage availability, and normalized raw tokens. `provider_usage`
+now includes `usage_available`; unreported token totals are `null` in that bucket
+and aggregate metrics, rather than zero. Numeric totals retain their existing
+meaning when all completed requests reported usage. Per-call records preserve
+partial usage separately from estimated cost. Compatible endpoint identities
+omit paths, userinfo, query strings, and fragments. No provider bodies, prompts,
+reasoning blocks, or tool results enter these diagnostic records.
+For compatible calls, missing optional cache-token fields also remain `null`; counters do not fill
+them with assumed zeros. Aggregate provider counters cover completed requests;
+failed calls, including any reported usage, remain explicit in `provider_calls`.
+
 The `interruptions` counter is incremented once only when the top-level process result
 is the authoritative interrupted exit code (130). Task cancellation and lower-level
 cleanup do not increment it; completed and other failed runs leave it at zero.

@@ -4,7 +4,9 @@ from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
+import re
 import tomllib
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -24,8 +26,53 @@ class RuntimeFileConfig:
 
 
 @dataclass(frozen=True)
+class OpenAICompatibleConfig:
+    """Explicit model capabilities and isolated Chat Completions connection."""
+
+    model: str | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None
+    request_timeout_seconds: float = 30.0
+    tool_calling: bool = False
+    image_input: bool = False
+
+
+def validate_compatible_config(config: OpenAICompatibleConfig, *, complete: bool = True) -> None:
+    for name in ("model", "base_url", "api_key_env"):
+        value = getattr(config, name)
+        if value is None and not complete:
+            continue
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise ConfigurationError(f"cognition.openai_compatible.{name} must be a non-empty string")
+    if config.base_url is not None:
+        try:
+            url = urlsplit(config.base_url)
+            valid = (url.scheme in {"https", "http"} and bool(url.hostname)
+                     and url.port != 0 and url.username is None and url.password is None
+                     and not url.query and not url.fragment
+                     and not any(char.isspace() or ord(char) < 32 for char in config.base_url))
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ConfigurationError(
+                "cognition.openai_compatible.base_url must be an HTTP(S) URL "
+                "without credentials, query, or fragment"
+            )
+    if config.api_key_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config.api_key_env):
+        raise ConfigurationError("cognition.openai_compatible.api_key_env must be an environment-variable name")
+    timeout = config.request_timeout_seconds
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise ConfigurationError("cognition.openai_compatible.request_timeout_seconds must be finite and positive")
+    if type(config.tool_calling) is not bool or type(config.image_input) is not bool:
+        raise ConfigurationError("cognition.openai_compatible capabilities must be boolean")
+    if complete and not config.tool_calling:
+        raise ConfigurationError("openai-compatible requires an explicitly tool-capable model (tool_calling = true)")
+
+
+@dataclass(frozen=True)
 class CognitionFileConfig:
     model: str | None = None
+    openai_compatible: OpenAICompatibleConfig = OpenAICompatibleConfig()
 
 
 @dataclass(frozen=True)
@@ -128,7 +175,7 @@ class LaunchConfiguration:
     hardware: str
     camera: str
     cognition: str
-    cognition_model: str
+    cognition_model: str | None
     vision: str
     mode: str
     timezone: str
@@ -173,6 +220,7 @@ class LaunchConfiguration:
     power_interval_seconds: float
     power_attention_voltage_v: float
     power_recovery_voltage_v: float
+    cognition_openai_compatible: OpenAICompatibleConfig = OpenAICompatibleConfig()
 
 
 DEFAULT_COGNITION_MODEL = "gpt-5.6-luna"
@@ -209,7 +257,8 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
 _RUNTIME_KEYS = {
     "profile", "hardware", "camera", "cognition", "vision", "mode", "timezone",
 }
-_COGNITION_KEYS = {"model"}
+_COGNITION_KEYS = {"model", "openai_compatible"}
+_COMPATIBLE_KEYS = {"model", "base_url", "api_key_env", "request_timeout_seconds", "tool_calling", "image_input"}
 _INITIATIVE_KEYS = {
     "enabled", "platform_attention", "actions", "messages", "continuation",
     "goal_closure",
@@ -235,7 +284,7 @@ _POWER_KEYS = {"interval_seconds", "attention_voltage_v", "recovery_voltage_v"}
 _ENUMS = {
     "runtime.hardware": {"auto", "virtual", "host", "fusion-hat"},
     "runtime.camera": {"auto", "none", "picamera2"},
-    "runtime.cognition": {"none", "openai-responses"},
+    "runtime.cognition": {"none", "openai-responses", "openai-compatible"},
     "runtime.vision": {"none", "openai-responses"},
     "runtime.mode": {"run", "console", "diagnostics"},
     "interaction.environment": {"workstation", "companion", "unattended", "remote"},
@@ -270,6 +319,10 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     power = _table(data, "power")
     _reject_unknown(runtime, _RUNTIME_KEYS, "runtime")
     _reject_unknown(cognition, _COGNITION_KEYS, "cognition")
+    compatible_values = _table(cognition, "openai_compatible")
+    _reject_unknown(compatible_values, _COMPATIBLE_KEYS, "cognition.openai_compatible")
+    compatible = OpenAICompatibleConfig(**compatible_values)
+    validate_compatible_config(compatible, complete=False)
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
     _reject_unknown(earcons, _EARCONS_KEYS, "earcons")
@@ -493,7 +546,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
             raise ConfigurationError(f"voice.{key} must be a positive number")
 
     return RuntimeFileConfiguration(
-        RuntimeFileConfig(**runtime), CognitionFileConfig(cognition_model),
+        RuntimeFileConfig(**runtime), CognitionFileConfig(cognition_model, compatible),
         InitiativeFileConfig(**initiative),
         VoiceFileConfig(**voice), EarconsFileConfig(earcons.get("enabled", True)),
         MemoryFileConfig(memory_enabled, database_path),
@@ -548,15 +601,24 @@ def resolve_launch_configuration(
             configured if configured is not None else historical
         )
 
+    backend = scalar("cognition", runtime.cognition, HISTORICAL_DEFAULTS.cognition)
+    compatible = OpenAICompatibleConfig(**{
+        name: scalar("compatible_" + name, getattr(cognition.openai_compatible, name), None)
+        for name in _COMPATIBLE_KEYS
+    })
+    model = scalar(
+        "cognition_model", compatible.model if backend == "openai-compatible" else cognition.model,
+        None if backend == "openai-compatible" else
+        (os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_COGNITION_MODEL),
+    )
+
     return LaunchConfiguration(
         profile=scalar("profile", runtime.profile, HISTORICAL_DEFAULTS.profile),
         hardware=scalar("hardware", runtime.hardware, HISTORICAL_DEFAULTS.hardware),
         camera=scalar("camera", runtime.camera, HISTORICAL_DEFAULTS.camera),
-        cognition=scalar("cognition", runtime.cognition, HISTORICAL_DEFAULTS.cognition),
-        cognition_model=scalar(
-            "cognition_model", cognition.model,
-            os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_COGNITION_MODEL,
-        ),
+        cognition=backend,
+        cognition_model=model,
+        cognition_openai_compatible=compatible,
         vision=scalar("vision", runtime.vision, HISTORICAL_DEFAULTS.vision),
         mode=mode,
         timezone=runtime.timezone or HISTORICAL_DEFAULTS.timezone,

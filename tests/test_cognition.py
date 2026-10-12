@@ -3,6 +3,7 @@ import os
 import json
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 from dataclasses import FrozenInstanceError, fields
 from types import ModuleType, SimpleNamespace
@@ -673,6 +674,7 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
                          (1, 15_000, 12_000, 3_000, 500, 15_500))
         self.assertEqual(snapshot["provider_usage"], [{
             "provider": "openai-responses", "model": "experimental-model",
+            "usage_available": True,
             "requests": 1, "input_tokens": 15_000,
             "cached_input_tokens": 12_000, "cache_write_tokens": 3_000,
             "output_tokens": 500, "total_tokens": 15_500,
@@ -1077,6 +1079,7 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
         ):
             await backend.respond("sensitive message")
         self.assertNotIn("secret detail", str(caught.exception))
+        self.assertNotIn("secret detail", "".join(traceback.format_exception(caught.exception)))
         self.assertIn(
             "provider_request=initial ordinal=1 cold=true status=failed",
             logs.output[0],
