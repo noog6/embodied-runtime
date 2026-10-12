@@ -73,6 +73,32 @@ else
 fi
 ```
 
+## OpenRouter cognition
+
+For `openai-compatible`, `cognition.openai_compatible.api_key_env` selects the
+environment-variable **name**; `OPENROUTER_API_KEY` is the recommended name for
+OpenRouter. The value must remain outside TOML, command arguments, source, and
+URLs. Use the same protected-file procedure as above, with
+`~/.config/embodied-runtime/openrouter.env` and this editor-entered content:
+
+```sh
+export OPENROUTER_API_KEY='YOUR_KEY_HERE'
+```
+
+Protect it with mode `600`, then source it before starting runtime or benchmarks:
+
+```sh
+source ~/.config/embodied-runtime/openrouter.env
+```
+
+Keep `OPENAI_API_KEY` separately for existing Responses, vision, and TTS clients.
+Do not use `OPENAI_BASE_URL` to redirect these clients to OpenRouter. Compatible
+cognition constructs its own client with explicit endpoint and credential
+settings. Missing credentials fail during startup preparation; pure configuration
+validation does not contact providers. Diagnostics expose only the endpoint
+origin and safe failure categories, never authorization headers or provider
+exception bodies. See [the full operator workflow](cognition-compatible.md).
+
 ## Practical security rules
 
 - Never commit API keys to Git.

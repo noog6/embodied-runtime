@@ -7,6 +7,8 @@ from embodied_runtime.observability import CharacterPrice, PricingCatalog, Token
 
 
 BUILT_IN_PRICING = PricingCatalog(
+    # These are direct-provider rates. Compatible endpoint calls intentionally
+    # have no built-in rate, including OpenRouter models with OpenAI-like names.
     rates=MappingProxyType({
         ("openai-responses", "gpt-5.6-luna"): TokenPrice(
             input_per_million=Decimal("0.20"),

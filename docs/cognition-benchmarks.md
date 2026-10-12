@@ -17,8 +17,10 @@ Workspace files, physical hardware, camera, audio, SMS, ngrok, or Twilio. The
 only intentional external effects in a live invocation are cognition-provider
 calls.
 
-The OpenAI-specific construction is confined to the CLI. The runner accepts any
-`TextCognitionBackend`. Startup/prewarm occurs before the observability baseline,
+The runtime and CLI share backend construction for `openai-responses` and
+`openai-compatible`; the runner accepts any `TextCognitionBackend`.
+See [provider configuration and comparable commands](cognition-compatible.md).
+Startup/prewarm occurs before the observability baseline,
 so reported provider/token metrics are the scenario delta and exclude prewarm.
 Estimated cost follows that same boundary and excludes startup/prewarm cost. It is
 derived from Mira's versioned built-in public API pricing catalog using Standard
@@ -121,7 +123,7 @@ one model is globally better:
   evidence the runtime contract became easier to operate correctly within.
 
 Future scenarios should preferably encode observed Mira behavior. V1 deliberately
-has no fixture DSL, model judge, alternate providers, concurrency, benchmark
+has no fixture DSL, model judge, concurrency, benchmark
 database, physical effects, or semantic prose score.
 
 ## Running
@@ -208,10 +210,21 @@ python -m embodied_runtime.benchmarks \
 ```
 
 The terminal table highlights failed trials and their ordered tool traces, and shows
-per-trial and model estimated costs. JSON format version `2` contains top-level
+per-trial and model estimated costs. JSON format version `3` contains top-level
 `created_at`, `scenario_id`, `pricing_identity`, and `trials`.
 Each trial contains identity, pass/failure/error data, timing, final Job and
 continuation state, estimated cost and pricing identity, metrics, cognition request
 records, and ordered tool trace.
+Version 3 adds protocol, endpoint origin, returned model identities, bounded
+per-call metadata (status, duration, usage and failure category), and usage
+availability. Token totals are nullable when unavailable, replacing version 2's
+misleading zero for unreported usage. These changes do not change scenario semantics.
+Existing fields retain their names; consumers must accept `null` token counts and
+ignore additive fields. Unknown pricing remains unavailable, and compatible calls
+never inherit direct OpenAI prices merely from a model name.
+`provider_requests` counts all outbound attempts after prewarm, including failed
+or cancelled calls. Reported usage counts even when the response is rejected;
+an attempt with unknown usage makes token totals unavailable. Response acceptance
+and scenario pass/fail remain separate from provider accounting.
 Captured arguments, results, and response text are each limited to 4,000
 characters; credentials and environment variables are never included.

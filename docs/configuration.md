@@ -41,6 +41,33 @@ single automatic eSpeak emergency fallback.
 
 ## Schema
 
+`runtime.cognition` accepts `none`, `openai-responses`, or `openai-compatible`.
+Responses retains `[cognition].model` and its existing environment/default
+precedence. Compatible cognition uses a dedicated table:
+
+```toml
+[cognition.openai_compatible]
+model = "openai/gpt-6-luna"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+request_timeout_seconds = 30
+tool_calling = true
+image_input = false
+```
+
+The compatible backend requires explicit nonempty model, HTTP(S) base URL,
+credential-variable name, and `tool_calling = true`. Credential values are never
+configuration fields. Timeout must be finite and positive; images are disabled
+unless explicitly declared supported. Credentials, query parameters, and fragments
+in URLs are rejected. Validation is local and does not contact the endpoint.
+CLI overrides are `--cognition-model`, `--compatible-base-url`,
+`--compatible-api-key-env`, `--compatible-request-timeout-seconds`,
+`--compatible-tool-calling`, and `--compatible-image-input` (the two capability
+flags also accept `--no-...`). Compatible model/connection settings never fall
+back to global OpenAI environment settings. See
+[OpenRouter operator workflow](cognition-compatible.md). The checked-in
+deployment continues to select OpenAI Responses.
+
 Only the documented tables and keys are accepted:
 
 ```toml
@@ -122,11 +149,9 @@ backend is retained for application startup rather than opening the device a
 second time. Explicit `picamera2` remains fail-fast, while `none` disables the
 camera. Camera resolution is independent of Fusion HAT resolution.
 
-`runtime.cognition` selects the cognition backend, while the deliberately
-provider-neutral `cognition.model` selects the model used by that backend. Only
-the `openai-responses` backend is implemented today; this separation prepares
-the runtime architecture for later backends without adding another provider,
-arbitrary endpoints, or configurable base URLs now. The effective model is
+`runtime.cognition` selects the cognition backend. `cognition.model` selects the
+Responses model; compatible models use `cognition.openai_compatible.model`.
+The effective Responses model is
 resolved in this order: explicit `--cognition-model`, `cognition.model`, the
 backward-compatible `OPENAI_MODEL` environment variable, then the built-in
 `gpt-5.6-luna` default. Model values are trimmed and must be non-empty.

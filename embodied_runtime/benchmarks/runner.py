@@ -121,6 +121,8 @@ async def run_trial(
     status = disposition = continuation_state = None
     reasons: list[str] = []
     error_text = None
+    failure_category = None
+    call_baseline = 0
     before: object = {"metrics": {}}
     after: object = {"metrics": {}}
     episodes = 0
@@ -177,6 +179,7 @@ async def run_trial(
                 ))
             # Snapshot after prepare/start so prewarm is deliberately excluded.
             before = app.observability.snapshot()
+            call_baseline = len(before.get("provider_calls", []))
             episodes = 1
             outcome = await app.work_current_job_once()
             disposition = outcome.disposition.value
@@ -234,6 +237,7 @@ async def run_trial(
         except Exception as error:
             error_text = f"{type(error).__name__}: {str(error)[:500]}"
             reasons.append("trial error")
+            failure_category = getattr(error, "category", "runtime_error")
         finally:
             if app is not None:
                 if run_id is not None:
@@ -267,13 +271,26 @@ async def run_trial(
     names = [item.name for item in recorder.tool_trace]
     acquisitions = sum(name in ACQUISITION_TOOL_NAMES for name in names)
     effects = sum(name in {"workspace_write", "publish_finding"} for name in names)
+    calls = after.get("provider_calls", [])[call_baseline:]
+    if failure_category is None:
+        failure_category = next((call["failure_category"] for call in reversed(calls)
+                                 if call.get("failure_category")), None)
+    usage_available = bool(calls) and all(call["usage_available"] for call in calls)
+
+    def tokens(name: str) -> int | None:
+        if not usage_available:
+            return None
+        values = [(call.get("usage") or {}).get(name) for call in calls]
+        return sum(values) if all(type(value) is int for value in values) else None
+
     metrics = TrialMetrics(
         provider_requests=_metric_delta(before, after, "provider_requests"),
-        input_tokens=_metric_delta(before, after, "input_tokens"),
-        cached_input_tokens=_metric_delta(before, after, "cached_input_tokens"),
-        output_tokens=_metric_delta(before, after, "output_tokens"),
+        input_tokens=tokens("input_tokens"),
+        cached_input_tokens=tokens("cached_input_tokens"),
+        output_tokens=tokens("output_tokens"),
         job_work_episodes=episodes, continuation_count=continuation_count,
         acquisition_tool_calls=acquisitions, effect_tool_calls=effects,
+        usage_available=usage_available,
     )
     estimated_cost_usd = _cost_delta(before, after)
     return BenchmarkTrialResult(
@@ -282,6 +299,10 @@ async def run_trial(
         estimated_cost_usd, BUILT_IN_PRICING.identity, status,
         disposition, continuation_state, _latest_response(recorder), metrics,
         tuple(recorder.requests), tuple(recorder.tool_trace),
+        protocol=getattr(backend, "protocol", None), endpoint=getattr(backend, "endpoint", None),
+        returned_models=tuple(dict.fromkeys(call["returned_model"] for call in calls
+                                          if call.get("returned_model"))),
+        provider_calls=tuple(calls), failure_category=failure_category,
     )
 
 
@@ -325,11 +346,15 @@ def render_report(report: BenchmarkReport) -> str:
                       "output_tokens est_cost_usd duration"))
         for trial in trials:
             metric = trial.metrics
+            lines.append(f"  backend: {trial.backend}; protocol: {trial.protocol or 'unknown'}; "
+                         f"endpoint: {trial.endpoint or 'unknown'}; returned models: "
+                         f"{', '.join(trial.returned_models) or 'unavailable'}")
+            output_tokens = str(metric.output_tokens) if metric.output_tokens is not None else "unavailable"
             lines.append(
                 f"{trial.repetition:<5} {'PASS' if trial.passed else 'FAIL':<6} "
                 f"{metric.job_work_episodes:<8} {metric.provider_requests:<12} "
                 f"{metric.acquisition_tool_calls:<12} {metric.effect_tool_calls:<7} "
-                f"{metric.output_tokens:<13} "
+                f"{output_tokens:<13} "
                 f"{('$' + trial.estimated_cost_usd) if trial.estimated_cost_usd is not None else 'unavailable':<12} "
                 f"{trial.wall_duration_seconds:.1f}s"
             )

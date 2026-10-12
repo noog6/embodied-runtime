@@ -36,9 +36,10 @@ cognition = "openai-responses"
 model = "gpt-5.6-luna"
 ```
 
-Only `openai-responses` is implemented today. The provider-neutral model name is
-intentional preparation for future backends, not support for other providers or
-arbitrary OpenAI-compatible endpoints. Resolution order is
+The `openai-responses` backend retains its existing SDK settings and
+`previous_response_id` continuation. The alternative `openai-compatible` backend
+uses request-local Chat Completions messages; see
+[Compatible cognition and OpenRouter](cognition-compatible.md). OpenAI resolution order is
 `--cognition-model`, `cognition.model`, the backward-compatible `OPENAI_MODEL`,
 then the built-in `gpt-5.6-luna` default. A model without an explicit pricing
 entry can still be used, but its estimated monetary cost is `unavailable`; raw

@@ -19,7 +19,9 @@ from embodied_runtime.app import (
 from embodied_runtime.earcons import EarconPlayer, FusionHatEarconOutput
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import TextCognitionBackend
-from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
+from embodied_runtime.cognition.factory import (
+    add_compatible_arguments, create_cognition_backend, validate_cognition_configuration,
+)
 from embodied_runtime.conversation_history import SQLiteConversationHistoryStore
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.config import (
@@ -146,7 +148,7 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         help="disable semantic earcon chimes without disabling voice or TTS",
     )
     parser.add_argument(
-        "--cognition", choices=("none", "openai-responses"),
+        "--cognition", choices=("none", "openai-responses", "openai-compatible"),
         default=configurable_default("none")
     )
     parser.add_argument(
@@ -154,6 +156,7 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
         default=configurable_default(None), metavar="MODEL",
         help="model used by the configured cognition backend",
     )
+    add_compatible_arguments(parser)
     parser.add_argument(
         "--vision", choices=("none", "openai-responses"),
         default=configurable_default("none"),
@@ -265,6 +268,7 @@ def parse_launch_arguments(
     args.camera = effective.camera
     args.cognition = effective.cognition
     args.cognition_model = effective.cognition_model
+    args.cognition_openai_compatible = effective.cognition_openai_compatible
     args.vision = effective.vision
     args.timezone = effective.timezone
     args.interaction_environment = effective.interaction_environment
@@ -385,9 +389,11 @@ def _stop_unowned_camera(camera: CameraBackend) -> None:
 
 
 def build_cognition_backend(args: argparse.Namespace) -> TextCognitionBackend | None:
-    if args.cognition == "openai-responses":
-        return OpenAIResponsesBackend(model=args.cognition_model)
-    return None
+    from embodied_runtime.config import OpenAICompatibleConfig
+    return create_cognition_backend(
+        args.cognition, model=args.cognition_model,
+        compatible=getattr(args, "cognition_openai_compatible", OpenAICompatibleConfig()),
+    )
 
 
 def build_visual_perception_backend(
@@ -917,6 +923,11 @@ def main(
 
 def validate_launch_dependencies(args: argparse.Namespace) -> None:
     """Validate pure cross-field launch rules without constructing runtime adapters."""
+    from embodied_runtime.config import OpenAICompatibleConfig
+    validate_cognition_configuration(
+        args.cognition, getattr(args, "cognition_model", None),
+        getattr(args, "cognition_openai_compatible", OpenAICompatibleConfig()),
+    )
     if args.initiative_platform_attention and not args.initiative:
         raise ConfigurationError("--initiative-platform-attention requires --initiative")
     if args.initiative_goal_closure and not args.initiative:

@@ -7,19 +7,20 @@ import json
 
 from .recording import CognitionRequestRecord, ToolTraceEntry
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
 class TrialMetrics:
     provider_requests: int = 0
-    input_tokens: int = 0
-    cached_input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = 0
+    cached_input_tokens: int | None = 0
+    output_tokens: int | None = 0
     job_work_episodes: int = 0
     continuation_count: int = 0
     acquisition_tool_calls: int = 0
     effect_tool_calls: int = 0
+    usage_available: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,11 @@ class BenchmarkTrialResult:
     metrics: TrialMetrics
     requests: tuple[CognitionRequestRecord, ...]
     tool_trace: tuple[ToolTraceEntry, ...]
+    protocol: str | None = None
+    endpoint: str | None = None
+    returned_models: tuple[str, ...] = ()
+    provider_calls: tuple[dict[str, object], ...] = ()
+    failure_category: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         value = asdict(self)
