@@ -49,3 +49,7 @@ def add_compatible_arguments(parser: Any) -> None:
     parser.add_argument("--compatible-request-timeout-seconds", type=float)
     parser.add_argument("--compatible-tool-calling", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--compatible-image-input", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--compatible-parallel-tool-calls-mode", choices=("disable", "omit"),
+        help="send parallel_tool_calls=False (disable, default) or omit the parameter; runtime still rejects multiple calls",
+    )

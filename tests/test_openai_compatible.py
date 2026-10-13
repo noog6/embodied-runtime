@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 import json
 from io import StringIO
+from itertools import product
 import os
 from pathlib import Path
 import sys
@@ -172,6 +173,45 @@ class CompatibleConfigurationTests(unittest.TestCase):
         self.assertEqual(build_cognition_backend(runtime).config,
                          build_benchmark_backend(benchmark, CONFIG.model).config)
 
+    def test_parallel_tool_calls_mode_defaults_parsing_and_cli_precedence(self):
+        self.assertEqual(CONFIG.parallel_tool_calls_mode, "disable")
+        for configured in (None, "disable", "omit"):
+            text = TOML + (f'parallel_tool_calls_mode = "{configured}"\n' if configured else "")
+            path = self.file(text)
+            self.assertEqual(load_runtime_config(path).cognition.openai_compatible.parallel_tool_calls_mode,
+                             configured or "disable")
+            for override in (None, "disable", "omit"):
+                with self.subTest(configured=configured, override=override):
+                    flags = ["--config", str(path)]
+                    if override is not None:
+                        flags.extend(["--compatible-parallel-tool-calls-mode", override])
+                    _, runtime, effective = parse_launch_arguments(flags)
+                    validate_launch_dependencies(runtime)
+                    benchmark = _arguments(flags)
+                    first = build_cognition_backend(runtime)
+                    second = build_benchmark_backend(benchmark, benchmark.model[0])
+                    self.assertEqual(first.config, second.config)
+                    self.assertEqual(first.config, effective.cognition_openai_compatible)
+                    self.assertEqual(first.config.parallel_tool_calls_mode, override or configured or "disable")
+                    self.assertIsNone(first._client)
+                    self.assertIsNone(second._client)
+
+    def test_parallel_tool_calls_mode_rejects_invalid_config_and_cli_values(self):
+        message = "parallel_tool_calls_mode must be 'disable' or 'omit'"
+        for value in ("", "enable", "true", "Disable", " omit ", True, 1, None, [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(ConfigurationError, message):
+                validate_compatible_config(replace(CONFIG, parallel_tool_calls_mode=value))
+        for literal in ('""', '"enable"', '"true"', 'true', '1', '[]', '{}'):
+            with self.subTest(toml=literal), self.assertRaisesRegex(ConfigurationError, message):
+                load_runtime_config(self.file(TOML + f"parallel_tool_calls_mode = {literal}\n"))
+        for parse in (parse_launch_arguments, _arguments):
+            error = StringIO()
+            with self.subTest(parser=parse.__name__), redirect_stderr(error), self.assertRaises(SystemExit):
+                parse(["--compatible-parallel-tool-calls-mode", "enable"])
+            self.assertIn("--compatible-parallel-tool-calls-mode", error.getvalue())
+            self.assertIn("invalid choice", error.getvalue())
+            self.assertIn("{disable,omit}", error.getvalue())
+
     def test_benchmark_requires_explicit_or_configured_model(self):
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             _arguments([])
@@ -229,6 +269,8 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final["tool_choice"], "none")
         self.assertEqual(final["tools"], initial["tools"])
         self.assertFalse(initial["parallel_tool_calls"])
+        self.assertFalse(final["parallel_tool_calls"])
+        self.assertEqual(initial["tool_choice"], "auto")
         self.assertNotIn("previous_response_id", final)
         self.assertNotIn("opaque-signature", json.dumps(dict(observed.snapshot())))
         self.assertNotIn("messages", backend.__dict__)
@@ -236,6 +278,38 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
         fake.results.append(response("independent"))
         await backend.respond("new request")
         self.assertEqual(fake.requests[-1]["messages"], [{"role": "user", "content": "new request"}])
+        self.assertNotIn("parallel_tool_calls", fake.requests[-1])
+
+    async def test_omit_changes_only_parallel_parameter_on_both_tool_requests(self):
+        requests = {}
+        for mode in ("disable", "omit"):
+            backend, fake, _ = self.make(response(None, calls=[call()]), response("final"),
+                                         config=replace(CONFIG, parallel_tool_calls_mode=mode))
+            value, executor = await self.tool_request(backend)
+            self.assertEqual(value, "final")
+            executor.assert_awaited_once()
+            self.assertEqual(len(fake.requests), 2)
+            requests[mode] = fake.requests
+        for disabled, omitted in zip(requests["disable"], requests["omit"], strict=True):
+            self.assertIs(disabled.pop("parallel_tool_calls"), False)
+            self.assertNotIn("parallel_tool_calls", omitted)
+            self.assertEqual(omitted, disabled)
+            self.assertEqual(omitted["extra_body"]["provider"], {
+                "require_parameters": True, "allow_fallbacks": False,
+            })
+        self.assertEqual(requests["omit"][0]["tool_choice"], "auto")
+        self.assertEqual(requests["omit"][1]["tool_choice"], "none")
+
+    async def test_multiple_calls_in_omit_mode_execute_no_tools(self):
+        backend, fake, _ = self.make(response(None, calls=[call(), call(call_id="another")]),
+                                     config=replace(CONFIG, parallel_tool_calls_mode="omit"))
+        executor = AsyncMock()
+        with self.assertRaises(CognitionError) as caught:
+            await self.tool_request(backend, executor)
+        self.assertEqual(caught.exception.category, "multiple_tool_calls")
+        executor.assert_not_awaited()
+        self.assertEqual(len(fake.requests), 1)
+        self.assertNotIn("parallel_tool_calls", fake.requests[0])
 
     async def test_sdk_response_objects_preserve_openrouter_extra_fields(self):
         try:
@@ -277,16 +351,21 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(fake.requests), 1)
 
     async def test_no_tools_and_final_tool_requests_are_rejected(self):
-        backend, _, _ = self.make(response(None, calls=[call()]))
-        with self.assertRaises(CognitionError):
-            await backend.respond("unoffered")
-        backend, fake, _ = self.make(response(None, calls=[call()]), response(None, calls=[call()]))
-        executor = AsyncMock(return_value=CognitionToolResult("{}"))
-        with self.assertRaises(CognitionError) as caught:
-            await self.tool_request(backend, executor)
-        self.assertEqual(caught.exception.category, "unexpected_tool_call")
-        executor.assert_awaited_once()
-        self.assertEqual(len(fake.requests), 2)
+        for mode in ("disable", "omit"):
+            with self.subTest(mode=mode):
+                config = replace(CONFIG, parallel_tool_calls_mode=mode)
+                backend, _, _ = self.make(response(None, calls=[call()]), config=config)
+                with self.assertRaises(CognitionError):
+                    await backend.respond("unoffered")
+                backend, fake, _ = self.make(response(None, calls=[call()]), response(None, calls=[call()]),
+                                             config=config)
+                executor = AsyncMock(return_value=CognitionToolResult("{}"))
+                with self.assertRaises(CognitionError) as caught:
+                    await self.tool_request(backend, executor)
+                self.assertEqual(caught.exception.category, "unexpected_tool_call")
+                executor.assert_awaited_once()
+                self.assertEqual(len(fake.requests), 2)
+                self.assertEqual(fake.requests[-1]["tool_choice"], "none")
 
     async def test_empty_refused_truncated_and_malformed_response_categories(self):
         for result, category in (
@@ -310,20 +389,21 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeouts_cancellation_and_continuation_failure_never_repeat_effect(self):
         async def stall():
             await asyncio.Event().wait()
-        for failure, category in (
-            (TimeoutError("secret timeout"), "timeout"),
-            (RuntimeError("secret failure"), "provider_error"),
-            (asyncio.CancelledError(), "cancelled"), (stall, "timeout"),
-        ):
-            with self.subTest(category=category):
-                backend, fake, observed = self.make(response(None, calls=[call()]), failure,
-                                                  config=replace(CONFIG, request_timeout_seconds=.01))
-                executor = AsyncMock(return_value=CognitionToolResult("{}"))
-                with self.assertRaises(asyncio.CancelledError if category == "cancelled" else CognitionError):
-                    await self.tool_request(backend, executor)
-                executor.assert_awaited_once()
-                self.assertEqual(len(fake.requests), 2)
-                self.assertEqual(observed.snapshot()["provider_calls"][-1]["failure_category"], category)
+        for mode in ("disable", "omit"):
+            for failure, category in (
+                (TimeoutError("secret timeout"), "timeout"),
+                (RuntimeError("secret failure"), "provider_error"),
+                (asyncio.CancelledError(), "cancelled"), (stall, "timeout"),
+            ):
+                with self.subTest(mode=mode, category=category):
+                    backend, fake, observed = self.make(response(None, calls=[call()]), failure,
+                        config=replace(CONFIG, request_timeout_seconds=.01, parallel_tool_calls_mode=mode))
+                    executor = AsyncMock(return_value=CognitionToolResult("{}"))
+                    with self.assertRaises(asyncio.CancelledError if category == "cancelled" else CognitionError):
+                        await self.tool_request(backend, executor)
+                    executor.assert_awaited_once()
+                    self.assertEqual(len(fake.requests), 2)
+                    self.assertEqual(observed.snapshot()["provider_calls"][-1]["failure_category"], category)
 
     async def test_initial_timeout_and_cancellation_execute_no_effect(self):
         for failure in (TimeoutError(), asyncio.CancelledError()):
@@ -406,20 +486,22 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(observed.snapshot()["provider_calls"][0]["protocol"], "responses")
 
     async def test_sdk_connection_is_isolated_bounded_and_secret_safe(self):
-        fake = FakeCompletions(response())
-        module = ModuleType("openai")
-        constructor = module.AsyncOpenAI = Mock(return_value=client(fake))
-        backend = OpenAICompatibleBackend(config=CONFIG)
-        with patch.dict(sys.modules, {"openai": module}), patch.dict(os.environ, {
-            "TEST_ROUTER_KEY": "SECRET", "OPENAI_API_KEY": "OTHER-SECRET",
-            "OPENAI_BASE_URL": "https://other.test", "OPENAI_MODEL": "other-model",
-        }), self.assertLogs("embodied_runtime.cognition.openai_compatible", "INFO") as logs:
-            await backend.respond("private prompt")
-        self.assertEqual(constructor.call_args.kwargs, {
-            "api_key": "SECRET", "base_url": CONFIG.base_url, "timeout": 30, "max_retries": 0,
-        })
-        self.assertNotIn("SECRET", "\n".join(logs.output))
-        self.assertNotIn("private prompt", "\n".join(logs.output))
+        for mode in ("disable", "omit"):
+            with self.subTest(mode=mode):
+                fake = FakeCompletions(response())
+                module = ModuleType("openai")
+                constructor = module.AsyncOpenAI = Mock(return_value=client(fake))
+                backend = OpenAICompatibleBackend(config=replace(CONFIG, parallel_tool_calls_mode=mode))
+                with patch.dict(sys.modules, {"openai": module}), patch.dict(os.environ, {
+                    "TEST_ROUTER_KEY": "SECRET", "OPENAI_API_KEY": "OTHER-SECRET",
+                    "OPENAI_BASE_URL": "https://other.test", "OPENAI_MODEL": "other-model",
+                }), self.assertLogs("embodied_runtime.cognition.openai_compatible", "INFO") as logs:
+                    await backend.respond("private prompt")
+                self.assertEqual(constructor.call_args.kwargs, {
+                    "api_key": "SECRET", "base_url": CONFIG.base_url, "timeout": 30, "max_retries": 0,
+                })
+                self.assertNotIn("SECRET", "\n".join(logs.output))
+                self.assertNotIn("private prompt", "\n".join(logs.output))
         fake = FakeCompletions(RuntimeError("Authorization Bearer SECRET https://user:SECRET@host?key=SECRET"))
         backend = OpenAICompatibleBackend(config=CONFIG, client=client(fake), observability=RunObservability())
         with self.assertLogs("embodied_runtime.cognition.openai_compatible", "INFO") as logs:
@@ -440,12 +522,15 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
             module.AsyncOpenAI.assert_not_called()
             self.assertEqual(observed.snapshot()["metrics"]["provider_requests"], 0)
             self.assertEqual(observed.snapshot()["provider_calls"], [])
-        backend, fake, _ = self.make(response())
-        await backend.prepare()
-        await backend.prepare()
-        self.assertEqual(len(fake.requests), 1)
-        self.assertEqual(fake.requests[0]["messages"], [{"role": "user", "content": "Reply ready."}])
-        self.assertNotIn("tools", fake.requests[0])
+        for mode in ("disable", "omit"):
+            with self.subTest(mode=mode):
+                backend, fake, _ = self.make(response(), config=replace(CONFIG, parallel_tool_calls_mode=mode))
+                await backend.prepare()
+                await backend.prepare()
+                self.assertEqual(len(fake.requests), 1)
+                self.assertEqual(fake.requests[0]["messages"], [{"role": "user", "content": "Reply ready."}])
+                self.assertNotIn("tools", fake.requests[0])
+                self.assertNotIn("parallel_tool_calls", fake.requests[0])
         failed, _, _ = self.make(response("", finish="length"))
         with self.assertRaises(CognitionError):
             await failed.prepare()
@@ -453,8 +538,8 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 class CompatibleBenchmarkTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_six_unchanged_scenarios_use_the_production_harness(self):
-        for scenario_id in SCENARIOS:
-            with self.subTest(scenario=scenario_id):
+        for mode, scenario_id in product(("disable", "omit"), SCENARIOS):
+            with self.subTest(mode=mode, scenario=scenario_id):
                 actions = []
                 if scenario_id == FRESH_RUNTIME_SCENARIO_ID:
                     actions.extend([
@@ -471,7 +556,12 @@ class CompatibleBenchmarkTests(unittest.IsolatedAsyncioTestCase):
                 for ordinal, (name, arguments) in enumerate(actions):
                     results.extend([response(None, calls=[call(name, json.dumps(arguments), f"call-{ordinal}")]), response("complete")])
                 fake = FakeCompletions(*results)
-                backend = create_cognition_backend("openai-compatible", compatible=CONFIG, client=client(fake))
+                args = _arguments([
+                    "--backend", "openai-compatible", "--model", CONFIG.model,
+                    "--compatible-base-url", CONFIG.base_url, "--compatible-api-key-env", CONFIG.api_key_env,
+                    "--compatible-tool-calling", "--compatible-parallel-tool-calls-mode", mode,
+                ])
+                backend = build_benchmark_backend(args, CONFIG.model, client=client(fake))
                 trial = await run_trial(backend, CONFIG.model, 1, scenario_id=scenario_id)
                 self.assertTrue(trial.passed, trial.failure_reasons)
                 self.assertEqual(trial.final_job_run_status, "completed")
@@ -482,6 +572,17 @@ class CompatibleBenchmarkTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(trial.estimated_cost_usd)
                 self.assertEqual(trial.returned_models, ("returned/model-id",))
                 self.assertEqual(len(fake.requests), 1 + 2 * len(actions))
+                self.assertNotIn("parallel_tool_calls", fake.requests[0])
+                for request in fake.requests[1:]:
+                    self.assertTrue(request["tools"])
+                    if mode == "disable":
+                        self.assertIs(request["parallel_tool_calls"], False)
+                    else:
+                        self.assertNotIn("parallel_tool_calls", request)
+                if scenario_id == "confirmed_effect_requires_no_reverification":
+                    self.assertEqual(trial.metrics.job_work_episodes, 1)
+                    self.assertEqual(trial.metrics.acquisition_tool_calls, 0)
+                    self.assertEqual(trial.metrics.effect_tool_calls, 1)
 
     async def test_benchmark_missing_usage_and_provider_failure_metadata(self):
         fake = FakeCompletions(response("ready"), TimeoutError("private"))
@@ -513,19 +614,22 @@ class CompatibleBenchmarkTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(trial.estimated_cost_usd)
 
     async def test_continuation_failure_does_not_repeat_workspace_effect_in_harness(self):
-        fake = FakeCompletions(
-            response("ready"), response(None, calls=[call("workspace_write", json.dumps({
-                "path": "assessment.txt", "mode": "upsert", "content": "bounded",
-            }))]), TimeoutError("continuation timed out"),
-        )
-        backend = OpenAICompatibleBackend(config=CONFIG, client=client(fake))
-        trial = await run_trial(backend, CONFIG.model, 1)
-        self.assertFalse(trial.passed)
-        self.assertEqual(trial.failure_category, "timeout")
-        self.assertEqual(len(trial.tool_trace), 1)
-        self.assertEqual(trial.tool_trace[0].status, "applied")
-        self.assertEqual(trial.metrics.effect_tool_calls, 1)
-        self.assertEqual(len(fake.requests), 3)
+        for mode in ("disable", "omit"):
+            with self.subTest(mode=mode):
+                fake = FakeCompletions(
+                    response("ready"), response(None, calls=[call("workspace_write", json.dumps({
+                        "path": "assessment.txt", "mode": "upsert", "content": "bounded",
+                    }))]), TimeoutError("continuation timed out"),
+                )
+                backend = OpenAICompatibleBackend(config=replace(CONFIG, parallel_tool_calls_mode=mode),
+                                                   client=client(fake))
+                trial = await run_trial(backend, CONFIG.model, 1)
+                self.assertFalse(trial.passed)
+                self.assertEqual(trial.failure_category, "timeout")
+                self.assertEqual(len(trial.tool_trace), 1)
+                self.assertEqual(trial.tool_trace[0].status, "applied")
+                self.assertEqual(trial.metrics.effect_tool_calls, 1)
+                self.assertEqual(len(fake.requests), 3)
 
     async def test_rejected_continuation_accounts_usage_in_runtime_and_benchmark(self):
         prewarm_usage = {"prompt_tokens": 1_000, "completion_tokens": 500, "total_tokens": 1_500,
