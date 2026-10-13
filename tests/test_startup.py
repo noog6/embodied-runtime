@@ -421,6 +421,37 @@ webhook_path = "{webhook_path}"
         self.assertEqual(environment_presence(eleven, {}), {"ELEVENLABS_API_KEY": False})
         self.assertNotIn("secret-test-value", str(environment_presence(eleven, {})))
 
+    def test_ordered_vision_collects_all_credentials_for_secure_capture(self) -> None:
+        path = self.config(cognition="openai-responses", vision="configured")
+        path.write_text(path.read_text() + '''
+[vision]
+[[vision.backends]]
+backend="openai-compatible"
+model="google/gemini-3.8-flash"
+base_url="https://openrouter.ai/api/v1"
+api_key_env="ROUTER_VISION_KEY"
+[[vision.backends]]
+backend="openai-responses"
+model="gpt-6.1-sol"
+api_key_env="DIRECT_VISION_KEY"
+''')
+        deployment = self.deployment(config=path, capture_env=True)
+        keys = ("OPENAI_API_KEY", "ROUTER_VISION_KEY", "DIRECT_VISION_KEY")
+        self.assertEqual(required_environment(deployment), keys)
+        values = {key: "SECRET-" + key for key in keys}
+        values["UNRELATED_SECRET"] = "MUST-NOT-CAPTURE"
+        self.assertEqual(environment_presence(deployment, values), dict.fromkeys(keys, True))
+        captured = serialize_environment(deployment, values).decode()
+        for key in keys:
+            self.assertIn(f'{key}="SECRET-{key}"', captured)
+        self.assertNotIn("UNRELATED_SECRET", captured)
+        self.assertNotIn("SECRET-", render_unit(deployment))
+        self.assertNotIn("SECRET-", str(environment_presence(deployment, values)))
+        path.write_text(path.read_text().replace('api_key_env="DIRECT_VISION_KEY"', 'api_key_env="OPENAI_API_KEY"'))
+        self.assertEqual(required_environment(self.deployment(config=path)), ("OPENAI_API_KEY", "ROUTER_VISION_KEY"))
+        path.write_text(path.read_text().replace('vision = "configured"', 'vision = "none"'))
+        self.assertEqual(required_environment(self.deployment(config=path)), ("OPENAI_API_KEY",))
+
     def test_sms_requires_complete_twilio_catalog(self) -> None:
         deployment = self.deployment(with_sms=True)
         self.assertEqual(required_environment(deployment), TWILIO_ENVIRONMENT)

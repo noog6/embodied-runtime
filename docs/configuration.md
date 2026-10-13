@@ -41,6 +41,17 @@ single automatic eSpeak emergency fallback.
 
 ## Schema
 
+`runtime.vision` accepts `none`, `openai-responses`, or `configured`. The optional
+ordered `[vision]`/`[[vision.backends]]` configuration enables at most three visual
+providers without changing cognition selection. A list enables `configured` when
+`runtime.vision` is absent; explicit `none` remains authoritative. Selecting
+`openai-responses` with a list is rejected to avoid discarding it. Without a list,
+the existing single-backend selection and CLI precedence remain unchanged.
+See [visual configuration, timeouts, and fallback policy](visual-perception.md#configuration-and-availability)
+for the complete Gemini/OpenRouter then direct OpenAI example. Credential values
+are never TOML/CLI fields; the startup wizard selects all active vision entries'
+credential-variable names.
+
 `runtime.cognition` accepts `none`, `openai-responses`, or `openai-compatible`.
 Responses retains `[cognition].model` and its existing environment/default
 precedence. Compatible cognition uses a dedicated table:

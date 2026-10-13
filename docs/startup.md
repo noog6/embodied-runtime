@@ -91,6 +91,8 @@ different revision. Updating the checkout remains an explicit operator action.
 Provider requirements are calculated from the effective launch:
 
 - OpenAI cognition, vision, or enabled OpenAI TTS requires `OPENAI_API_KEY`;
+- configured ordered vision requires each entry's `api_key_env`, deduplicated
+  with other requirements; disabled vision contributes no variables;
 - enabled ElevenLabs TTS requires `ELEVENLABS_API_KEY`;
 - effective SMS requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
   `TWILIO_PHONE_NUMBER`, `MIRA_SMS_OPERATOR_NUMBER`, and `TWILIO_WEBHOOK_URL`.
@@ -107,6 +109,13 @@ being reused. A stale file is preserved but omitted when the launch needs no
 secrets. Reused files must be regular, non-symlink files with no group/world
 read or write permissions. With a secure managed file, later checks and
 installs do not require the operator to re-source its secret values.
+
+For a [vision chain](visual-perception.md), source both protected OpenRouter and
+OpenAI credential files, plus the existing credentials needed by your deployment,
+before `check` or a fresh `install --capture-env`. Capture requires every selected
+variable and continues to write only the secure managed environment file. The
+running runtime may still use a later vision entry if a primary credential is
+missing; that degradation does not change the wizard's secure-capture requirements.
 
 The application-facing interface remains environment variables. systemd
 credentials could provide later hardening, but Phase 2 does not add

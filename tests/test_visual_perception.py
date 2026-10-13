@@ -363,7 +363,11 @@ class VisualPerceptionTests(unittest.IsolatedAsyncioTestCase):
         class Responses:
             async def create(inner, **kwargs):
                 inner.arguments = kwargs
-                return type("Response", (), {"output_text": "x" * 2001})()
+                return type("Response", (), {"status": "completed", "output": [{
+                    "type": "message", "role": "assistant", "content": [
+                        {"type": "output_text", "text": "x" * 2001},
+                    ],
+                }]})()
         responses = Responses()
         client = type("Client", (), {"responses": responses})()
         backend = OpenAIResponsesVisualPerceptionBackend(client=client, model="vision")

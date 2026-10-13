@@ -79,6 +79,9 @@ _COUNTERS = (
     "job_runs_failed", "job_runs_stopped", "manual_job_work",
     "automatic_job_work", "continuations_accepted", "runtime_errors",
     "interruptions", "resource_failures",
+    "vision_provider_requests", "vision_provider_failures", "vision_provider_duration_ms",
+    "vision_input_tokens", "vision_cached_input_tokens", "vision_cache_write_tokens",
+    "vision_output_tokens", "vision_total_tokens", "vision_fallbacks",
 )
 
 
@@ -98,14 +101,15 @@ class RunObservability:
         self._counters = Counter({name: 0 for name in _COUNTERS})
         self._dimensions: dict[str, Counter[str]] = {
             "provider_models": Counter(), "provider_stages": Counter(),
+            "vision_provider_models": Counter(), "vision_provider_stages": Counter(),
             "tts_providers": Counter(), "attention_sources": Counter(),
             "attention_completion_reasons": Counter(), "job_work_outcomes": Counter(),
         }
-        self._provider_usage: dict[tuple[str, str], Counter[str]] = {}
+        self._provider_usage: dict[tuple[str, str, str], Counter[str]] = {}
         self._tts_usage: dict[tuple[str, str, str], Counter[str]] = {}
-        self._unpriceable_usage: set[tuple[str, str]] = set()
-        self._missing_usage: set[tuple[str, str]] = set()
-        self._missing_token_fields: dict[tuple[str, str], set[str]] = {}
+        self._unpriceable_usage: set[tuple[str, str, str]] = set()
+        self._missing_usage: set[tuple[str, str, str]] = set()
+        self._missing_token_fields: dict[tuple[str, str, str], set[str]] = {}
         self._provider_calls: deque[dict[str, object]] = deque(maxlen=event_capacity)
         self._events: deque[RuntimeEvent] = deque(maxlen=event_capacity)
         self._lock = Lock()
@@ -191,13 +195,17 @@ class RunObservability:
                       usage_available: bool | None = None,
                       protocol: str | None = None, endpoint: str | None = None,
                       returned_model: str | None = None, error: str | None = None,
-                      failure_category: str | None = None) -> None:
+                      failure_category: str | None = None, role: str = "cognition",
+                      attempt_order: int | None = None, fallback: bool = False,
+                      accepted: bool | None = None, http_status: int | None = None) -> None:
         """Account once per attempted outbound call, regardless of output acceptance.
 
         Reported tokens remain usage even when output is rejected. Missing usage
         makes aggregate tokens and cost unavailable; it never implies zero use.
         """
         if status not in {"completed", "failed", "cancelled"} or type(duration_ms) is not int or duration_ms < 0:
+            return
+        if role not in {"cognition", "vision"}:
             return
         counts = {
             name: value if type(value := (usage or {}).get(name)) is int and value >= 0 else None
@@ -210,7 +218,8 @@ class RunObservability:
         input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, total = (
             counts[name] or 0 for name in TOKEN_FIELDS
         )
-        key = (self._short(provider), self._short(model or "unknown"))
+        key = (role, self._short(provider), self._short(model or "unknown"))
+        prefix = "vision_" if role == "vision" else ""
         with self._lock:
             if self._final is not None:
                 return
@@ -219,16 +228,17 @@ class RunObservability:
                                 ("cache_write_tokens", cache_write_tokens),
                                 ("output_tokens", output_tokens), ("total_tokens", total),
                                 ("provider_duration_ms", duration_ms)):
-                self._counters[name] += value
+                self._counters[prefix + name] += value
             if status != "completed":
-                self._counters["provider_failures"] += 1
-            self._dimensions["provider_models"]["/".join(key)] += 1
-            self._dimensions["provider_stages"][self._short(stage)] += 1
+                self._counters[prefix + "provider_failures"] += 1
+            self._dimensions[prefix + "provider_models"]["/".join(key[1:])] += 1
+            self._dimensions[prefix + "provider_stages"][self._short(stage)] += 1
             bucket = self._provider_usage.setdefault(key, Counter())
             if not available:
                 self._missing_usage.add(key)
             self._missing_token_fields.setdefault(key, set()).update(missing)
             record = {
+                "role": role,
                 "backend": provider, "protocol": protocol, "endpoint": endpoint,
                 "requested_model": model, "returned_model": returned_model,
                 "stage": stage, "status": status, "duration_ms": duration_ms,
@@ -236,11 +246,14 @@ class RunObservability:
                 "usage": ({name: counts[name] for name in usage if name in counts}
                           if usage is not None else None),
             }
+            if role == "vision":
+                record.update(attempt_order=attempt_order, fallback=fallback, accepted=accepted,
+                              http_status=http_status if type(http_status) is int and 400 <= http_status <= 599 else None)
             self._provider_calls.append({
                 name: self._short(value) if isinstance(value, str) else value
                 for name, value in record.items()
             })
-            rate = self._pricing.rates.get(key) if self._pricing is not None else None
+            rate = self._pricing.rates.get(key[1:]) if self._pricing is not None else None
             if (not available or missing
                     or cached_input_tokens + cache_write_tokens > input_tokens
                     or total != input_tokens + output_tokens
@@ -253,7 +266,7 @@ class RunObservability:
                                  ("output_tokens", output_tokens),
                                  ("total_tokens", total), ("duration_ms", duration_ms)):
                 bucket[field] += value
-        self.event("cognition", "provider_request", status, source=provider,
+        self.event(role, "provider_request", status, source=provider,
                    severity="info" if status == "completed" else "error", error=error,
                    duration_ms=duration_ms, metadata={"model": model or "unknown", "stage": stage,
                        "protocol": protocol, "endpoint": endpoint, "returned_model": returned_model,
@@ -300,8 +313,9 @@ class RunObservability:
             return {"status": "unavailable", "estimated_usd": None, "pricing_identity": None}
         total = Decimal(0)
         cognition = Decimal(0)
-        for (provider, model), usage in self._provider_usage.items():
-            if (provider, model) in self._unpriceable_usage:
+        vision = Decimal(0)
+        for (role, provider, model), usage in self._provider_usage.items():
+            if (role, provider, model) in self._unpriceable_usage:
                 return {"status": "unavailable", "estimated_usd": None,
                         "pricing_identity": self._pricing.identity}
             rate = self._pricing.rates.get((provider, model))
@@ -314,11 +328,15 @@ class RunObservability:
             if uncached < 0 or (cache_write and rate.cache_write_per_million is None):
                 return {"status": "unavailable", "estimated_usd": None,
                         "pricing_identity": self._pricing.identity}
-            cognition += Decimal(uncached) * rate.input_per_million / Decimal(1_000_000)
-            cognition += Decimal(cached) * rate.cached_input_per_million / Decimal(1_000_000)
-            cognition += Decimal(usage["output_tokens"]) * rate.output_per_million / Decimal(1_000_000)
+            cost = Decimal(uncached) * rate.input_per_million / Decimal(1_000_000)
+            cost += Decimal(cached) * rate.cached_input_per_million / Decimal(1_000_000)
+            cost += Decimal(usage["output_tokens"]) * rate.output_per_million / Decimal(1_000_000)
             if cache_write:
-                cognition += Decimal(cache_write) * rate.cache_write_per_million / Decimal(1_000_000)
+                cost += Decimal(cache_write) * rate.cache_write_per_million / Decimal(1_000_000)
+            if role == "vision":
+                vision += cost
+            else:
+                cognition += cost
         tts = Decimal(0)
         for (provider, model, _usage_basis), usage in self._tts_usage.items():
             rate = self._pricing.character_rates.get((provider, model))
@@ -326,12 +344,13 @@ class RunObservability:
                 return {"status": "unavailable", "estimated_usd": None,
                         "pricing_identity": self._pricing.identity}
             tts += Decimal(usage["characters"]) * rate.usd_per_thousand / Decimal(1_000)
-        total = cognition + tts
+        total = cognition + vision + tts
         amount = lambda value: str(value.quantize(Decimal("0.000001")))
         return {"status": "estimated", "estimated_usd": amount(total),
                 "pricing_identity": self._pricing.identity,
                 "components": {
                     "cognition": {"status": "estimated", "estimated_usd": amount(cognition)},
+                    "vision": {"status": "estimated", "estimated_usd": amount(vision)},
                     "tts": {"status": "estimated", "estimated_usd": amount(tts),
                             "basis": "public_api_character_rate"},
                 }}
@@ -373,28 +392,36 @@ class RunObservability:
 
     def _build_snapshot_locked(self, stopped: datetime, status: str | None,
                                shutdown: str | None) -> dict[str, Any]:
+        def metric(name, value):
+            role = "vision" if name.startswith("vision_") else "cognition"
+            field = name.removeprefix("vision_") if role == "vision" else name
+            if ((field in TOKEN_FIELDS and any(key[0] == role for key in self._missing_usage))
+                    or any(key[0] == role and field in fields for key, fields in self._missing_token_fields.items())):
+                return None
+            return value
+
+        def usage_for(role):
+            return [
+                {"provider": provider, "model": model,
+                 "usage_available": (role, provider, model) not in self._missing_usage,
+                 **{field: None if ((role, provider, model) in self._missing_usage and field.endswith("tokens"))
+                    or field in self._missing_token_fields.get((role, provider, model), ())
+                    else usage[field] for field in (
+                     "requests", "input_tokens", "cached_input_tokens", "cache_write_tokens",
+                     "output_tokens", "total_tokens", "duration_ms")}}
+                for (kind, provider, model), usage in sorted(self._provider_usage.items()) if kind == role
+            ]
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "run": {"run_id": self.run_id, "started_at": self._started_at.isoformat(),
                     "stopped_at": stopped.isoformat() if status else None,
                     "elapsed_seconds": max(0.0, self._monotonic() - self._started_monotonic),
                     "status": status or "running", "shutdown": shutdown},
-            "metrics": {name: None if (self._missing_usage and name in TOKEN_FIELDS)
-                or any(name in fields for fields in self._missing_token_fields.values())
-                else value for name, value in self._counters.items()},
+            "metrics": {name: metric(name, value) for name, value in self._counters.items()},
             "provider_calls": list(self._provider_calls),
             "dimensions": {key: dict(value) for key, value in self._dimensions.items()},
-            "provider_usage": [
-                {"provider": provider, "model": model,
-                 "usage_available": (provider, model) not in self._missing_usage,
-                 **{field: None if ((provider, model) in self._missing_usage and field.endswith("tokens"))
-                    or field in self._missing_token_fields.get((provider, model), ())
-                    else usage[field] for field in (
-                     "requests", "input_tokens", "cached_input_tokens",
-                     "cache_write_tokens", "output_tokens", "total_tokens",
-                     "duration_ms")}}
-                for (provider, model), usage in sorted(self._provider_usage.items())
-            ],
+            "provider_usage": usage_for("cognition"),
+            "vision_usage": usage_for("vision"),
             "tts_usage": [
                 {"provider": provider, "model": model, "usage_basis": usage_basis,
                  **{field: usage[field] for field in
@@ -467,7 +494,13 @@ class RunObservability:
             f"  tts_fallbacks:        {metrics['tts_fallbacks']}",
             f"  voice_failures:       {metrics['voice_failures']}", "", "Perception",
             f"  camera_captures:      {metrics['camera_captures']}",
-            f"  vision_acquisitions:  {metrics['vision_acquisitions']}", "", "Autonomy",
+            f"  vision_acquisitions:  {metrics['vision_acquisitions']}",
+            f"  vision_requests:      {metrics['vision_provider_requests']}",
+            f"  vision_fallbacks:     {metrics['vision_fallbacks']}",
+            f"  vision_input_tokens:  {tokens('vision_input_tokens')}",
+            f"  vision_output_tokens: {tokens('vision_output_tokens')}",
+            f"  vision_cost_usd:      {components.get('vision', {}).get('estimated_usd', 'unavailable')}",
+            "", "Autonomy",
             f"  attention_episodes:   {metrics['attention_episodes_started']}",
             f"  job_runs_started:     {metrics['job_runs_started']}",
             f"  job_runs_completed:   {metrics['job_runs_completed']}",

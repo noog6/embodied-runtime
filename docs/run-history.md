@@ -32,6 +32,15 @@ token totals and estimated cost unavailable; known per-call counts remain visibl
 in `provider_calls`. Client setup failures before an outbound attempt are not
 provider calls.
 
+Summary schema version 5 adds `role` to `provider_calls`, vision attempt order,
+fallback/accepted flags, and safe HTTP error status. `vision_usage` and
+`vision_*` counters keep vision separate from the existing cognition usage and
+counters, even when both roles use the same direct backend/model. Missing usage
+affects only that role's token totals; the overall cost still requires applicable,
+complete usage across all roles. Complete direct vision usage has a separate
+`cost.components.vision`; compatible model names never inherit direct rates.
+The normal perception summary also shows vision requests, fallbacks, and tokens.
+
 The `interruptions` counter is incremented once only when the top-level process result
 is the authoritative interrupted exit code (130). Task cancellation and lower-level
 cleanup do not increment it; completed and other failed runs leave it at zero.

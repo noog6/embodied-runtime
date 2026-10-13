@@ -106,7 +106,7 @@ from embodied_runtime.inspection import (
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.perception import (
-    MAX_CAMERA_FRAME_BYTES, VisualPerceptionBackend, VisualPerceptionResult,
+    MAX_CAMERA_FRAME_BYTES, VisualPerceptionBackend, VisualPerceptionError, VisualPerceptionResult,
 )
 from embodied_runtime.reflexes import Reflex
 from embodied_runtime.resources import (
@@ -1124,6 +1124,8 @@ class RobotApplication:
         self.observability = observability or RunObservability()
         if cognition_backend is not None and hasattr(cognition_backend, "observability"):
             cognition_backend.observability = self.observability
+        if visual_perception_backend is not None and hasattr(visual_perception_backend, "observability"):
+            visual_perception_backend.observability = self.observability
         self.hardware = hardware
         if not isinstance(interaction_environment, InteractionEnvironment):
             raise TypeError("interaction_environment must be an InteractionEnvironment")
@@ -6907,6 +6909,7 @@ class RobotApplication:
         autonomous: bool = False,
     ) -> tuple[CognitionToolResult, VisualPerceptionResult | None]:
         focus = ""
+        backend = None
         try:
             arguments = self._tool_arguments(call, {"focus"})
             value = arguments["focus"]
@@ -6970,9 +6973,12 @@ class RobotApplication:
                 self.attention.record_visual(
                     state="failed", focus=focus or None, status="rejected"
                 )
-            return CognitionToolResult(json.dumps({
-                "status": "rejected", "error": str(error),
-            }, sort_keys=True)), None
+            category = error.category if isinstance(error, VisualPerceptionError) else None
+            message = str(error) if category or backend is None else "visual interpretation failed (implementation_error)"
+            diagnostic = {"status": "rejected", "error": message[:500]}
+            if category:
+                diagnostic["failure_category"] = category
+            return CognitionToolResult(json.dumps(diagnostic, sort_keys=True)), None
         LOGGER.info(
             "[PERCEPTION] modality=visual status=applied description_chars=%s",
             len(result.description),

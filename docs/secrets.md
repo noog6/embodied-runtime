@@ -99,6 +99,30 @@ validation does not contact providers. Diagnostics expose only the endpoint
 origin and safe failure categories, never authorization headers or provider
 exception bodies. See [the full operator workflow](cognition-compatible.md).
 
+## Ordered visual perception
+
+Each `[[vision.backends]]` entry selects an environment-variable name with
+`api_key_env`. The recommended primary/secondary names are `OPENROUTER_API_KEY`
+and `OPENAI_API_KEY`; both protected files above can be sourced in one shell.
+Keep keys out of TOML and command arguments. Custom variable names use the same
+protected-file procedure and are captured by the startup wizard when vision is
+enabled. Disabled vision contributes no credential requirements.
+
+For systemd, first source all required deployment credentials in the installing
+shell. `python scripts/startup_wizard.py check --config config/mira-vision.toml
+--capture-env` reports only presence. Then
+`python scripts/startup_wizard.py install --config config/mira-vision.toml
+--capture-env --force` captures all selected values into the existing mode-0600
+managed environment file and updates the unit without starting the runtime.
+Existing TTS/SMS/cognition requirements still apply. Secure file reuse and capture
+are unchanged; shell exports alone do not alter an already running service.
+See [the operator procedure](portable-vision-validation.md).
+
+At runtime a missing primary vision credential may degrade to a later entry.
+That setup failure is visible without counting an outbound call or logging a key.
+No global OpenAI environment variables redirect compatible vision or its direct
+OpenAI fallback client.
+
 ## Practical security rules
 
 - Never commit API keys to Git.

@@ -307,11 +307,13 @@ def required_environment(deployment: Deployment) -> tuple[str, ...]:
     if (launch.cognition == "openai-responses" or launch.vision == "openai-responses"
             or (launch.voice_enabled and launch.voice_tts == "openai")):
         required.append("OPENAI_API_KEY")
+    if launch.vision == "configured":
+        required.extend(entry.api_key_env for entry in launch.vision_configuration.backends)
     if launch.voice_enabled and launch.voice_tts == "elevenlabs":
         required.append("ELEVENLABS_API_KEY")
     if launch.sms_enabled:
         required.extend(TWILIO_ENVIRONMENT)
-    return tuple(required)
+    return tuple(dict.fromkeys(required))
 
 
 def environment_presence(
