@@ -35,6 +35,7 @@ class OpenAICompatibleConfig:
     request_timeout_seconds: float = 30.0
     tool_calling: bool = False
     image_input: bool = False
+    parallel_tool_calls_mode: str = "disable"
 
 
 def validate_compatible_config(config: OpenAICompatibleConfig, *, complete: bool = True) -> None:
@@ -65,6 +66,8 @@ def validate_compatible_config(config: OpenAICompatibleConfig, *, complete: bool
         raise ConfigurationError("cognition.openai_compatible.request_timeout_seconds must be finite and positive")
     if type(config.tool_calling) is not bool or type(config.image_input) is not bool:
         raise ConfigurationError("cognition.openai_compatible capabilities must be boolean")
+    if config.parallel_tool_calls_mode not in ("disable", "omit"):
+        raise ConfigurationError("cognition.openai_compatible.parallel_tool_calls_mode must be 'disable' or 'omit'")
     if complete and not config.tool_calling:
         raise ConfigurationError("openai-compatible requires an explicitly tool-capable model (tool_calling = true)")
 
@@ -258,7 +261,10 @@ _RUNTIME_KEYS = {
     "profile", "hardware", "camera", "cognition", "vision", "mode", "timezone",
 }
 _COGNITION_KEYS = {"model", "openai_compatible"}
-_COMPATIBLE_KEYS = {"model", "base_url", "api_key_env", "request_timeout_seconds", "tool_calling", "image_input"}
+_COMPATIBLE_KEYS = {
+    "model", "base_url", "api_key_env", "request_timeout_seconds", "tool_calling",
+    "image_input", "parallel_tool_calls_mode",
+}
 _INITIATIVE_KEYS = {
     "enabled", "platform_attention", "actions", "messages", "continuation",
     "goal_closure",

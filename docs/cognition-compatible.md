@@ -39,6 +39,7 @@ api_key_env = "OPENROUTER_API_KEY"
 request_timeout_seconds = 30
 tool_calling = true
 image_input = false
+parallel_tool_calls_mode = "disable"
 ```
 
 This is an explicitly selected example model, not a runtime default or evidence
@@ -67,6 +68,37 @@ only through the existing runtime executor, then requests final prose with
 ignores this setting. A continuation failure propagates without restarting the
 interaction or executing the tool again. Job acquisition, continuation, effect
 budgets, tool argument validation, and fresh authority checks stay runtime-owned.
+
+## Select the parallel-tool parameter mode
+
+`parallel_tool_calls_mode` controls the outbound request shape:
+
+- `"disable"` is the backward-compatible default. Initial and final requests
+  carrying tool schemas send `parallel_tool_calls=False`.
+- `"omit"` leaves that parameter out of both tool-bearing requests.
+
+Tool-free prewarm never sends the parameter. Neither mode sends `True`.
+Runtime and benchmark CLIs both accept
+`--compatible-parallel-tool-calls-mode {disable,omit}`; an explicit CLI value
+overrides TOML. Unsupported values fail local validation.
+
+OpenRouter retains `require_parameters=True` and `allow_fallbacks=False`.
+Strict routing checks whether an endpoint supports each supplied parameter;
+`False` is still a supplied value. An endpoint advertising `tools` and
+`tool_choice` without `parallel_tool_calls` can therefore be excluded even when
+parallel calls are disabled, producing HTTP 404 with
+"No endpoints found that can handle the requested parameters." Select `"omit"`
+explicitly to leave this unsupported parameter out of routing. The adapter does
+not infer the mode from model names, discover models, or retry with different
+parameters after rejection.
+
+Omitting the parameter permits routing without granting parallel execution.
+In both modes the adapter rejects multiple returned tool calls before executing
+any, executes one accepted request only through the runtime executor, and keeps
+the final request at `tool_choice="none"`. Additional final-stage tool calls
+remain rejected if the provider ignores that setting. Deadlines, cancellation,
+zero SDK retries, and exactly-once execution after continuation failures remain
+unchanged, as do runtime acquisition, continuation, and effect limits.
 
 ## Compare the same bounded Job
 
@@ -98,11 +130,27 @@ python -m embodied_runtime.benchmarks \
   --json-out /tmp/mira-openrouter.json
 ```
 
+For Nick's post-merge check on Mira, run this normal production benchmark from
+the checkout with its Python environment active. It needs no diagnostic wrapper:
+
+```sh
+source ~/.config/embodied-runtime/openrouter.env
+python -m embodied_runtime.benchmarks \
+  --backend openai-compatible --model anthropic/claude-opus-5.5 \
+  --compatible-base-url https://openrouter.ai/api/v1 \
+  --compatible-api-key-env OPENROUTER_API_KEY \
+  --compatible-tool-calling --compatible-request-timeout-seconds 30 \
+  --compatible-parallel-tool-calls-mode omit \
+  --scenario confirmed_effect_requires_no_reverification --repeat 1 \
+  --json-out /tmp/mira-openrouter-claude-opus-5.5.json
+```
+
 Runtime accepts those same connection/capability flags; select the model with
 `--cognition-model` and backend with `--cognition`. Explicit CLI values override
 the dedicated TOML table, then compatible defaults (30 seconds, images disabled,
-tool capability undeclared). `--no-compatible-image-input` and
-`--no-compatible-tool-calling` explicitly clear capability declarations.
+tool capability undeclared, parallel-tool parameter mode `"disable"`).
+`--no-compatible-image-input` and `--no-compatible-tool-calling` explicitly clear
+capability declarations.
 `[cognition].model` continues to belong to the Responses configuration. Other
 runtime settings in a benchmark configuration are not applied to its isolated
 virtual application. Existing `--model ... --repeat ...` benchmark invocations
@@ -181,6 +229,17 @@ OpenRouter is the first supported integration; other compatible endpoints need
 their own verification and may require unsupported metadata or parameters.
 The adapter does not guarantee every model available through OpenRouter is suitable.
 
-Live OpenRouter validation for this implementation is **unverified**: the
-implementation was exercised with fake clients without credentials or external
-provider calls. The commands above are the operator validation procedure.
+An operator reported one live diagnostic scenario pass for
+`anthropic/claude-opus-5.5` using a temporary SDK wrapper that removed only
+`parallel_tool_calls` from outbound requests. The same benchmark had failed with
+the HTTP 404 above; the listed OpenRouter endpoints advertised `tools` and
+`tool_choice` but not `parallel_tool_calls`. The wrapper run passed
+`confirmed_effect_requires_no_reverification` **1/1**, with one work episode,
+four provider requests, zero acquisitions, one effect, returned model
+`anthropic/claude-opus-5.5`, and duration **23.9 seconds**.
+
+That is one operator-observed scenario pass using the temporary wrapper.
+The permanent configurable fix has been exercised with offline fake clients;
+it has **not been live-validated**, nor does the supplied result validate other
+models or the full suite. The normal command above is the post-merge validation
+procedure.

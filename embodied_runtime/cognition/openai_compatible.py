@@ -92,8 +92,9 @@ class OpenAICompatibleBackend(TextCognitionBackend):
         arguments: dict[str, Any] = {"model": self.model, "messages": messages, "stream": False}
         if tools:
             # OpenRouter validates schemas in both stages, even with tools disabled.
-            arguments.update(tools=tools, tool_choice="none" if final else "auto",
-                             parallel_tool_calls=False)
+            arguments.update(tools=tools, tool_choice="none" if final else "auto")
+            if self.config.parallel_tool_calls_mode == "disable":
+                arguments["parallel_tool_calls"] = False
         else:
             arguments["tool_choice"] = "none"
         if self._openrouter:

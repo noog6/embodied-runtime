@@ -53,6 +53,7 @@ api_key_env = "OPENROUTER_API_KEY"
 request_timeout_seconds = 30
 tool_calling = true
 image_input = false
+parallel_tool_calls_mode = "disable"
 ```
 
 The compatible backend requires explicit nonempty model, HTTP(S) base URL,
@@ -60,10 +61,22 @@ credential-variable name, and `tool_calling = true`. Credential values are never
 configuration fields. Timeout must be finite and positive; images are disabled
 unless explicitly declared supported. Credentials, query parameters, and fragments
 in URLs are rejected. Validation is local and does not contact the endpoint.
+`parallel_tool_calls_mode` accepts only `"disable"` (the backward-compatible
+default, sends `parallel_tool_calls=False` on initial and final requests carrying
+tool schemas) or `"omit"` (leaves the parameter out of both requests). Tool-free
+prewarm never sends it. Strict provider routing can reject an unsupported
+parameter even when its value is `False`; select `"omit"` explicitly for such
+endpoints. Both modes reject multiple returned calls before executing any tool,
+use the runtime executor for a single accepted call, and reject final-stage tool
+calls while requesting `tool_choice="none"`. Runtime budgets and authority remain
+unchanged; there is no mode that sends `True`.
+
 CLI overrides are `--cognition-model`, `--compatible-base-url`,
 `--compatible-api-key-env`, `--compatible-request-timeout-seconds`,
-`--compatible-tool-calling`, and `--compatible-image-input` (the two capability
-flags also accept `--no-...`). Compatible model/connection settings never fall
+`--compatible-tool-calling`, `--compatible-image-input` (the two capability
+flags also accept `--no-...`), and
+`--compatible-parallel-tool-calls-mode {disable,omit}`. Explicit CLI values take
+precedence over TOML, then defaults. Compatible model/connection settings never fall
 back to global OpenAI environment settings. See
 [OpenRouter operator workflow](cognition-compatible.md). The checked-in
 deployment continues to select OpenAI Responses.
