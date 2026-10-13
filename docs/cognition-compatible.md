@@ -183,7 +183,8 @@ an OpenRouter model named like an OpenAI model receives no direct OpenAI rate.
 No dynamic price lookup is performed. Provider response model identity is
 diagnostic and does not trigger model routing or fallback.
 
-Categories distinguish `authentication`, `rate_limit`, `connection`, `timeout`,
+Categories distinguish `authentication`, `payment_required`, `model_unavailable`,
+`rate_limit`, `connection`, `timeout`,
 `invalid_request`, `provider_unavailable`, `provider_error`, `unavailable`,
 `empty_response`, `refused`, `truncated`, `malformed_response`,
 `malformed_tool_call`, `multiple_tool_calls`, `unexpected_tool_call`, and

@@ -38,32 +38,37 @@ class OpenAICompatibleConfig:
     parallel_tool_calls_mode: str = "disable"
 
 
-def validate_compatible_config(config: OpenAICompatibleConfig, *, complete: bool = True) -> None:
-    for name in ("model", "base_url", "api_key_env"):
-        value = getattr(config, name)
+def _validate_provider_connection(*, model, base_url, api_key_env, request_timeout_seconds,
+                                  prefix: str, complete: bool = True) -> None:
+    for name, value in (("model", model), ("base_url", base_url), ("api_key_env", api_key_env)):
         if value is None and not complete:
             continue
         if not isinstance(value, str) or not value.strip() or value != value.strip():
-            raise ConfigurationError(f"cognition.openai_compatible.{name} must be a non-empty string")
-    if config.base_url is not None:
+            raise ConfigurationError(f"{prefix}.{name} must be a non-empty string")
+    if base_url is not None:
         try:
-            url = urlsplit(config.base_url)
+            url = urlsplit(base_url)
             valid = (url.scheme in {"https", "http"} and bool(url.hostname)
                      and url.port != 0 and url.username is None and url.password is None
                      and not url.query and not url.fragment
-                     and not any(char.isspace() or ord(char) < 32 for char in config.base_url))
+                     and not any(char.isspace() or ord(char) < 32 for char in base_url))
         except ValueError:
             valid = False
         if not valid:
             raise ConfigurationError(
-                "cognition.openai_compatible.base_url must be an HTTP(S) URL "
+                f"{prefix}.base_url must be an HTTP(S) URL "
                 "without credentials, query, or fragment"
             )
-    if config.api_key_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config.api_key_env):
-        raise ConfigurationError("cognition.openai_compatible.api_key_env must be an environment-variable name")
-    timeout = config.request_timeout_seconds
+    if api_key_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env):
+        raise ConfigurationError(f"{prefix}.api_key_env must be an environment-variable name")
+    timeout = request_timeout_seconds
     if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
-        raise ConfigurationError("cognition.openai_compatible.request_timeout_seconds must be finite and positive")
+        raise ConfigurationError(f"{prefix}.request_timeout_seconds must be finite and positive")
+
+
+def validate_compatible_config(config: OpenAICompatibleConfig, *, complete: bool = True) -> None:
+    _validate_provider_connection(model=config.model, base_url=config.base_url, api_key_env=config.api_key_env,
+        request_timeout_seconds=config.request_timeout_seconds, prefix="cognition.openai_compatible", complete=complete)
     if type(config.tool_calling) is not bool or type(config.image_input) is not bool:
         raise ConfigurationError("cognition.openai_compatible capabilities must be boolean")
     if config.parallel_tool_calls_mode not in ("disable", "omit"):
@@ -76,6 +81,46 @@ def validate_compatible_config(config: OpenAICompatibleConfig, *, complete: bool
 class CognitionFileConfig:
     model: str | None = None
     openai_compatible: OpenAICompatibleConfig = OpenAICompatibleConfig()
+
+
+MAX_VISION_BACKENDS = 3
+
+
+@dataclass(frozen=True)
+class VisionBackendConfig:
+    backend: str
+    model: str
+    api_key_env: str
+    base_url: str | None = None
+    request_timeout_seconds: float = 15.0
+
+
+@dataclass(frozen=True)
+class VisionConfiguration:
+    request_timeout_seconds: float = 30.0
+    backends: tuple[VisionBackendConfig, ...] = ()
+
+
+def validate_vision_backend_config(config: VisionBackendConfig) -> None:
+    if config.backend not in ("openai-compatible", "openai-responses"):
+        raise ConfigurationError("vision.backends.backend must be 'openai-compatible' or 'openai-responses'")
+    _validate_provider_connection(model=config.model,
+        base_url=config.base_url if config.backend == "openai-compatible" else "https://api.openai.com/v1",
+        api_key_env=config.api_key_env, request_timeout_seconds=config.request_timeout_seconds, prefix="vision.backends")
+    if config.backend == "openai-responses" and config.base_url is not None:
+        raise ConfigurationError("vision.backends.base_url is only supported for openai-compatible")
+    if any(char.isspace() or ord(char) < 32 for char in config.model):
+        raise ConfigurationError("vision.backends.model must not contain whitespace or control characters")
+
+
+def validate_vision_configuration(config: VisionConfiguration) -> None:
+    timeout = config.request_timeout_seconds
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ConfigurationError("vision.request_timeout_seconds must be finite and positive")
+    if len(config.backends) > MAX_VISION_BACKENDS:
+        raise ConfigurationError(f"vision.backends accepts at most {MAX_VISION_BACKENDS} entries")
+    for backend in config.backends:
+        validate_vision_backend_config(backend)
 
 
 @dataclass(frozen=True)
@@ -168,6 +213,7 @@ class RuntimeFileConfiguration:
     interaction: InteractionFileConfig = InteractionFileConfig()
     sms: SmsFileConfig = SmsFileConfig()
     power: PowerFileConfig = PowerFileConfig()
+    vision: VisionConfiguration = VisionConfiguration()
 
 
 @dataclass(frozen=True)
@@ -224,6 +270,7 @@ class LaunchConfiguration:
     power_attention_voltage_v: float
     power_recovery_voltage_v: float
     cognition_openai_compatible: OpenAICompatibleConfig = OpenAICompatibleConfig()
+    vision_configuration: VisionConfiguration = VisionConfiguration()
 
 
 DEFAULT_COGNITION_MODEL = "gpt-5.6-luna"
@@ -291,7 +338,7 @@ _ENUMS = {
     "runtime.hardware": {"auto", "virtual", "host", "fusion-hat"},
     "runtime.camera": {"auto", "none", "picamera2"},
     "runtime.cognition": {"none", "openai-responses", "openai-compatible"},
-    "runtime.vision": {"none", "openai-responses"},
+    "runtime.vision": {"none", "openai-responses", "configured"},
     "runtime.mode": {"run", "console", "diagnostics"},
     "interaction.environment": {"workstation", "companion", "unattended", "remote"},
 }
@@ -311,7 +358,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "cognition", "initiative", "voice", "earcons", "memory", "conversation_history", "jobs", "interaction", "sms", "power"})
+    _reject_unknown(data, {"runtime", "cognition", "vision", "initiative", "voice", "earcons", "memory", "conversation_history", "jobs", "interaction", "sms", "power"})
     runtime = _table(data, "runtime")
     cognition = _table(data, "cognition")
     initiative = _table(data, "initiative")
@@ -329,6 +376,21 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     _reject_unknown(compatible_values, _COMPATIBLE_KEYS, "cognition.openai_compatible")
     compatible = OpenAICompatibleConfig(**compatible_values)
     validate_compatible_config(compatible, complete=False)
+    vision_values = _table(data, "vision")
+    _reject_unknown(vision_values, {"request_timeout_seconds", "backends"}, "vision")
+    entries = vision_values.get("backends", [])
+    if not isinstance(entries, list) or ("backends" in vision_values and not entries):
+        raise ConfigurationError("vision.backends must be a non-empty array of tables")
+    vision_backends = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ConfigurationError("vision.backends must be an array of tables")
+        _reject_unknown(entry, {"backend", "model", "api_key_env", "base_url", "request_timeout_seconds"}, "vision.backends")
+        if not {"backend", "model", "api_key_env"} <= entry.keys():
+            raise ConfigurationError("each vision backend requires backend, model, and api_key_env")
+        vision_backends.append(VisionBackendConfig(**entry))
+    vision = VisionConfiguration(vision_values.get("request_timeout_seconds", 30.0), tuple(vision_backends))
+    validate_vision_configuration(vision)
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
     _reject_unknown(earcons, _EARCONS_KEYS, "earcons")
@@ -568,6 +630,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         InteractionFileConfig(**interaction),
         SmsFileConfig(sms.get("enabled", False), backend, bind_host, bind_port, webhook_path),
         PowerFileConfig(**power_values),
+        vision,
     )
 
 
@@ -608,6 +671,11 @@ def resolve_launch_configuration(
         )
 
     backend = scalar("cognition", runtime.cognition, HISTORICAL_DEFAULTS.cognition)
+    vision = scalar("vision", runtime.vision, "configured" if file_config.vision.backends else "none")
+    if file_config.vision.backends and vision not in ("none", "configured"):
+        raise ConfigurationError("vision.backends requires vision = 'configured' or 'none'; --vision openai-responses cannot discard the configured chain")
+    if vision == "configured" and not file_config.vision.backends:
+        raise ConfigurationError("vision = 'configured' requires vision.backends")
     compatible = OpenAICompatibleConfig(**{
         name: scalar("compatible_" + name, getattr(cognition.openai_compatible, name), None)
         for name in _COMPATIBLE_KEYS
@@ -625,7 +693,8 @@ def resolve_launch_configuration(
         cognition=backend,
         cognition_model=model,
         cognition_openai_compatible=compatible,
-        vision=scalar("vision", runtime.vision, HISTORICAL_DEFAULTS.vision),
+        vision=vision,
+        vision_configuration=file_config.vision,
         mode=mode,
         timezone=runtime.timezone or HISTORICAL_DEFAULTS.timezone,
         interaction_environment=(interaction.environment

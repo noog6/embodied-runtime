@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.cli import (
     build_conversation_history_store, build_job_store, build_persistent_memory_store,
-    build_text_to_speech_provider, main, parse_launch_arguments,
+    build_text_to_speech_provider, build_visual_perception_backend, main, parse_launch_arguments,
 )
 from embodied_runtime.conversation_history import SQLiteConversationHistoryStore
 from embodied_runtime.jobs import SQLiteJobStore
@@ -369,6 +369,79 @@ class ConfigurationTests(unittest.TestCase):
             path = self.write(contents)
             with patch("sys.stderr"), self.assertRaises(SystemExit):
                 main(["--config", str(path)])
+
+    def test_ordered_vision_activation_disable_and_cli_conflict(self):
+        chain = '''
+[vision]
+request_timeout_seconds = 30
+[[vision.backends]]
+backend = "openai-compatible"
+model = "google/gemini-3.8-flash"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+request_timeout_seconds = 15
+[[vision.backends]]
+backend = "openai-responses"
+model = "gpt-6.1-sol"
+api_key_env = "OPENAI_API_KEY"
+request_timeout_seconds = 15
+'''
+        runtime = '[runtime]\ncamera="picamera2"\ncognition="openai-responses"\n'
+        for selection in (None, "configured", "none"):
+            text = runtime + (f'vision="{selection}"\n' if selection else "") + chain
+            path = self.write(text)
+            _, args, effective = parse_launch_arguments(["--config", str(path)])
+            self.assertEqual(effective.vision, selection or "configured")
+            built = build_visual_perception_backend(args)
+            if selection == "none":
+                self.assertIsNone(built)
+            else:
+                self.assertEqual([backend.identifier for backend in built.backends],
+                                 ["openai-compatible", "openai-responses"])
+                self.assertEqual([backend.model for backend in built.backends],
+                                 ["google/gemini-3.8-flash", "gpt-6.1-sol"])
+                self.assertTrue(all(backend._client is None for backend in built.backends))
+            disabled = parse_launch_arguments(["--config", str(path), "--vision", "none"])[1]
+            self.assertIsNone(build_visual_perception_backend(disabled))
+            enabled = parse_launch_arguments(["--config", str(path), "--vision", "configured"])[1]
+            self.assertEqual(len(build_visual_perception_backend(enabled).backends), 2)
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
+                parse_launch_arguments(["--config", str(path), "--vision", "openai-responses"])
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_launch_arguments(["--config", str(self.write(runtime + 'vision="openai-responses"\n' + chain))])
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_launch_arguments(["--vision", "configured"])
+
+    def test_ordered_vision_configuration_validation(self):
+        entry = '''
+[[vision.backends]]
+backend = "openai-compatible"
+model = "google/gemini-3.8-flash"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+request_timeout_seconds = 15
+'''
+        cases = [
+            '[vision]\nbackends=[]\n', '[vision]\nbackends="SECRET"\n',
+            '[vision]\nunknown="SECRET"\n', entry * 4, entry + 'api_key="SECRET"\n',
+            entry.replace('backend = "openai-compatible"', 'backend = "other"'),
+            entry.replace('model = "google/gemini-3.8-flash"', 'model = ""'),
+            entry.replace('model = "google/gemini-3.8-flash"', 'model = "bad model"'),
+            entry.replace('model = "google/gemini-3.8-flash"', 'model = 1'),
+            entry.replace('api_key_env = "OPENROUTER_API_KEY"', 'api_key_env = "bad-key!"'),
+            entry.replace('api_key_env = "OPENROUTER_API_KEY"', ''),
+            entry.replace('backend = "openai-compatible"', 'backend = "openai-responses"'),
+        ]
+        for url in ("https://user:SECRET@example.test/v1", "https://example.test?key=SECRET",
+                    "https://example.test#SECRET", "ftp://example.test", "https://example.test:bad", ""):
+            cases.append(entry.replace("https://openrouter.ai/api/v1", url))
+        for timeout in ("0", "-1", "true", "inf", "nan", '"slow"'):
+            cases.append(entry.replace("request_timeout_seconds = 15", f"request_timeout_seconds = {timeout}"))
+            cases.append(f"[vision]\nrequest_timeout_seconds={timeout}\n" + entry)
+        for text in cases:
+            with self.subTest(text=text), self.assertRaises(ConfigurationError) as caught:
+                load_runtime_config(self.write(text))
+            self.assertNotIn("SECRET", str(caught.exception))
 
     def test_positive_boolean_flags_override_false_and_absence_preserves_true(self):
         effective = self.effective(

@@ -60,9 +60,7 @@ from embodied_runtime.resources import ResourceArbiter
 from embodied_runtime.reflexes import PresenceCenteringReflex
 from embodied_runtime.platform import PlatformMonitorPolicy, PlatformSnapshot
 from embodied_runtime.power import PowerMonitorPolicy
-from embodied_runtime.perception import (
-    OpenAIResponsesVisualPerceptionBackend, VisualPerceptionBackend,
-)
+from embodied_runtime.perception import VisualPerceptionBackend
 from embodied_runtime.sensing.camera import CameraBackend
 from embodied_runtime.sensing.camera.picamera2 import (
     Picamera2CameraBackend,
@@ -158,7 +156,7 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     )
     add_compatible_arguments(parser)
     parser.add_argument(
-        "--vision", choices=("none", "openai-responses"),
+        "--vision", choices=("none", "openai-responses", "configured"),
         default=configurable_default("none"),
     )
     parser.add_argument(
@@ -262,7 +260,10 @@ def parse_launch_arguments(
             file_config = load_runtime_config(args.config)
         except ConfigurationError as error:
             parser.error(str(error))
-    effective = resolve_launch_configuration(args, file_config)
+    try:
+        effective = resolve_launch_configuration(args, file_config)
+    except ConfigurationError as error:
+        parser.error(str(error))
     args.profile = effective.profile
     args.hardware = effective.hardware
     args.camera = effective.camera
@@ -270,6 +271,7 @@ def parse_launch_arguments(
     args.cognition_model = effective.cognition_model
     args.cognition_openai_compatible = effective.cognition_openai_compatible
     args.vision = effective.vision
+    args.vision_configuration = effective.vision_configuration
     args.timezone = effective.timezone
     args.interaction_environment = effective.interaction_environment
     args.console = effective.mode == "console"
@@ -399,9 +401,9 @@ def build_cognition_backend(args: argparse.Namespace) -> TextCognitionBackend | 
 def build_visual_perception_backend(
     args: argparse.Namespace,
 ) -> VisualPerceptionBackend | None:
-    if args.vision == "openai-responses":
-        return OpenAIResponsesVisualPerceptionBackend()
-    return None
+    from embodied_runtime.config import VisionConfiguration
+    from embodied_runtime.perception.factory import create_visual_perception_backend
+    return create_visual_perception_backend(args.vision, getattr(args, "vision_configuration", VisionConfiguration()))
 
 
 def build_persistent_memory_store(
