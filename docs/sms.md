@@ -12,8 +12,10 @@ To enable outbound pictures, set optional `TWILIO_PUBLIC_MEDIA_BASE_URL` to the
 trusted public HTTPS **origin** that maps
 to the SMS HTTP listener (for example, `https://example.ngrok-free.app`, with no
 path). The runtime never derives this origin from request headers. It stages only
-runtime-captured JPEGs at unpredictable bearer URLs under `/outbound-media/` and
-supports Twilio's `GET` and `HEAD` fetches with `image/jpeg`.
+runtime-retained camera or [Workspace image snapshots](workspace-images.md) at
+unpredictable bearer URLs under `/outbound-media/`. Twilio `GET` and `HEAD` fetches
+serve exact JPEG or PNG bytes with `image/jpeg` or `image/png`, respectively.
+Loading and sending a saved image requires no camera or vision request.
 
 Staging is volatile and bounded for small hardware: at most four images and 12 MiB
 total, each no larger than 4 MiB, for 15 minutes. Capacity is rejected rather than

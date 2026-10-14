@@ -16,7 +16,7 @@ never persisted in the Workspace or Jobs database.
 
 Phase 7B implements one durable Workspace for each durable Job. Every occurrence
 of a Job uses the same Workspace; a Workspace is not owned by a JobRun. An
-artifact is a regular, bounded UTF-8 text file identified by its canonical
+artifact is a bounded regular text or JPEG/PNG image file identified by its canonical
 Job-relative logical path. Artifact identity does not involve database rows or
 artifact IDs.
 
@@ -47,7 +47,8 @@ The fixed safety ceilings are:
 | Path depth | 8 components |
 | Returned read | 8,000 Unicode characters |
 | One write request | 16 KiB encoded UTF-8 |
-| One artifact | 256 KiB |
+| One text artifact | 256 KiB |
+| One image artifact | 4 MiB (4,096 per dimension; 4,194,304 pixels) |
 | One listing page | 100 entries |
 | Workspace regular files | 128 |
 | Workspace artifact bytes | 8 MiB |
@@ -101,9 +102,10 @@ order. They never recursively
 delete or remove pre-existing directories. Abrupt process death may retain an
 empty structural directory, but artifact publication remains old-or-new.
 
-No `expected_version` is required yet, and there is no revision history or
-durable provenance ledger. In particular, Phase 7B cannot durably answer which
-JobRun last modified an artifact once operational logs are unavailable.
+No `expected_version` is required, and there is no revision history or general
+provenance ledger. Text artifacts do not durably identify their originating run.
+Runtime-saved images carry one version-bound capture/storage record; see
+[bounded Workspace images](workspace-images.md) for its meaning and failure semantics.
 
 ## Authority and meaning
 
@@ -186,3 +188,17 @@ Workspace content survives JobRun terminal states, Job disable/enable,
 application shutdown, and application restart. Reopening it does not restore or
 create a Task, ActiveGoal, WorkingMemory, readiness state, semantic continuity,
 progress, or JobRun.
+
+## Image workflows
+
+[Bounded Workspace images](workspace-images.md) documents `workspace_save_image`,
+`workspace_load_image`, `interpret_image`, existing capture/delivery reuse,
+Pillow validation, atomic inode provenance, unchanged shared budgets, and exact
+post-merge operator commands. Images are never decoded by text tools, and image
+snapshots retain their exact version even after the logical artifact is replaced.
+
+Operator image saves require the standalone `save image {"job":"JOB7",
+"path":"photos/frame.jpg","mode":"create"}` request. The runtime locks the
+resolved Job, path and mutation to that live episode; prose, previous consent and
+model-supplied intent do not authorize an image write. Job-work authority is
+unchanged. See [the complete authorization grammar](workspace-images.md#operator-save-authorization).

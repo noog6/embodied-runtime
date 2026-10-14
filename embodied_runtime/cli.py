@@ -953,8 +953,6 @@ def validate_launch_dependencies(args: argparse.Namespace) -> None:
         )
     if args.initiative and args.cognition == "none":
         raise ConfigurationError("--initiative requires a cognition backend")
-    if args.vision != "none" and args.camera == "none":
-        raise ConfigurationError("--vision requires a camera backend")
     if args.vision != "none" and args.cognition == "none":
         raise ConfigurationError("--vision requires a cognition backend")
     if args.tts == "piper" and not args.piper_model:

@@ -61,6 +61,17 @@ class VisualPerceptionError(CognitionError):
 
 
 @dataclass(frozen=True, slots=True)
+class ImageSnapshot:
+    """Historical encoded image; unknown capture time is explicitly None."""
+
+    data: bytes
+    media_type: str
+    width: int
+    height: int
+    captured_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class VisualPerceptionResult:
     """One bounded, non-authoritative model interpretation."""
 
@@ -80,7 +91,7 @@ class VisualPerceptionBackend(ABC):
     request_timeout_seconds: float = 30.0
 
     @abstractmethod
-    async def interpret(self, frame: CameraFrame, focus: str) -> VisualPerceptionResult: ...
+    async def interpret(self, frame: CameraFrame | ImageSnapshot, focus: str) -> VisualPerceptionResult: ...
 
 
 @dataclass(frozen=True)
@@ -98,12 +109,15 @@ def _field(owner: Any, name: str, default: Any = None) -> Any:
     return owner.get(name, default) if isinstance(owner, Mapping) else getattr(owner, name, default)
 
 
-def _validate_input(frame: CameraFrame, focus: str) -> None:
-    if (not isinstance(frame, CameraFrame) or type(frame.data) is not bytes
+def _validate_input(frame: CameraFrame | ImageSnapshot, focus: str) -> None:
+    if (not isinstance(frame, (CameraFrame, ImageSnapshot)) or type(frame.data) is not bytes
             or not 0 < len(frame.data) <= MAX_CAMERA_FRAME_BYTES
             or frame.media_type not in ("image/jpeg", "image/png", "image/webp")
             or any(type(value) is not int or value <= 0 for value in (frame.width, frame.height))
-            or type(frame.captured_at_ns) is not int or frame.captured_at_ns < 0):
+            or (isinstance(frame, CameraFrame) and
+                (type(frame.captured_at_ns) is not int or frame.captured_at_ns < 0))
+            or (isinstance(frame, ImageSnapshot) and frame.captured_at is not None and
+                (not isinstance(frame.captured_at, datetime) or frame.captured_at.utcoffset() is None))):
         raise VisualPerceptionError("invalid_frame")
     if (not isinstance(focus, str) or not focus.strip() or len(focus) > 300
             or any(unicodedata.category(char) == "Cc" for char in focus)):
@@ -183,10 +197,22 @@ class _RemoteVisualBackend(VisualPerceptionBackend):
                 raise VisualPerceptionError(failure_category(error), http_status=provider_http_status(error)) from None
         return self._client
 
-    async def interpret(self, frame: CameraFrame, focus: str) -> VisualPerceptionResult:
+    async def interpret(self, frame: CameraFrame | ImageSnapshot, focus: str) -> VisualPerceptionResult:
         _validate_input(frame, focus)
         image_url = f"data:{frame.media_type};base64,{base64.b64encode(frame.data).decode('ascii')}"
         arguments = self._arguments(image_url, focus)
+        if isinstance(frame, ImageSnapshot):
+            instructions = (
+                "Analyze exactly this one historical saved image. It is not a current "
+                "camera observation. Capture time: " +
+                (frame.captured_at.isoformat() if frame.captured_at else "unknown") +
+                ". Answer the supplied visual focus using visible evidence only. "
+                "State uncertainty; do not infer hidden objects, events, or current-world state. Be concise."
+            )
+            if self.protocol == "responses":
+                arguments["instructions"] = instructions
+            else:
+                arguments["messages"][0]["content"] = instructions
         client = self._get_client()  # Setup failures are not outbound calls.
         create = client.responses.create if self.protocol == "responses" else client.chat.completions.create
         attempt = _ATTEMPT.get()
@@ -385,7 +411,7 @@ class OrderedVisualPerceptionBackend(VisualPerceptionBackend):
                     "requested_model": getattr(backend, "model", None),
                 })
 
-    async def interpret(self, frame: CameraFrame, focus: str) -> VisualPerceptionResult:
+    async def interpret(self, frame: CameraFrame | ImageSnapshot, focus: str) -> VisualPerceptionResult:
         _validate_input(frame, focus)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.request_timeout_seconds

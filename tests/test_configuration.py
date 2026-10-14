@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from embodied_runtime.cli import (
     build_conversation_history_store, build_job_store, build_persistent_memory_store,
     build_text_to_speech_provider, build_visual_perception_backend, main, parse_launch_arguments,
+    validate_launch_dependencies,
 )
 from embodied_runtime.conversation_history import SQLiteConversationHistoryStore
 from embodied_runtime.jobs import SQLiteJobStore
@@ -362,8 +363,10 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(overridden.vision, "none")
 
     def test_vision_dependencies_are_validated_after_merge(self):
+        path = self.write("[runtime]\nvision='openai-responses'\ncognition='openai-responses'\n")
+        # Saved-image interpretation needs vision and cognition, but no camera.
+        validate_launch_dependencies(parse_launch_arguments(["--config", str(path)])[1])
         for contents in (
-            "[runtime]\nvision='openai-responses'\ncognition='openai-responses'\n",
             "[runtime]\nvision='openai-responses'\ncamera='picamera2'\n",
         ):
             path = self.write(contents)

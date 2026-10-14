@@ -265,6 +265,7 @@ class SmsSender(Protocol):
 class _StagedImage:
     data: bytes
     expires_at: float
+    media_type: str = "image/jpeg"
 
 
 class OutboundMediaStore:
@@ -286,20 +287,27 @@ class OutboundMediaStore:
             if self._items[token].expires_at <= now:
                 del self._items[token]
 
-    def stage(self, data: bytes) -> str:
+    def stage(self, data: bytes, media_type: str = "image/jpeg") -> str:
         self.expire()
+        if media_type not in ("image/jpeg", "image/png"):
+            raise ValueError("unsupported outbound media type")
         if (not data or len(data) > MAX_OUTBOUND_IMAGE_BYTES
                 or len(self._items) >= self.max_items
                 or sum(len(item.data) for item in self._items.values()) + len(data) > self.max_bytes):
             raise RuntimeError("outbound media staging capacity unavailable")
         token = secrets.token_urlsafe(32)
-        self._items[token] = _StagedImage(bytes(data), self._clock() + self.ttl_seconds)
+        self._items[token] = _StagedImage(bytes(data), self._clock() + self.ttl_seconds, media_type)
         return token
 
     def get(self, token: str) -> bytes | None:
         self.expire()
         item = self._items.get(token)
         return None if item is None else item.data
+
+    def get_image(self, token: str) -> OutboundImage | None:
+        self.expire()
+        item = self._items.get(token)
+        return OutboundImage(item.data, item.media_type, "") if item else None
 
     def remove(self, token: str) -> None:
         self._items.pop(token, None)
@@ -410,16 +418,17 @@ class TwilioSmsService(OperatorMessageSink):
                     and self.settings.public_media_base_url)
 
     async def deliver_image(self, image: OutboundImage) -> ImageDeliveryEvidence:
-        """Stage and submit exactly one JPEG to the configured operator."""
+        """Stage and submit exactly one JPEG or PNG to the configured operator."""
         if not self.image_delivery_available:
             raise RuntimeError("outbound MMS is not configured or ready")
-        if image.media_type != "image/jpeg" or not image.data.startswith(b"\xff\xd8\xff"):
-            raise ValueError("outbound MMS requires a valid JPEG image")
+        if image.media_type not in ("image/jpeg", "image/png") or not _matches_magic(image.media_type, image.data):
+            raise ValueError("outbound MMS requires a valid JPEG or PNG image")
         if not image.data or len(image.data) > MAX_OUTBOUND_IMAGE_BYTES:
             raise ValueError("outbound image exceeds the byte limit")
         caption = image.caption.strip()
-        token = self._outbound_media.stage(image.data)
-        media_url = f"{self.settings.public_media_base_url}{OUTBOUND_MEDIA_PATH}{token}.jpg"
+        token = self._outbound_media.stage(image.data, image.media_type)
+        extension = "jpg" if image.media_type == "image/jpeg" else "png"
+        media_url = f"{self.settings.public_media_base_url}{OUTBOUND_MEDIA_PATH}{token}.{extension}"
         try:
             response = await asyncio.to_thread(
                 self._gateway.send_media, from_=self.settings.twilio_number,
@@ -508,6 +517,8 @@ class TwilioSmsService(OperatorMessageSink):
         app.router.add_post(self.settings.webhook_path, self._handle_webhook)
         app.router.add_route("GET", OUTBOUND_MEDIA_PATH + "{token}.jpg", self._serve_media)
         app.router.add_route("HEAD", OUTBOUND_MEDIA_PATH + "{token}.jpg", self._serve_media)
+        app.router.add_route("GET", OUTBOUND_MEDIA_PATH + "{token}.png", self._serve_media)
+        app.router.add_route("HEAD", OUTBOUND_MEDIA_PATH + "{token}.png", self._serve_media)
         # Bearer paths are credentials. Disable aiohttp's request-line access log;
         # _serve_media emits only sanitized method/status metadata.
         runner = web.AppRunner(app, access_log=None)
@@ -553,17 +564,19 @@ class TwilioSmsService(OperatorMessageSink):
         if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token):
             LOGGER.info("[SMS] outbound_media method=%s status=not_found", request.method)
             return web.Response(status=404)
-        data = self._outbound_media.get(token)
-        if data is None:
+        image = self._outbound_media.get_image(token)
+        if image is None:
             LOGGER.info("[SMS] outbound_media method=%s status=not_found", request.method)
             return web.Response(status=404)
+        data, media_type = image.data, image.media_type
         LOGGER.info("[SMS] outbound_media method=%s status=served bytes=%s",
                     request.method, len(data))
+        extension = "png" if media_type == "image/png" else "jpg"
         return web.Response(
             body=None if request.method == "HEAD" else data,
-            content_type="image/jpeg",
+            content_type=media_type,
             headers={"Content-Length": str(len(data)),
-                     "Content-Disposition": 'inline; filename="camera.jpg"',
+                     "Content-Disposition": f'inline; filename="camera.{extension}"',
                      "Cache-Control": "private, max-age=0, no-store"},
         )
 
