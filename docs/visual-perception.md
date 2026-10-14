@@ -62,8 +62,10 @@ authority. The camera adapter remains unaware of resource arbitration.
 
 Set `[runtime] vision = "openai-responses"` (or use the development override
 `--vision openai-responses`) to enable remote interpretation. The historical
-default is `none`. Effective non-`none` vision configuration requires both a
-camera and text cognition backend. `OPENAI_VISION_MODEL` takes precedence over
+default is `none`. Effective non-`none` vision configuration requires a text
+cognition backend.
+A camera is required for `observe_scene`; [saved-image interpretation](workspace-images.md)
+works without a camera. `OPENAI_VISION_MODEL` takes precedence over
 `OPENAI_MODEL`; `OPENAI_API_KEY` remains environment-only.
 
 Without a backend list, single-provider selection and model precedence remain
@@ -107,7 +109,8 @@ Explicit `[runtime] vision="none"` or CLI `--vision none` disables it. CLI
 `--vision configured` enables an existing list. An `openai-responses` selection
 combined with a list is a configuration error, including an explicit CLI override:
 the runtime will not silently discard entries. Remove the list to return to the
-legacy single backend. Existing camera/cognition dependency checks still apply.
+legacy single backend. The cognition dependency check still applies; a camera is
+optional for saved imagery.
 Provider selection lives in deployment configuration, never `RobotProfile`.
 The checked-in production deployment continues to use its existing Responses vision.
 
@@ -140,8 +143,9 @@ reports these resource and interpretation facts separately and never captures.
 
 ## Fallback policy and deadlines
 
-The wrapper passes the exact same immutable frame (bytes, media type, dimensions,
-and sensor timestamp) and focus to each sequential attempt. The runtime holds the
+The wrapper passes the exact same immutable frame or historical `ImageSnapshot`
+(bytes, media type, dimensions, and original capture time when known) and focus to
+each sequential attempt. The runtime holds the
 original capture-time `observed_at` through the entire chain. No recapture, blending,
 concurrent provider calls, or model-selected providers occur. Internal fallback
 consumes no additional runtime acquisition slots and changes no Job/effect limits.
@@ -211,3 +215,13 @@ Operator and autonomous attention episodes may use one-frame visual perception a
 a bounded acquisition. Its typed evidence remains model-generated, potentially
 incomplete or uncertain, and not authoritative RuntimeState. It is not flattened
 into runtime fact text when carried to a later acquisition stage.
+
+## Retained saved images
+
+`interpret_image(image_ref, focus)` uses the same configured backend and fallback
+chain on immutable retained bytes. `ImageSnapshot` explicitly carries a nullable
+original capture time, without synthesizing a new `CameraFrame` timestamp.
+Remote instructions and results label it historical; interpretation time is
+separate and the result is fallible. It consumes an ordinary acquisition.
+`observe_scene` keeps its current-frame behavior. See [Workspace images](workspace-images.md)
+for the full grammar, ownership, quotas and operator validation.

@@ -172,3 +172,8 @@ working memory. Durable operator administration uses `memory persistent`,
 `memory add`, `memory show`, and `memory list`. Durable lookup is exact after
 case/Unicode/whitespace normalization; it is not fuzzy or semantic. Full syntax
 is documented in [`persistent-memory.md`](persistent-memory.md).
+
+Workspace listings distinguish images and show media type, dimensions, encoded
+size and exact content version. `job file` remains text-only. Image capture, save,
+interpretation and MMS delivery use ordinary `ask` episodes; see
+[Workspace image operator commands](workspace-images.md#post-merge-validation-for-nick).

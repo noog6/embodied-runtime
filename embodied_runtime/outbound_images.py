@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from typing import Protocol
 
 from embodied_runtime.interaction import InteractionChannel
@@ -24,7 +25,14 @@ class RetainedImage:
     width: int
     height: int
     source: str
-    captured_at: datetime
+    captured_at: datetime | None
+    source_identity: str | None = None
+    job_id: int | None = None
+    job_run_id: int | None = None
+
+    @property
+    def content_version(self) -> str:
+        return hashlib.sha256(self.data).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

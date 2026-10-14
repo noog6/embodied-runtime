@@ -97,6 +97,7 @@ from embodied_runtime.memory import (
 )
 from embodied_runtime.observations import SemanticObservation, SemanticObservationFact
 from embodied_runtime.observability import RunObservability
+from embodied_runtime.jobs.workspace import ImageProvenance, WorkspaceError
 from embodied_runtime.outbound_images import (
     MAX_IMAGE_CAPTION_CHARS, MAX_OUTBOUND_IMAGE_BYTES, OutboundImage, RetainedImage,
 )
@@ -106,7 +107,7 @@ from embodied_runtime.inspection import (
 )
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.perception import (
-    MAX_CAMERA_FRAME_BYTES, VisualPerceptionBackend, VisualPerceptionError, VisualPerceptionResult,
+    MAX_CAMERA_FRAME_BYTES, ImageSnapshot, VisualPerceptionBackend, VisualPerceptionError, VisualPerceptionResult,
 )
 from embodied_runtime.reflexes import Reflex
 from embodied_runtime.resources import (
@@ -690,17 +691,61 @@ OBSERVE_SCENE_TOOL = CognitionToolDefinition(
 
 CAPTURE_CAMERA_IMAGE_TOOL = CognitionToolDefinition(
     name="capture_camera_image",
-    description=("Capture and retain exactly one fresh camera JPEG for this operator "
+    description=("Capture and retain exactly one fresh camera JPEG for this "
                  "episode. This does not interpret or send the image."),
     parameters={"type": "object", "properties": {}, "required": [],
                 "additionalProperties": False},
 )
 
 
+INTERPRET_IMAGE_TOOL = CognitionToolDefinition(
+    name="interpret_image",
+    description=("Interpret one exact retained image_ref through configured vision. "
+                 "Saved images are historical, possibly of unknown age. Interpretation "
+                 "is fallible and does not establish current-world state."),
+    parameters={"type": "object", "properties": {
+        "image_ref": {"type": "string", "maxLength": 100},
+        "focus": {"type": "string", "minLength": 1, "maxLength": 300},
+    }, "required": ["image_ref", "focus"], "additionalProperties": False},
+)
+
+
+def workspace_image_tool(*, save: bool, job_work: bool) -> CognitionToolDefinition:
+    properties = {"path": {"type": "string", "minLength": 1, "maxLength": 240}}
+    if not job_work:
+        properties["job"] = {"type": "string", "minLength": 1, "maxLength": 200}
+    if save:
+        properties.update({
+            "mode": {"type": "string", "enum": ["create", "replace", "upsert"]},
+            "image_ref": {"type": "string", "maxLength": 100},
+        })
+    return CognitionToolDefinition(
+        name="workspace_save_image" if save else "workspace_load_image",
+        description=(
+            "Save exact retained image bytes durably; no interpretation. Requires "
+            "an authorized destination. Storage certifies neither truth nor freshness. "
+            "Do not replay an indeterminate write. " if save else
+            "Load one bounded JPEG/PNG into an episode-owned immutable image_ref. "
+            "Capture time is historical or explicitly unknown; no interpretation. "
+        ) + ("Runtime supplies the current Job owner." if job_work else
+             "Select an exact existing Job ID or name; never invent a Job or destination."),
+        parameters={"type": "object", "properties": properties,
+                    "required": list(properties), "additionalProperties": False},
+    )
+
+
+WORKSPACE_LOAD_IMAGE_TOOL = workspace_image_tool(save=False, job_work=False)
+WORKSPACE_SAVE_IMAGE_TOOL = workspace_image_tool(save=True, job_work=False)
+JOB_WORKSPACE_LOAD_IMAGE_TOOL = workspace_image_tool(save=False, job_work=True)
+JOB_WORKSPACE_SAVE_IMAGE_TOOL = workspace_image_tool(save=True, job_work=True)
+_IMAGE_ACQUISITIONS = ("capture_camera_image", "workspace_load_image", "interpret_image")
+_IMAGE_HISTORICAL_ACQUISITIONS = ("workspace_load_image", "interpret_image")
+
+
 def deliver_image_tool(destinations: Sequence[OperatorDeliveryDestination]) -> CognitionToolDefinition:
     return CognitionToolDefinition(
         name="deliver_image",
-        description=("Send one exact image_ref captured in this operator episode to an "
+        description=("Send one exact image_ref retained in this operator episode to an "
                      "offered runtime-owned destination. Use only when explicitly requested. "
                      "Provider acceptance is not handset receipt."),
         parameters={"type": "object", "properties": {
@@ -3142,12 +3187,14 @@ class RobotApplication:
                 (index, item) for index, item in enumerate(initiative.acquisitions, 1)
                 if item.capability in {
                     JOB_WORKSPACE_LIST_TOOL.name, JOB_WORKSPACE_READ_TOOL.name,
+                    *_IMAGE_HISTORICAL_ACQUISITIONS,
                 }
             )
             evidence_acquisitions = tuple(
                 (index, item) for index, item in enumerate(initiative.acquisitions, 1)
                 if item.capability not in {
                     JOB_WORKSPACE_LIST_TOOL.name, JOB_WORKSPACE_READ_TOOL.name,
+                    *_IMAGE_HISTORICAL_ACQUISITIONS,
                 }
             )
             lines = [
@@ -3192,7 +3239,7 @@ class RobotApplication:
                 for index, item in enumerate(initiative.effects, 1)
             )
             lines.append(
-                "An applied workspace_write proves only that the artifact mutation "
+                "An applied workspace_write or workspace_save_image proves only that the artifact mutation "
                 "occurred; it does not prove that claims in the authored content are true."
             )
             return lines
@@ -3349,6 +3396,7 @@ class RobotApplication:
                 initiative.acquisitions, 1
             ) if item.status == "applied" and item.capability not in {
                 JOB_WORKSPACE_LIST_TOOL.name, JOB_WORKSPACE_READ_TOOL.name,
+                *_IMAGE_HISTORICAL_ACQUISITIONS,
             }
         )
         bases.extend(f"effect_{index}" for index, item in
@@ -4256,7 +4304,7 @@ class RobotApplication:
                 capability_consumed = False
                 grounded_goal = self._active_goal
                 tools = self._operator_episode_tools(
-                    len(acquisitions), delivery_destinations
+                    len(acquisitions), delivery_destinations, image_references
                 )
 
                 async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
@@ -4318,6 +4366,14 @@ class RobotApplication:
                             inspection = None
                         elif call.name == CAPTURE_CAMERA_IMAGE_TOOL.name:
                             result = self._execute_camera_image_capture(
+                                call, image_references, episode.id)
+                            inspection = perception = None
+                        elif call.name == WORKSPACE_LOAD_IMAGE_TOOL.name:
+                            result = self._execute_workspace_image(
+                                call, image_references, episode.id)
+                            inspection = perception = None
+                        elif call.name == INTERPRET_IMAGE_TOOL.name:
+                            result = await self._execute_image_interpretation(
                                 call, image_references, episode.id)
                             inspection = perception = None
                         elif call.name == INSPECT_RUN_HISTORY_TOOL.name:
@@ -4386,6 +4442,9 @@ class RobotApplication:
                                 call, message, episode.trigger_source,
                                 episode_id=episode.id,
                             )
+                        elif call.name == WORKSPACE_SAVE_IMAGE_TOOL.name:
+                            result = self._execute_workspace_image(
+                                call, image_references, episode.id)
                         elif call.name == WORKSPACE_WRITE_TOOL.name:
                             result = self._execute_workspace_write(
                                 call, episode_id=episode.id)
@@ -4440,6 +4499,9 @@ class RobotApplication:
             )
             await self._finish_operator_episode(episode, "error")
             raise
+        finally:
+            capability_consumed = True
+            image_references.clear()
         if self.state is not LifecycleState.RUNNING:
             await self._finish_operator_episode(episode, "cancelled")
             raise asyncio.CancelledError
@@ -4544,14 +4606,22 @@ class RobotApplication:
     def _operator_episode_tools(
         self, acquisitions_used: int,
         delivery_destinations: Sequence[OperatorDeliveryDestination] | None = None,
+        image_references: dict[str, RetainedImage] | None = None,
     ) -> tuple[CognitionToolDefinition, ...]:
         destinations = tuple(delivery_destinations or ())
         tools = self.cognition_tools()
         media_destinations = tuple(item for item in destinations
             if (route := self._operator_delivery_routes.resolve(item.name)) is not None
             and bool(getattr(route.sink, "image_delivery_available", False)))
-        if media_destinations and self._camera_capture_available():
+        if (self._camera_capture_available() and
+                (media_destinations or (self.jobs is not None and self.job_workspaces is not None))):
             tools = (*tools, CAPTURE_CAMERA_IMAGE_TOOL)
+        if self.jobs is not None and self.job_workspaces is not None:
+            tools = (*tools, WORKSPACE_LOAD_IMAGE_TOOL)
+            if image_references:
+                tools = (*tools, WORKSPACE_SAVE_IMAGE_TOOL)
+        if image_references and self._saved_image_vision_available():
+            tools = (*tools, INTERPRET_IMAGE_TOOL)
         if destinations:
             tools = (*tools, deliver_message_tool(destinations),
                      deliver_report_tool(destinations))
@@ -4589,6 +4659,16 @@ class RobotApplication:
                 "as request-scoped input. It is not a camera frame or evidence of the "
                 "robot's present physical surroundings. Do not claim inspect_scene or "
                 "camera observation occurred because this attachment exists."
+            )
+        if self.jobs is not None and self.job_workspaces is not None:
+            lines.append(
+                "Saved-image policy: workspace_load_image retains exact bytes for interpret_image "
+                "or deliver_image. workspace_save_image requires explicit durable-write authorization "
+                "and an exact existing Job/path; never invent destinations. Do not automatically "
+                "generate or save captions/descriptions. Saved interpretation is historical and "
+                "fallible; unknown capture time means unknown age. Capture, load and interpretation "
+                "each consume one acquisition. Save and delivery each consume one effect. Split "
+                "longer workflows across episodes; never replay an indeterminate save or delivery."
             )
         if delivery_destinations:
             lines.append("\n".join((
@@ -4796,11 +4876,20 @@ class RobotApplication:
             "Publishing nothing is valid."
             if any(tool.name in {SEARCH_FINDINGS_TOOL.name, PUBLISH_FINDING_TOOL.name}
                    for tool in tools) else "")
+        image_guidance = (
+            "\n\nImage capture, load and interpretation each consume one ordinary acquisition. "
+            "Save consumes one ordinary effect and never needs vision. Saved images and "
+            "interpretations are historical, fallible and non-authoritative; unknown capture "
+            "time means unknown age. Do not replace it with retrieval or interpretation time. "
+            "Storage confirms neither visual truth nor current-world state. Use exact retained "
+            "references and explicitly intended logical paths. Never replay indeterminate "
+            "writes or send unsolicited images."
+            if any(tool.name in _IMAGE_ACQUISITIONS for tool in tools) else "")
         return (
             f"{context}{notification}\n\n{episode.render()}\n\n"
             f"{stimulus.render(actions_enabled=capabilities_available)}"
             f"{continuity_section}{progress_section}{inspection_guidance}"
-            f"{history_guidance}{finding_guidance}{sequencing}"
+            f"{history_guidance}{finding_guidance}{image_guidance}{sequencing}"
         )
 
     @staticmethod
@@ -4826,6 +4915,23 @@ class RobotApplication:
         previous_work_summary: str | None = None,
         job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
     ) -> InitiativeOutcome:
+        image_references: dict[str, RetainedImage] = {}
+        try:
+            return await self._run_initiative_episode(
+                stimulus, episode, evaluate_goal_outcome=evaluate_goal_outcome,
+                job_work=job_work, previous_work_summary=previous_work_summary,
+                job_binding=job_binding, image_references=image_references,
+            )
+        finally:
+            image_references.clear()
+
+    async def _run_initiative_episode(
+        self, stimulus: AttentionStimulus, episode: AttentionEpisode | None = None,
+        *, evaluate_goal_outcome: bool = True, job_work: bool = False,
+        previous_work_summary: str | None = None,
+        job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
+        image_references: dict[str, RetainedImage],
+    ) -> InitiativeOutcome:
         backend = self._cognition_backend
         if backend is None:
             raise RuntimeError("No cognition backend is configured")
@@ -4845,7 +4951,7 @@ class RobotApplication:
             raise RuntimeError("attention initiative requires an active goal")
         if expected_goal is None or expected_goal.id != episode.goal_id:
             raise RuntimeError("attention episode's bound goal is no longer current")
-        tools = self._initiative_tools_for_episode(job_work=job_work)
+        tools = self._initiative_tools_for_episode(job_work=job_work, image_references=image_references)
         sink = self._operator_message_sink
         notification_interaction = (
             resolve_notification_route(sink.channel)
@@ -4899,6 +5005,9 @@ class RobotApplication:
                 result, perception_result = await self._execute_visual_perception(
                     call, expected_goal=expected_goal, autonomous=True
                 )
+            elif call.name in _IMAGE_ACQUISITIONS:
+                result = await self._execute_job_image_acquisition(
+                    call, image_references, episode.id, job_binding, expected_goal)
             elif call.name == RECALL_MEMORY_TOOL.name:
                 LOGGER.info(
                     "[ATTENTION] episode=E%s acquisition=1/%s tool=%s status=requested",
@@ -4936,10 +5045,10 @@ class RobotApplication:
                 else:
                     result = await self._execute_initiative_tool(
                         call, available=self._initiative_tools_for_episode(
-                            job_work=job_work
+                            job_work=job_work, image_references=image_references
                         ), notification_interaction=notification_interaction,
                         job_binding=job_binding, expected_goal=expected_goal,
-                        episode_id=episode.id,
+                        episode_id=episode.id, image_references=image_references,
                         acquisitions=tuple(acquisitions),
                     )
             try:
@@ -4995,6 +5104,8 @@ class RobotApplication:
                 episode.id, expected_goal.id, backend.identifier,
             )
             raise
+        finally:
+            capability_requested = True
         LOGGER.info(
             "[INITIATIVE] episode=E%s goal=G%s stage=initial backend=%s "
             "request=completed response_chars=%s",
@@ -5013,7 +5124,7 @@ class RobotApplication:
             followup_completed, followup_effect = await self._request_acquisition_followup(
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
                 notification_interaction, job_work=job_work,
-                job_binding=job_binding,
+                job_binding=job_binding, image_references=image_references,
             )
             continuation_completed = followup_completed
             if followup_effect is not None:
@@ -5028,14 +5139,14 @@ class RobotApplication:
             and self.state is LifecycleState.RUNNING
             and self._goal_is_live(expected_goal)
             and self._continuation_tools_for_episode(
-                effects[0].name, job_work=job_work
+                effects[0].name, job_work=job_work, image_references=image_references
             )
         ):
             continuation_completed, continuation_effect = await self._request_continuation(
                 stimulus, episode, expected_goal, prior_memory, effects[0],
                 tuple(acquisitions),
                 notification_interaction, job_work=job_work,
-                job_binding=job_binding,
+                job_binding=job_binding, image_references=image_references,
             )
             if continuation_effect is not None:
                 effects.append(continuation_effect)
@@ -5079,6 +5190,11 @@ class RobotApplication:
                 self.options.startup_prompt, working_memory,
                 expected_goal if self._goal_is_live(expected_goal) else None,
             ), *self._notification_sections(tools, notification_interaction),
+            "Image tools use exact episode-owned references. Capture, load and interpretation each "
+            "consume one ordinary acquisition; save consumes one ordinary effect. The runtime supplies "
+            "the current Job owner. Saved images and interpretations are historical and fallible; "
+            "unknown capture time means unknown age. Storage confirms neither visual truth nor current "
+            "world state. Do not replay indeterminate writes, invent paths, or send unsolicited images.",
             episode.render(), stimulus.render(actions_enabled=None), *progress_section,
             followup.render(),
         ))
@@ -5100,15 +5216,17 @@ class RobotApplication:
         notification_interaction: InteractionContext | None = None,
         *, job_work: bool = False,
         job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
+        image_references: dict[str, RetainedImage] | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
         # This helper is deliberately finite: one decision after acquisition #1,
         # followed by exactly one effect-only decision if #2 was attempted.
         followup = AcquisitionFollowupStimulus(tuple(acquisitions))
-        tools = (*self._acquisition_tools_for_episode(job_work=job_work), *self._effect_tools_for_episode(
-            job_work=job_work
-        ))
+        tools = (
+            *self._acquisition_tools_for_episode(job_work=job_work, image_references=image_references),
+            *self._effect_tools_for_episode(job_work=job_work, image_references=image_references),
+        )
         log_prefix = "ACQUISITION"
         action = status = result_text = None
         second_acquisition: InitiativeAcquisitionOutcome | None = None
@@ -5127,9 +5245,10 @@ class RobotApplication:
                     log_prefix=log_prefix,
                 )
             consumed = True
-            available = (*self._acquisition_tools_for_episode(job_work=job_work), *self._effect_tools_for_episode(
-                job_work=job_work
-            ))
+            available = (
+                *self._acquisition_tools_for_episode(job_work=job_work, image_references=image_references),
+                *self._effect_tools_for_episode(job_work=job_work, image_references=image_references),
+            )
             inspection = perception = None
             if call.name in self._acquisition_tool_names():
                 LOGGER.info(
@@ -5157,6 +5276,9 @@ class RobotApplication:
                     result, perception = await self._execute_visual_perception(
                         call, expected_goal=expected_goal, autonomous=True
                     )
+                elif call.name in _IMAGE_ACQUISITIONS:
+                    result = await self._execute_job_image_acquisition(
+                        call, image_references, episode.id, job_binding, expected_goal)
                 elif call.name == INSPECT_RUN_HISTORY_TOOL.name:
                     result = self._execute_run_history_inspection(
                         call, expected_goal=expected_goal, autonomous=True,
@@ -5182,7 +5304,7 @@ class RobotApplication:
                     call, available=available, log_prefix=log_prefix,
                     notification_interaction=notification_interaction,
                     job_binding=job_binding, expected_goal=expected_goal,
-                    episode_id=episode.id,
+                    episode_id=episode.id, image_references=image_references,
                     acquisitions=tuple(acquisitions),
                 )
             result_text = result.output
@@ -5235,6 +5357,8 @@ class RobotApplication:
             return False, (None if action is None else InitiativeEffectOutcome(
                 action, status or "rejected", result_text or '{"status": "rejected"}'
             ))
+        finally:
+            consumed = True
         LOGGER.info(
             "[ACQUISITION] episode=E%s goal=G%s continuation=post_acquisition_1 "
             "backend=%s request=completed",
@@ -5245,7 +5369,7 @@ class RobotApplication:
                 stimulus, episode, expected_goal, prior_memory, acquisitions,
                 notification_interaction,
                 job_work=job_work,
-                job_binding=job_binding,
+                job_binding=job_binding, image_references=image_references,
             )
             return final_completed, final_effect
         return True, (None if action is None else InitiativeEffectOutcome(
@@ -5259,11 +5383,12 @@ class RobotApplication:
         notification_interaction: InteractionContext | None = None,
         *, job_work: bool = False,
         job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
+        image_references: dict[str, RetainedImage] | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
         followup = AcquisitionFollowupStimulus(tuple(acquisitions))
-        tools = self._effect_tools_for_episode(job_work=job_work)
+        tools = self._effect_tools_for_episode(job_work=job_work, image_references=image_references)
         action = status = result_text = None
         consumed = False
         LOGGER.info(
@@ -5278,7 +5403,7 @@ class RobotApplication:
                 return self._rejected_tool(call.name, "final effect decision already consumed",
                                            log_prefix="ACQUISITION")
             consumed = True
-            available = self._effect_tools_for_episode(job_work=job_work)
+            available = self._effect_tools_for_episode(job_work=job_work, image_references=image_references)
             LOGGER.info(
                 "[ACQUISITION] episode=E%s goal=G%s tool=%s class=effect "
                 "status=requested", episode.id, expected_goal.id, call.name,
@@ -5294,7 +5419,7 @@ class RobotApplication:
                     call, available=available, log_prefix="ACQUISITION",
                     notification_interaction=notification_interaction,
                     job_binding=job_binding, expected_goal=expected_goal,
-                    episode_id=episode.id,
+                    episode_id=episode.id, image_references=image_references,
                     acquisitions=tuple(acquisitions),
                 )
             result_text = result.output
@@ -5335,6 +5460,8 @@ class RobotApplication:
             return False, (None if action is None else InitiativeEffectOutcome(
                 action, status or "rejected", result_text or '{"status": "rejected"}'
             ))
+        finally:
+            consumed = True
         LOGGER.info(
             "[ACQUISITION] episode=E%s goal=G%s continuation=post_acquisition_2 "
             "backend=%s request=completed",
@@ -5375,11 +5502,12 @@ class RobotApplication:
         notification_interaction: InteractionContext | None = None,
         *, job_work: bool = False,
         job_binding: tuple[CurrentJobRun, _CurrentTaskBinding, ActiveGoal] | None = None,
+        image_references: dict[str, RetainedImage] | None = None,
     ) -> tuple[bool, InitiativeEffectOutcome | None]:
         backend = self._cognition_backend
         assert backend is not None
         tools = self._continuation_tools_for_episode(
-            first_effect.name, job_work=job_work
+            first_effect.name, job_work=job_work, image_references=image_references
         )
         if not tools:
             return True, None
@@ -5407,7 +5535,7 @@ class RobotApplication:
                 episode.id, expected_goal.id, call.name,
             )
             available = self._continuation_tools_for_episode(
-                first_effect.name, job_work=job_work
+                first_effect.name, job_work=job_work, image_references=image_references
             )
             if (
                 first_effect.status != "applied"
@@ -5425,7 +5553,7 @@ class RobotApplication:
                     call, available=available, log_prefix="CONTINUATION",
                     notification_interaction=notification_interaction,
                     job_binding=job_binding, expected_goal=expected_goal,
-                    episode_id=episode.id,
+                    episode_id=episode.id, image_references=image_references,
                     acquisitions=acquisitions,
                 )
             result_text = result.output
@@ -5473,6 +5601,8 @@ class RobotApplication:
                 InitiativeEffectOutcome(action, status or "rejected", result_text or "")
                 if action is not None else None
             )
+        finally:
+            consumed = True
         self.attention.record_continuation(state="completed", response=response)
         LOGGER.info(
             "[CONTINUATION] episode=E%s goal=G%s backend=%s request=completed "
@@ -5609,22 +5739,28 @@ class RobotApplication:
         return (*self.acquisition_tools(), *self.effect_tools())
 
     def _initiative_tools_for_episode(
-        self, *, job_work: bool
+        self, *, job_work: bool, image_references: dict[str, RetainedImage] | None = None
     ) -> tuple[CognitionToolDefinition, ...]:
         if not job_work:
             return self.initiative_tools()
-        return (*self._acquisition_tools_for_episode(job_work=True), *self._effect_tools_for_episode(
-            job_work=True
-        ))
+        return (
+            *self._acquisition_tools_for_episode(job_work=True, image_references=image_references),
+            *self._effect_tools_for_episode(job_work=True, image_references=image_references),
+        )
 
     def _acquisition_tools_for_episode(
-        self, *, job_work: bool
+        self, *, job_work: bool, image_references: dict[str, RetainedImage] | None = None
     ) -> tuple[CognitionToolDefinition, ...]:
         tools = self.acquisition_tools()
         if job_work and self.jobs is not None:
             tools = (*tools, SEARCH_FINDINGS_TOOL)
         if job_work and self._job_workspace_tools_available():
-            return (*tools, *JOB_WORKSPACE_ACQUISITION_TOOLS)
+            images = (JOB_WORKSPACE_LOAD_IMAGE_TOOL,)
+            if self._camera_capture_available():
+                images = (*images, CAPTURE_CAMERA_IMAGE_TOOL)
+            if image_references and self._saved_image_vision_available():
+                images = (*images, INTERPRET_IMAGE_TOOL)
+            return (*tools, *JOB_WORKSPACE_ACQUISITION_TOOLS, *images)
         return tools
 
     def _job_workspace_tools_available(self) -> bool:
@@ -5637,7 +5773,7 @@ class RobotApplication:
         return True
 
     def _effect_tools_for_episode(
-        self, *, job_work: bool
+        self, *, job_work: bool, image_references: dict[str, RetainedImage] | None = None
     ) -> tuple[CognitionToolDefinition, ...]:
         tools = self.effect_tools()
         if not job_work:
@@ -5647,19 +5783,22 @@ class RobotApplication:
         )
         if self._job_workspace_tools_available():
             projected = (*projected, JOB_WORKSPACE_WRITE_TOOL)
+            if image_references:
+                projected = (*projected, JOB_WORKSPACE_SAVE_IMAGE_TOOL)
         if self.jobs is not None:
             projected = (*projected, PUBLISH_FINDING_TOOL)
         return projected
 
     def _continuation_tools_for_episode(
-        self, first_effect_name: str, *, job_work: bool
+        self, first_effect_name: str, *, job_work: bool,
+        image_references: dict[str, RetainedImage] | None = None
     ) -> tuple[CognitionToolDefinition, ...]:
         if not job_work:
             return self.continuation_tools(first_effect_name)
         if not self.options.initiative_continuation_enabled:
             return ()
         return tuple(
-            tool for tool in self._effect_tools_for_episode(job_work=True)
+            tool for tool in self._effect_tools_for_episode(job_work=True, image_references=image_references)
             if tool.name != first_effect_name
         )
 
@@ -5679,7 +5818,7 @@ class RobotApplication:
     def _acquisition_tool_names() -> tuple[str, ...]:
         return (INSPECT_SELF_TOOL.name, *(tool.name for tool in DIAGNOSTIC_TOOLS),
                 OBSERVE_SCENE_TOOL.name,
-                CAPTURE_CAMERA_IMAGE_TOOL.name,
+                *_IMAGE_ACQUISITIONS,
                 RECALL_MEMORY_TOOL.name, INSPECT_RUN_HISTORY_TOOL.name,
                 INSPECT_JOB_RESULT_TOOL.name, RETRIEVE_REPORT_TOOL.name,
                 SEARCH_FINDINGS_TOOL.name,
@@ -5833,6 +5972,7 @@ class RobotApplication:
 
     def _execute_camera_image_capture(
         self, call: CognitionToolCall, references: dict[str, RetainedImage], episode_id: int,
+        *, job_id: int | None = None, job_run_id: int | None = None,
     ) -> CognitionToolResult:
         """Capture once under the canonical lease and retain bytes only in this episode."""
         try:
@@ -5848,18 +5988,220 @@ class RobotApplication:
             references[reference] = RetainedImage(
                 reference, episode_id, bytes(frame.data), frame.media_type,
                 frame.width, frame.height, "camera", captured_at,
+                self.camera_backend.identifier, job_id, job_run_id,
             )
             result = {"status": "applied", "image_ref": reference,
                       "media_type": frame.media_type, "width": frame.width,
                       "height": frame.height, "byte_size": len(frame.data),
-                      "source": "camera", "captured_at": captured_at.isoformat()}
+                      "source": "camera", "captured_at": captured_at.isoformat(),
+                      "content_version": references[reference].content_version}
         except ResourceBusyError:
             result = {"status": "rejected", "reason": "camera_busy"}
-        except Exception as error:
-            result = {"status": "rejected", "reason": str(error)}
-        LOGGER.info("[CAMERA] episode=E%s purpose=outbound_image status=%s",
+        except Exception:
+            result = {"status": "rejected", "reason": "camera_capture_failed"}
+        LOGGER.info("[CAMERA] episode=E%s purpose=retained_image status=%s",
                     episode_id, result["status"])
         return CognitionToolResult(json.dumps(result, sort_keys=True))
+
+    def _saved_image_vision_available(self) -> bool:
+        return (self.state is LifecycleState.RUNNING
+                and self._visual_perception_backend is not None)
+
+    @staticmethod
+    def _retained_image(references: dict[str, RetainedImage] | None,
+                        reference: object, episode_id: int | None,
+                        job_id: int | None = None) -> RetainedImage:
+        image = references.get(reference) if references is not None and type(reference) is str else None
+        if image is None or image.episode_id != episode_id:
+            raise ValueError("invalid_image_reference")
+        if job_id is not None and image.job_id != job_id:
+            raise ValueError("foreign_image_reference")
+        return image
+
+    def _execute_workspace_image(
+        self, call: CognitionToolCall, references: dict[str, RetainedImage] | None,
+        episode_id: int | None, *, job_binding=None, expected_goal=None,
+        job_work: bool = False,
+    ) -> CognitionToolResult:
+        """Contained storage only; no visual provider or delivery is involved."""
+        saving = call.name == "workspace_save_image"
+        job = binding = None
+        try:
+            if self.state is not LifecycleState.RUNNING:
+                raise RuntimeError("application_not_running")
+            if self.jobs is None or self.job_workspaces is None:
+                raise RuntimeError("workspace_persistence_unavailable")
+            required = {"path", "mode", "image_ref"} if saving else {"path"}
+            if not job_work:
+                required.add("job")
+            arguments = self._tool_arguments(call, required)
+            if job_work:
+                binding, _, _ = self._current_job_workspace_authority(job_binding, expected_goal)
+                job = binding.job
+            else:
+                selector = arguments["job"]
+                if (type(selector) is not str or not selector.strip() or len(selector) > 200
+                        or any(unicodedata.category(char) == "Cc" for char in selector)):
+                    raise ValueError("invalid_job_selector")
+                job, resolution = self._resolve_exact_job_selector(selector.strip())
+                if resolution is not None:
+                    return CognitionToolResult(json.dumps(resolution, sort_keys=True))
+                if job is None:
+                    return CognitionToolResult(json.dumps({"status": "not_found", "reason": "job_not_found"}))
+            if saving:
+                image = self._retained_image(references, arguments["image_ref"], episode_id,
+                                             job.id if job_work else None)
+                provenance = ImageProvenance(
+                    image.source, image.source_identity, image.captured_at,
+                    self._aware_wall_clock(), job.id,
+                    image.job_run_id if image.job_id == job.id else None,
+                )
+                # No await separates this check and the contained publication effect.
+                if job_work:
+                    self._current_job_workspace_authority(job_binding, expected_goal)
+                elif self.jobs.get_job(job.id) != job:
+                    raise RuntimeError("stale_workspace_owner")
+                artifact = self.job_workspaces.save_image(
+                    job.id, arguments["path"], arguments["mode"], image.data, provenance)
+                result = {
+                    "status": "applied", "source": "job_workspace",
+                    "job": {"id": job.id, "name": job.name},
+                    "artifact": {"path": artifact.path, "mode": artifact.mode,
+                                 "size_bytes": artifact.size_bytes,
+                                 "content_version": artifact.content_version},
+                    "published": artifact.published,
+                    "durability_confirmed": artifact.durability_confirmed,
+                    "meaning": "storage_confirmed_not_visual_truth_or_current_world_state",
+                }
+            else:
+                artifact = self.job_workspaces.load_image(job.id, arguments["path"])
+                metadata, provenance = artifact.metadata, artifact.provenance
+                if references is None or episode_id is None:
+                    raise ValueError("invalid_image_reference")
+                reference = "img_" + secrets.token_urlsafe(18)
+                references[reference] = RetainedImage(
+                    reference, episode_id, artifact.data, metadata.media_type,
+                    metadata.width, metadata.height,
+                    provenance.source_kind if provenance else "unknown",
+                    provenance.captured_at if provenance else None,
+                    provenance.source_identity if provenance else None,
+                    job.id, provenance.job_run_id if provenance else None,
+                )
+                result = {
+                    "status": "ok", "image_ref": reference, "source": "job_workspace",
+                    "job": {"id": job.id, "name": job.name}, "path": artifact.path,
+                    "media_type": metadata.media_type, "width": metadata.width,
+                    "height": metadata.height, "size_bytes": len(artifact.data),
+                    "content_version": metadata.content_version,
+                    "captured_at": provenance.captured_at.isoformat() if provenance and provenance.captured_at else None,
+                    "capture_metadata": "known" if provenance and provenance.captured_at else "unknown",
+                    "provenance_binding": "verified" if provenance else "unknown",
+                    "source_kind": provenance.source_kind if provenance else "unknown",
+                    "source_identity": provenance.source_identity if provenance else None,
+                    "stored_at": provenance.stored_at.isoformat() if provenance else None,
+                    "originating_job_run_id": provenance.job_run_id if provenance else None,
+                    "retrieved_at": self._aware_wall_clock().isoformat(),
+                    "evidence": "historical_image_snapshot_non_authoritative",
+                }
+        except WorkspaceDurabilityError:
+            result = {"status": "indeterminate", "reason": "durability_unconfirmed",
+                      "published": True, "durability_confirmed": False}
+        except WorkspaceError as error:
+            reason = {
+                WorkspaceQuotaError: "workspace_quota_exceeded",
+                WorkspaceConflictError: "artifact_conflict",
+                WorkspaceNotFoundError: "artifact_not_found",
+                WorkspaceValidationError: "invalid_image_operation",
+                WorkspaceUnsafeError: "unsafe_workspace_entry",
+                WorkspaceBackendError: "backend_unavailable",
+            }.get(type(error), "image_storage_failed")
+            result = {"status": "rejected", "reason": reason,
+                      "published": False, "durability_confirmed": False}
+        except (ValueError, TypeError, RuntimeError) as error:
+            safe = str(error) if str(error) in {
+                "invalid_image_reference", "foreign_image_reference", "invalid_job_selector",
+                "application_not_running", "workspace_persistence_unavailable",
+                "stale_job_work_binding", "stale_workspace_owner",
+            } else "invalid_tool_arguments"
+            result = {"status": "rejected", "reason": safe,
+                      "published": False, "durability_confirmed": False}
+        LOGGER.info("[WORKSPACE] episode=%s op=%s job=%s status=%s published=%s durability_confirmed=%s",
+                    episode_id, call.name, job.id if job else None, result["status"],
+                    result.get("published", False), result.get("durability_confirmed", False))
+        return CognitionToolResult(json.dumps(result, sort_keys=True))
+
+    async def _execute_job_image_acquisition(
+        self, call, references, episode_id, job_binding, expected_goal,
+    ) -> CognitionToolResult:
+        try:
+            binding, _, _ = self._current_job_workspace_authority(job_binding, expected_goal)
+            available = self._acquisition_tools_for_episode(
+                job_work=True, image_references=references)
+            if not any(tool.name == call.name for tool in available):
+                raise RuntimeError("capability is not available")
+        except RuntimeError:
+            return self._rejected_tool(call.name, "stale or unavailable Job image capability")
+        if call.name == "capture_camera_image":
+            return self._execute_camera_image_capture(
+                call, references, episode_id, job_id=binding.job.id, job_run_id=binding.run.id)
+        if call.name == "workspace_load_image":
+            return self._execute_workspace_image(
+                call, references, episode_id, job_binding=job_binding,
+                expected_goal=expected_goal, job_work=True)
+        return await self._execute_image_interpretation(
+            call, references, episode_id, job_binding=job_binding, expected_goal=expected_goal)
+
+    async def _execute_image_interpretation(
+        self, call, references, episode_id, *, job_binding=None, expected_goal=None,
+    ) -> CognitionToolResult:
+        try:
+            arguments = self._tool_arguments(call, {"image_ref", "focus"})
+            focus = arguments["focus"]
+            if (type(focus) is not str or not focus.strip() or len(focus) > 300
+                    or any(unicodedata.category(char) == "Cc" for char in focus)):
+                raise ValueError("invalid_focus")
+            focus = focus.strip()
+            if not self._saved_image_vision_available():
+                raise RuntimeError("vision_unavailable")
+            job_id = None
+            if job_binding is not None:
+                binding, _, _ = self._current_job_workspace_authority(job_binding, expected_goal)
+                job_id = binding.job.id
+            image = self._retained_image(references, arguments["image_ref"], episode_id, job_id)
+            snapshot = ImageSnapshot(image.data, image.media_type, image.width,
+                                     image.height, image.captured_at)
+            backend = self._visual_perception_backend
+            result = await backend.interpret(snapshot, focus)
+            if self.state is not LifecycleState.RUNNING:
+                raise asyncio.CancelledError
+            if job_binding is not None:
+                self._current_job_workspace_authority(job_binding, expected_goal)
+            if not isinstance(result, VisualPerceptionResult) or not result.description.strip():
+                raise ValueError("invalid visual result")
+            description = result.description.strip()
+            payload = {
+                "status": "applied", "focus": focus,
+                "description": description[:2000],
+                "truncated": result.truncated or len(description) > 2000,
+                "content_version": image.content_version,
+                "captured_at": image.captured_at.isoformat() if image.captured_at else None,
+                "interpreted_at": self._aware_wall_clock().isoformat(),
+                "evidence": "historical_image_interpretation_fallible_non_authoritative",
+                "capture_age": "known" if image.captured_at else "unknown",
+            }
+            self.observability.increment("vision_acquisitions")
+            self.observability.event("perception", "vision_acquisition", "completed", source=backend.identifier)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.observability.increment("vision_failures")
+            self.observability.event("perception", "vision_acquisition", "failed",
+                                     severity="error", error=type(error).__name__)
+            category = error.category if isinstance(error, VisualPerceptionError) else "invalid_or_unavailable_image_interpretation"
+            payload = {"status": "rejected", "reason": category}
+        LOGGER.info("[PERCEPTION] modality=visual input=retained_snapshot episode=%s status=%s",
+                    episode_id, payload["status"])
+        return CognitionToolResult(json.dumps(payload, sort_keys=True))
 
     async def _execute_deliver_image(
         self, call: CognitionToolCall, available: tuple[CognitionToolDefinition, ...],
@@ -5881,6 +6223,8 @@ class RobotApplication:
             image = references.get(reference)
             if image is None or image.episode_id != episode_id:
                 raise ValueError("image_ref is unknown, expired, or from another episode")
+            if image.job_id is not None and (self.jobs is None or self.jobs.get_job(image.job_id) is None):
+                raise ValueError("image workspace owner is no longer available")
             projected = {item.name: item for item in authorized}
             if destination not in projected:
                 raise ValueError("destination is not authorized for this operator stage")
@@ -5919,6 +6263,7 @@ class RobotApplication:
                     "image delivery arguments must be strings",
                     "caption is invalid",
                     "image_ref is unknown, expired, or from another episode",
+                    "image workspace owner is no longer available",
                     "destination is not authorized for this operator stage",
                     "operator delivery requires a running application",
                     "image delivery destination is no longer available",
@@ -6279,6 +6624,8 @@ class RobotApplication:
                             "size_bytes": entry.size_bytes,
                             "modified_at": entry.modified_at.isoformat(),
                             "content_version": entry.content_version,
+                            "media_type": entry.media_type, "width": entry.width,
+                            "height": entry.height,
                         } for entry in listing.entries],
                         "next_cursor": listing.next_cursor,
                     }
@@ -6537,6 +6884,8 @@ class RobotApplication:
                         "size_bytes": entry.size_bytes,
                         "modified_at": entry.modified_at.isoformat(),
                         "content_version": entry.content_version,
+                            "media_type": entry.media_type, "width": entry.width,
+                            "height": entry.height,
                     } for entry in listing.entries],
                     "next_cursor": listing.next_cursor,
                 }
@@ -6570,6 +6919,8 @@ class RobotApplication:
                       "invalid_read_offset" if "offset" in message or "range" in message
                       else "invalid_logical_path")
             result = {"status": "rejected", "reason": reason}
+        except WorkspaceQuotaError:
+            result = {"status": "rejected", "reason": "workspace_quota_exceeded"}
         except WorkspaceNotFoundError:
             result = {"status": "not_found", "reason": (
                 "directory_not_found" if operation == "list" else "artifact_not_found")}
@@ -6626,7 +6977,8 @@ class RobotApplication:
             return FindingEvidenceClass.RUNTIME_INSPECTION
         if capability == OBSERVE_SCENE_TOOL.name:
             return FindingEvidenceClass.SENSOR_OBSERVATION
-        if capability in {tool.name for tool in JOB_WORKSPACE_ACQUISITION_TOOLS}:
+        if capability in (*_IMAGE_HISTORICAL_ACQUISITIONS,
+                         *(tool.name for tool in JOB_WORKSPACE_ACQUISITION_TOOLS)):
             return FindingEvidenceClass.JOB_WORKSPACE_HISTORICAL
         if capability == SEARCH_FINDINGS_TOOL.name:
             return FindingEvidenceClass.HISTORICAL_FINDING
@@ -7092,6 +7444,8 @@ class RobotApplication:
             },
             "capabilities": {
                 "camera_available": camera is not None and camera.is_running,
+                "saved_image_vision_available": self._saved_image_vision_available(),
+                "observe_scene_available": self.visual_perception_available(),
                 "camera_backend": None if camera is None else camera.identifier,
                 "voice_available": self.voice.available,
                 "cognition_backend": (None if self._cognition_backend is None
@@ -7346,6 +7700,7 @@ class RobotApplication:
                 SelfInspectionFact("ready", "false" if camera is None else str(camera.is_running).lower()),
                 SelfInspectionFact("capture_capable", "false" if camera is None else str(camera.is_running).lower()),
                 SelfInspectionFact("visual_perception_enabled", str(self._visual_perception_backend is not None).lower()),
+                SelfInspectionFact("saved_image_vision_available", str(self._saved_image_vision_available()).lower()),
                 SelfInspectionFact("visual_perception_backend", "none" if self._visual_perception_backend is None else self._visual_perception_backend.identifier),
             ))
         if area == "earcons":
@@ -7405,6 +7760,7 @@ class RobotApplication:
         expected_goal: ActiveGoal | None = None,
         episode_id: int | None = None,
         acquisitions: tuple[InitiativeAcquisitionOutcome, ...] = (),
+        image_references: dict[str, RetainedImage] | None = None,
     ) -> CognitionToolResult:
         projected = self.initiative_tools() if available is None else available
         if call.name == PLAY_EARCON_TOOL.name:
@@ -7425,6 +7781,12 @@ class RobotApplication:
             return self._execute_schedule_followup(
                 call, available=projected, log_prefix=log_prefix
             )
+        if call.name == JOB_WORKSPACE_SAVE_IMAGE_TOOL.name and any(
+            tool is JOB_WORKSPACE_SAVE_IMAGE_TOOL for tool in projected
+        ):
+            return self._execute_workspace_image(
+                call, image_references, episode_id, job_binding=job_binding,
+                expected_goal=expected_goal, job_work=True)
         if call.name == JOB_WORKSPACE_WRITE_TOOL.name and any(
             tool is JOB_WORKSPACE_WRITE_TOOL for tool in projected
         ):

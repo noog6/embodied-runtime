@@ -3,7 +3,7 @@ name = "embodied-runtime"
 version = "0.1.0"
 description = "Reusable software runtime for embodied agents"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = ["Pillow>=11.3,<13"]
 
 [project.optional-dependencies]
 openai = [

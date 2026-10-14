@@ -464,7 +464,9 @@ class RuntimeConsole:
         for entry in listing.entries:
             size = "-" if entry.size_bytes is None else str(entry.size_bytes)
             version = "-" if entry.content_version is None else entry.content_version
-            lines.append(f"  {entry.kind:<9} {size:>7}  {entry.path}  {version}")
+            image = (f"  {entry.media_type} {entry.width}x{entry.height}"
+                     if entry.kind == "image" else "")
+            lines.append(f"  {entry.kind:<9} {size:>7}  {entry.path}  {version}{image}")
         if not listing.entries:
             lines.append("  empty")
         lines.append(f"  more:          {str(listing.next_cursor is not None).lower()}")
