@@ -177,3 +177,9 @@ Workspace listings distinguish images and show media type, dimensions, encoded
 size and exact content version. `job file` remains text-only. Image capture, save,
 interpretation and MMS delivery use ordinary `ask` episodes; see
 [Workspace image operator commands](workspace-images.md#post-merge-validation-for-nick).
+
+To authorize one operator image save, enter a complete standalone command such as
+`ask save image {"job":"JOB7","path":"photos/frame.jpg","mode":"create"}`
+with an existing exact Job and intended path/mode. Natural-language save requests
+do not grant durable-write authority. The runtime enforces the scope before
+storage; capture and save remain separate budgeted operations.

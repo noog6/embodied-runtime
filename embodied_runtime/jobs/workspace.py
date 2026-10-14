@@ -183,6 +183,11 @@ def _safe_job_id(job_id: int) -> str:
     return f"JOB{job_id}"
 
 
+def validate_artifact_path(path: str) -> None:
+    """Validate a canonical Job-relative artifact path without filesystem I/O."""
+    _components(path)
+
+
 class FilesystemJobWorkspaceStore:
     """Linux descriptor-relative, no-follow Workspace implementation."""
 

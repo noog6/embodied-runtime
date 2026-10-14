@@ -98,6 +98,9 @@ from embodied_runtime.memory import (
 from embodied_runtime.observations import SemanticObservation, SemanticObservationFact
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.jobs.workspace import ImageProvenance, WorkspaceError
+from embodied_runtime.operator_image_saves import (
+    OperatorImageSaveAuthorization, parse_image_save_request,
+)
 from embodied_runtime.outbound_images import (
     MAX_IMAGE_CAPTION_CHARS, MAX_OUTBOUND_IMAGE_BYTES, OutboundImage, RetainedImage,
 )
@@ -738,6 +741,20 @@ WORKSPACE_LOAD_IMAGE_TOOL = workspace_image_tool(save=False, job_work=False)
 WORKSPACE_SAVE_IMAGE_TOOL = workspace_image_tool(save=True, job_work=False)
 JOB_WORKSPACE_LOAD_IMAGE_TOOL = workspace_image_tool(save=False, job_work=True)
 JOB_WORKSPACE_SAVE_IMAGE_TOOL = workspace_image_tool(save=True, job_work=True)
+
+
+def operator_image_save_tool(authorization: OperatorImageSaveAuthorization) -> CognitionToolDefinition:
+    properties = dict(WORKSPACE_SAVE_IMAGE_TOOL.parameters["properties"])
+    properties.update({
+        "job": {"type": "string", "enum": [f"JOB{authorization.job_id}"]},
+        "path": {"type": "string", "enum": [authorization.path]},
+        "mode": {"type": "string", "enum": [authorization.mode]},
+    })
+    return replace(WORKSPACE_SAVE_IMAGE_TOOL, parameters={
+        **WORKSPACE_SAVE_IMAGE_TOOL.parameters, "properties": properties,
+    })
+
+
 _IMAGE_ACQUISITIONS = ("capture_camera_image", "workspace_load_image", "interpret_image")
 _IMAGE_HISTORICAL_ACQUISITIONS = ("workspace_load_image", "interpret_image")
 
@@ -4291,6 +4308,7 @@ class RobotApplication:
         acquisition_requests: dict[tuple[str, str], CognitionToolResult] = {}
         report_references: dict[str, RetainedReportSnapshot] = {}
         image_references: dict[str, RetainedImage] = {}
+        image_save_authorization = self._operator_image_save_authorization(message, episode.id)
         delivery_destinations = self._operator_delivery_routes.destinations
         stage_name = "initial"
         try:
@@ -4304,7 +4322,8 @@ class RobotApplication:
                 capability_consumed = False
                 grounded_goal = self._active_goal
                 tools = self._operator_episode_tools(
-                    len(acquisitions), delivery_destinations, image_references
+                    len(acquisitions), delivery_destinations, image_references,
+                    image_save_authorization,
                 )
 
                 async def execute_tool(call: CognitionToolCall) -> CognitionToolResult:
@@ -4444,7 +4463,8 @@ class RobotApplication:
                             )
                         elif call.name == WORKSPACE_SAVE_IMAGE_TOOL.name:
                             result = self._execute_workspace_image(
-                                call, image_references, episode.id)
+                                call, image_references, episode.id,
+                                save_authorization=image_save_authorization)
                         elif call.name == WORKSPACE_WRITE_TOOL.name:
                             result = self._execute_workspace_write(
                                 call, episode_id=episode.id)
@@ -4603,10 +4623,32 @@ class RobotApplication:
         finally:
             OPERATOR_SOURCE.reset(token)
 
+    def _operator_image_save_authorization(
+        self, message: str, episode_id: int,
+    ) -> OperatorImageSaveAuthorization | None:
+        """Resolve only the current operator's explicit command, before cognition."""
+        if self.jobs is None or self.job_workspaces is None:
+            return None
+        try:
+            request = parse_image_save_request(message)
+            if request is None:
+                return None
+            job, resolution = self._resolve_exact_job_selector(request.job)
+            if job is None or resolution is not None:
+                return None
+        except (ValueError, TypeError, RecursionError, WorkspaceError):
+            return None
+        except Exception:
+            LOGGER.info("[WORKSPACE] episode=%s op=image_save_authorization status=unavailable",
+                        episode_id)
+            return None
+        return OperatorImageSaveAuthorization(episode_id, job.id, request.path, request.mode)
+
     def _operator_episode_tools(
         self, acquisitions_used: int,
         delivery_destinations: Sequence[OperatorDeliveryDestination] | None = None,
         image_references: dict[str, RetainedImage] | None = None,
+        image_save_authorization: OperatorImageSaveAuthorization | None = None,
     ) -> tuple[CognitionToolDefinition, ...]:
         destinations = tuple(delivery_destinations or ())
         tools = self.cognition_tools()
@@ -4618,8 +4660,11 @@ class RobotApplication:
             tools = (*tools, CAPTURE_CAMERA_IMAGE_TOOL)
         if self.jobs is not None and self.job_workspaces is not None:
             tools = (*tools, WORKSPACE_LOAD_IMAGE_TOOL)
-            if image_references:
-                tools = (*tools, WORKSPACE_SAVE_IMAGE_TOOL)
+            operator_episode = self.episode_coordinator.current_operator
+            if (image_references and image_save_authorization is not None
+                    and operator_episode is not None
+                    and operator_episode.id == image_save_authorization.episode_id):
+                tools = (*tools, operator_image_save_tool(image_save_authorization))
         if image_references and self._saved_image_vision_available():
             tools = (*tools, INTERPRET_IMAGE_TOOL)
         if destinations:
@@ -4664,7 +4709,10 @@ class RobotApplication:
             lines.append(
                 "Saved-image policy: workspace_load_image retains exact bytes for interpret_image "
                 "or deliver_image. workspace_save_image requires explicit durable-write authorization "
-                "and an exact existing Job/path; never invent destinations. Do not automatically "
+                "via the complete operator command save image {\"job\":\"JOB<n>\",\"path\":\"logical-path\",\"mode\":\"create\"}. "
+                "Replace or upsert must instead be explicitly selected as the mode. "
+                "Prose or prior-turn consent grants no save authorization. Only the exact resolved Job, "
+                "path and mode are allowed in this episode; never invent destinations. Do not automatically "
                 "generate or save captions/descriptions. Saved interpretation is historical and "
                 "fallible; unknown capture time means unknown age. Capture, load and interpretation "
                 "each consume one acquisition. Save and delivery each consume one effect. Split "
@@ -6022,6 +6070,7 @@ class RobotApplication:
         self, call: CognitionToolCall, references: dict[str, RetainedImage] | None,
         episode_id: int | None, *, job_binding=None, expected_goal=None,
         job_work: bool = False,
+        save_authorization: OperatorImageSaveAuthorization | None = None,
     ) -> CognitionToolResult:
         """Contained storage only; no visual provider or delivery is involved."""
         saving = call.name == "workspace_save_image"
@@ -6049,6 +6098,12 @@ class RobotApplication:
                 if job is None:
                     return CognitionToolResult(json.dumps({"status": "not_found", "reason": "job_not_found"}))
             if saving:
+                if not job_work:
+                    operator_episode = self.episode_coordinator.current_operator
+                    if (operator_episode is None or operator_episode.id != episode_id
+                            or save_authorization is None or not save_authorization.permits(
+                                episode_id, job.id, arguments["path"], arguments["mode"])):
+                        raise RuntimeError("operator_image_save_not_authorized")
                 image = self._retained_image(references, arguments["image_ref"], episode_id,
                                              job.id if job_work else None)
                 provenance = ImageProvenance(
@@ -6122,6 +6177,7 @@ class RobotApplication:
                 "invalid_image_reference", "foreign_image_reference", "invalid_job_selector",
                 "application_not_running", "workspace_persistence_unavailable",
                 "stale_job_work_binding", "stale_workspace_owner",
+                "operator_image_save_not_authorized",
             } else "invalid_tool_arguments"
             result = {"status": "rejected", "reason": safe,
                       "published": False, "durability_confirmed": False}

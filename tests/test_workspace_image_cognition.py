@@ -117,6 +117,11 @@ class ImageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.app.start()
         return self.app
 
+    def save_request(self, mode="create", path="photos/frame", job=None):
+        return "save image " + json.dumps({
+            "job": job or self.job.name, "path": path, "mode": mode,
+        })
+
     def load(self, *, job_work=False):
         return ("workspace_load_image", {"path": "photos/frame", **({} if job_work else {"job": self.job.name})})
 
@@ -134,7 +139,7 @@ class ImageWorkflowTests(unittest.IsolatedAsyncioTestCase):
                                       "mode": "create", "image_ref": "$ref"}),
         ], duplicate=True)
         app = await self.start(script, camera=camera)
-        await app.request_cognition("Capture and save one image to Image validation photos/frame")
+        await app.request_cognition(self.save_request())
         self.assertEqual(camera.captures, 1)
         self.assertEqual(self.vision.frames, [])
         image = self.store.load_image(self.job.id, "photos/frame")
@@ -280,7 +285,7 @@ class ImageWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "job": self.job.name, "path": "photos/frame", "mode": "upsert", "image_ref": "$ref"})])
         app = await self.start(script, camera=camera)
         with patch.object(self.store, "save_image", side_effect=WorkspaceDurabilityError("PRIVATE")) as save:
-            await app.request_cognition("Save image")
+            await app.request_cognition(self.save_request(mode="upsert"))
         self.assertEqual(save.call_count, 1)
         self.assertEqual(script.results[-1]["status"], "indeterminate")
         self.assertTrue(script.results[-1]["published"])
@@ -394,7 +399,7 @@ class ImageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         script = Script([("capture_camera_image", {}), ("workspace_save_image", {
             "job": self.job.name, "path": "photos/frame", "mode": "create", "image_ref": "$ref"})])
         app = await self.start(script, camera=camera)
-        await app.request_cognition("Capture and save")
+        await app.request_cognition(self.save_request())
         old_ref = script.reference
         await app.stop()
         self.jobs = SQLiteJobStore(Path(self.temp.name) / "jobs.sqlite3")
@@ -453,3 +458,214 @@ class ImageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(result.output)["status"], "rejected")
         self.assertEqual(camera.captures, 0)
         self.assertFalse((self.root / f"JOB{self.job.id}").exists())
+
+    async def test_greeting_interpretation_and_send_cannot_save_any_mode(self):
+        self.saved()
+        camera = Camera(); camera.frames = [self.a]
+        script = Script([])
+        app = await self.start(script, camera=camera)
+        with patch.object(self.store, "save_image", wraps=self.store.save_image) as save:
+            for message, acquisition in (
+                ("Hello Mira, how are you?", ("capture_camera_image", {})),
+                ("Interpret the saved image only", self.load()),
+                ("Send me the saved image only", self.load()),
+            ):
+                for mode in ("create", "replace", "upsert"):
+                    path = "photos/unsolicited" if mode == "create" else "photos/frame"
+                    script.steps = [acquisition, ("workspace_save_image", {
+                        "job": self.job.name, "path": path, "mode": mode, "image_ref": "$ref"})]
+                    before = len(script.requests)
+                    with self.subTest(message=message, mode=mode):
+                        await app.request_cognition(message)
+                        self.assertEqual(script.results[-1]["status"], "rejected")
+                        self.assertTrue(all("workspace_save_image" not in offered
+                                            for offered in script.requests[before:]))
+                        self.assertEqual(self.store.load_image(self.job.id, "photos/frame").data, self.a)
+                        self.assertFalse((self.root / f"JOB{self.job.id}/photos/unsolicited").exists())
+            save.assert_not_called()
+        self.assertEqual(self.vision.frames, [])
+        self.assertEqual(self.sink.images, [])
+
+    async def test_explicit_authorization_allows_only_exact_job_path_and_mode(self):
+        self.saved()
+        other = self.jobs.create_job("Other")
+        camera = Camera(); camera.frames = [self.a]
+        script = Script([])
+        app = await self.start(script, camera=camera)
+        authorized = self.save_request(path="photos/authorized", mode="create")
+        with patch.object(self.store, "save_image", wraps=self.store.save_image) as save:
+            for fields in (
+                {"job": other.name, "path": "photos/authorized", "mode": "create"},
+                {"job": self.job.name, "path": "photos/invented", "mode": "create"},
+                {"job": self.job.name, "path": "photos/authorized", "mode": "upsert"},
+                {"job": self.job.name, "path": "photos/frame", "mode": "replace"},
+            ):
+                script.steps = [("capture_camera_image", {}),
+                                ("workspace_save_image", {**fields, "image_ref": "$ref"})]
+                with self.subTest(fields=fields):
+                    await app.request_cognition(authorized)
+                    self.assertEqual(script.results[-1]["reason"], "operator_image_save_not_authorized")
+            save.assert_not_called()
+        self.assertEqual(self.store.load_image(self.job.id, "photos/frame").data, self.a)
+        self.assertFalse((self.root / f"JOB{self.job.id}/photos/authorized").exists())
+        self.assertFalse((self.root / f"JOB{other.id}").exists())
+
+    async def test_explicit_create_replace_and_upsert_still_succeed(self):
+        self.saved()
+        blue = raster("JPEG", "blue")
+        camera = Camera(); camera.frames = [blue]
+        script = Script([])
+        app = await self.start(script, camera=camera)
+        for mode, path in (("create", "photos/new"), ("replace", "photos/frame"),
+                           ("upsert", "photos/frame"), ("upsert", "photos/new-upsert")):
+            script.steps = [("capture_camera_image", {}), ("workspace_save_image", {
+                "job": self.job.name, "path": path, "mode": mode, "image_ref": "$ref"})]
+            with self.subTest(mode=mode, path=path):
+                await app.request_cognition(self.save_request(mode, path))
+                self.assertEqual(script.results[-1]["status"], "applied")
+                self.assertEqual(self.store.load_image(self.job.id, path).data, blue)
+        self.assertEqual(self.vision.frames, [])
+        self.assertEqual(camera.captures, 4)
+
+    async def test_ambiguous_missing_quoted_and_malformed_authorization_withholds_save(self):
+        self.jobs.create_job("Duplicate"); self.jobs.create_job("Duplicate")
+        camera = Camera(); camera.frames = [self.a]
+        script = Script([])
+        app = await self.start(script, camera=camera)
+        valid = self.save_request()
+        invalid = [
+            "Please " + valid,
+            json.dumps(valid),
+            "Do not " + valid,
+            valid + " and do not save anything",
+            valid + "\n" + valid,
+            self.save_request(job="Duplicate"),
+            self.save_request(job="JOB99999"),
+            self.save_request(mode="append"),
+            self.save_request(path="../escape"),
+            self.save_request(path="/physical/path"),
+            'save image {"job":"JOB1","path":"photos/frame","mode":"create","mode":"upsert"}',
+            'save image {"job":"JOB1","path":"photos/frame"}',
+            'save image {"job":"JOB1","path":"photos/frame","mode":"create","authorization":true}',
+            'save image ["JOB1", "photos/frame", "create"]',
+            "save image " + "[" * 1001 + "]" * 1001,
+        ]
+        with patch.object(self.store, "save_image", wraps=self.store.save_image) as save:
+            for message in invalid:
+                script.steps = [("capture_camera_image", {}), ("workspace_save_image", {
+                    "job": self.job.name, "path": "photos/frame", "mode": "upsert", "image_ref": "$ref"})]
+                before = len(script.requests)
+                with self.subTest(message=message[:80]):
+                    await app.request_cognition(message)
+                    self.assertEqual(script.results[-1]["status"], "rejected")
+                    self.assertTrue(all("workspace_save_image" not in offered
+                                        for offered in script.requests[before:]))
+            save.assert_not_called()
+        self.assertFalse((self.root / f"JOB{self.job.id}").exists())
+
+    async def test_executor_requires_authorization_even_with_a_valid_reference(self):
+        app = await self.start(Script([]))
+        image = RetainedImage("known", 123, self.a, "image/jpeg", 8, 6, "camera", CAPTURED)
+        call = CognitionToolCall("workspace_save_image", json.dumps({
+            "job": self.job.name, "path": "photos/unsolicited", "mode": "upsert", "image_ref": "known"}))
+        with patch.object(self.store, "save_image", wraps=self.store.save_image) as save:
+            result = app._execute_workspace_image(call, {"known": image}, 123)
+            self.assertEqual(json.loads(result.output)["reason"], "operator_image_save_not_authorized")
+            authorization = app._operator_image_save_authorization(self.save_request("upsert", "photos/unsolicited"), 122)
+            result = app._execute_workspace_image(call, {"known": image}, 123, save_authorization=authorization)
+            self.assertEqual(json.loads(result.output)["reason"], "operator_image_save_not_authorized")
+            save.assert_not_called()
+
+    async def test_prior_episode_authorization_does_not_authorize_a_new_request(self):
+        camera = Camera(); camera.frames = [self.a]
+        script = Script([("capture_camera_image", {}), ("workspace_save_image", {
+            "job": self.job.name, "path": "photos/frame", "mode": "create", "image_ref": "$ref"})])
+        app = await self.start(script, camera=camera)
+        await app.request_cognition(self.save_request())
+        self.assertEqual(script.results[-1]["status"], "applied")
+        script.steps = [("capture_camera_image", {}), ("workspace_save_image", {
+            "job": self.job.name, "path": "photos/another", "mode": "create", "image_ref": "$ref"})]
+        with patch.object(self.store, "save_image", wraps=self.store.save_image) as save:
+            await app.request_cognition("Thanks, how are you?")
+            self.assertEqual(script.results[-1]["status"], "rejected")
+            save.assert_not_called()
+        self.assertFalse((self.root / f"JOB{self.job.id}/photos/another").exists())
+
+    async def test_projection_locks_authorized_destination_and_mutation(self):
+        class Schemas(Script):
+            async def respond(self, message, *, tools=(), **kwargs):
+                self.schemas = getattr(self, "schemas", []) + [tuple(tools)]
+                return await super().respond(message, tools=tools, **kwargs)
+        camera = Camera(); camera.frames = [self.a]
+        script = Schemas([("capture_camera_image", {}), ("workspace_save_image", {
+            "job": self.job.name, "path": "photos/frame", "mode": "create", "image_ref": "$ref"})])
+        app = await self.start(script, camera=camera)
+        await app.request_cognition(self.save_request())
+        tool = next(tool for tool in script.schemas[1] if tool.name == "workspace_save_image")
+        properties = tool.parameters["properties"]
+        self.assertEqual(properties["job"]["enum"], [f"JOB{self.job.id}"])
+        self.assertEqual(properties["path"]["enum"], ["photos/frame"])
+        self.assertEqual(properties["mode"]["enum"], ["create"])
+
+    async def test_unavailable_authorization_resolution_fails_closed_without_leaking_details(self):
+        camera = Camera(); camera.frames = [self.a]
+        script = Script([("capture_camera_image", {}), ("workspace_save_image", {
+            "job": self.job.name, "path": "photos/frame", "mode": "create", "image_ref": "$ref"})])
+        app = await self.start(script, camera=camera)
+        with patch.object(app, "_resolve_exact_job_selector", side_effect=RuntimeError("SECRET /physical/path")):
+            with patch.object(self.store, "save_image", wraps=self.store.save_image) as save:
+                with self.assertLogs(level="INFO") as logs:
+                    await app.request_cognition(self.save_request())
+                save.assert_not_called()
+        self.assertEqual(script.results[-1]["status"], "rejected")
+        self.assertTrue(all("workspace_save_image" not in offered for offered in script.requests))
+        self.assertNotIn("SECRET", "\n".join(logs.output))
+        self.assertNotIn("/physical/path", "\n".join(logs.output))
+
+    async def test_closed_episode_cannot_use_an_otherwise_matching_save_grant(self):
+        camera = Camera(); camera.frames = [self.a]
+        script = Script([("capture_camera_image", {}), ("workspace_save_image", {
+            "job": self.job.name, "path": "photos/frame", "mode": "create", "image_ref": "$ref"})])
+        app = await self.start(script, camera=camera)
+        direct_results = []
+        def close_and_attempt(name, result):
+            if name != "capture_camera_image":
+                return
+            episode = app.episode_coordinator.current_operator
+            authorization = app._operator_image_save_authorization(self.save_request(), episode.id)
+            app.episode_coordinator.close(episode, "handled")
+            image = RetainedImage(result["image_ref"], episode.id, self.a, "image/jpeg", 8, 6, "camera", CAPTURED)
+            attempted = app._execute_workspace_image(CognitionToolCall("workspace_save_image", json.dumps({
+                "job": self.job.name, "path": "photos/frame", "mode": "create", "image_ref": result["image_ref"]})),
+                {image.reference: image}, episode.id, save_authorization=authorization)
+            direct_results.append(json.loads(attempted.output))
+        script.after = close_and_attempt
+        with patch.object(self.store, "save_image", wraps=self.store.save_image) as save:
+            await app.request_cognition(self.save_request())
+            save.assert_not_called()
+        self.assertEqual(direct_results[0]["reason"], "operator_image_save_not_authorized")
+        self.assertEqual(script.results[-1]["status"], "rejected")
+        self.assertNotIn("workspace_save_image", script.requests[1])
+
+    async def test_tool_arguments_cannot_supply_the_save_authorization(self):
+        camera = Camera(); camera.frames = [self.a]
+        script = Script([("capture_camera_image", {}), ("workspace_save_image", {
+            "job": self.job.name, "path": "photos/frame", "mode": "create", "image_ref": "$ref",
+            "save_authorization": {"job_id": self.job.id, "path": "photos/frame", "mode": "create"},
+        })])
+        app = await self.start(script, camera=camera)
+        with patch.object(self.store, "save_image", wraps=self.store.save_image) as save:
+            await app.request_cognition(self.save_request())
+            save.assert_not_called()
+        self.assertEqual(script.results[-1]["reason"], "invalid_tool_arguments")
+
+    async def test_documented_console_save_command_preserves_exact_json_scope(self):
+        from embodied_runtime.console import RuntimeConsole
+        camera = Camera(); camera.frames = [self.a]
+        script = Script([("capture_camera_image", {}), ("workspace_save_image", {
+            "job": self.job.name, "path": "photos/with spaces.jpg", "mode": "create", "image_ref": "$ref"})])
+        app = await self.start(script, camera=camera)
+        _, stop = await RuntimeConsole(app).execute_async("ask " + self.save_request(path="photos/with spaces.jpg"))
+        self.assertFalse(stop)
+        self.assertEqual(script.results[-1]["status"], "applied")
+        self.assertEqual(self.store.load_image(self.job.id, "photos/with spaces.jpg").data, self.a)

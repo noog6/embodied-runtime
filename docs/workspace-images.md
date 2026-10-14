@@ -40,10 +40,11 @@ one episode's grammar and must be split across explicit episodes.
 Capture requires a running camera and uses its existing fail-fast resource lease.
 Load requires Jobs and Workspace persistence. Interpret is offered after acquiring
 an image reference and requires configured vision, independently of camera
-availability. Save is offered once a retained image can be used. Delivery requires
+availability. Operator save is offered only when a retained image can be used and the current
+operator request grants an exact durable-write authorization. Delivery requires
 an available existing operator destination and the current operator's explicit
-request/authorization. Operator durable writes also require explicit authorization
-and a named existing Job and logical destination. Tools remain absent from generic
+request/authorization. Operator image durable writes require the explicit request grammar below and
+a named existing Job, logical destination and mutation mode. Tools remain absent from generic
 autonomous initiative and non-Job follow-up. Jobs cannot send unsolicited images.
 
 For Job work the runtime derives the owner from the exact live
@@ -58,6 +59,43 @@ on completion, error, or cancellation. A reference from another episode or
 runtime is rejected. Replacing a stored path after load does not change that
 snapshot: interpretation and delivery consume its bytes, never reopen the path.
 Identical operator acquisitions reuse the existing result without repeating I/O.
+
+## Operator save authorization
+
+A standalone operator command establishes one request-scoped image-save grant:
+
+```text
+ask save image {"job":"JOB7","path":"validation/camera.jpg","mode":"create"}
+```
+
+The text after `ask` must be exactly `save image ` followed by one JSON object
+with exactly the string fields `job`, `path` and `mode` (at most 1,024 command
+characters). `job` is an exact existing ID or case-sensitive name. `path` must
+pass the ordinary contained logical-path grammar. `mode` must be `create`,
+`replace` or `upsert`; it grants only that mode, never a broader write permission.
+Surrounding whitespace is allowed. Duplicate JSON fields, extra fields, multiple
+commands, quoted examples, surrounding prose, malformed paths, missing Jobs and
+ambiguous names grant no authorization. Natural-language consent and a later
+“yes” do not mint a grant; use this exact typed command through console `ask` or
+operator text dialogue. Capture/load/interpret/delivery requests keep their
+existing grammar.
+
+The runtime parses and resolves the command before calling cognition, independently
+of the model. The model-facing save schema is restricted to the resolved Job ID,
+exact path and mode. The executor checks those fields again against the private
+runtime grant and the live operator episode before calling the storage effect.
+A model-supplied authorization field is not accepted. Greetings, interpretation-only
+requests and send-only requests cannot save an image even after acquiring one.
+Consent from prior turns, WorkingMemory, retrieved artifacts or model replies is
+not authorization for the current request.
+
+The grant permits one current-episode retained image to be saved at that exact
+destination using the existing single operator effect opportunity. The image
+must still be acquired through the existing camera/load tools and reference checks;
+the grant does not capture automatically or call vision. The existing `create`
+conflict and replacement/upsert failure semantics still apply. Nothing replays
+an indeterminate write. Job-work save schemas and authority continue to use the
+exact live Job/JobRun/Task/goal binding without an operator-command grant.
 
 ## Formats, storage and provenance
 
@@ -195,7 +233,7 @@ Do not create a Job merely to satisfy the tool.
 ```text
 jobs
 camera status
-ask Capture exactly one camera image with capture_camera_image and save its exact image_ref using workspace_save_image to JOB7 path validation/camera.jpg mode create. I authorize this durable write. Do not interpret, send, move, or generate a caption.
+ask save image {"job":"JOB7","path":"validation/camera.jpg","mode":"create"}
 job files JOB7 validation
 quit
 ```

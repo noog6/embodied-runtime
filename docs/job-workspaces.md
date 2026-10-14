@@ -196,3 +196,9 @@ progress, or JobRun.
 Pillow validation, atomic inode provenance, unchanged shared budgets, and exact
 post-merge operator commands. Images are never decoded by text tools, and image
 snapshots retain their exact version even after the logical artifact is replaced.
+
+Operator image saves require the standalone `save image {"job":"JOB7",
+"path":"photos/frame.jpg","mode":"create"}` request. The runtime locks the
+resolved Job, path and mutation to that live episode; prose, previous consent and
+model-supplied intent do not authorize an image write. Job-work authority is
+unchanged. See [the complete authorization grammar](workspace-images.md#operator-save-authorization).
