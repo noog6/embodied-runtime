@@ -90,6 +90,9 @@ from embodied_runtime.jobs import (
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
     JobTriggerType, STATE_TENDING_CONDITIONS,
 )
+from embodied_runtime.jobs.focus import (
+    JobFocus, JobFocusProposal, FOCUS_PROPOSAL_SCHEMA,
+)
 from embodied_runtime.jobs.model import MAX_RUN_SUMMARY_CHARS
 from embodied_runtime.memory import (
     MAX_RECALL_QUERY_CHARS, MemoryAdmission, MemoryAdmissionProposal,
@@ -421,6 +424,7 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
                                     "power_recovered", "thermal_warning_raised",
                                     "thermal_warning_cleared", "memory_pressure_raised",
                                     "memory_pressure_cleared", None]},
+            "focus_update": FOCUS_PROPOSAL_SCHEMA,
             "progress_update": {
                 "anyOf": [
                     {"type": "null"},
@@ -436,7 +440,7 @@ REPORT_JOB_OUTCOME_TOOL = CognitionToolDefinition(
             },
         },
         "required": ["disposition", "summary", "report", "readiness", "delay_seconds",
-                     "event_type", "progress_update"],
+                     "event_type", "progress_update", "focus_update"],
         "additionalProperties": False,
     },
 )
@@ -1086,6 +1090,10 @@ class JobExecutionContext:
     progress: JobProgress | None = None
     execution_state: str = "runnable"
     continuation_offer_failed: bool = False
+    focus_definition: str | None = None
+    focus_enabled: bool = False
+    focus_snapshot: JobFocus | None = None
+    focus_section: str | None = None
 
     def __post_init__(self) -> None:
         if (self.task_binding is not None
@@ -1959,7 +1967,19 @@ class RobotApplication:
             goal=TaskGoal(f"Complete JOB{job.id}: {job.name}"),
         )
         staged_binding: _CurrentTaskBinding | None = None
+        focus_definition: str | None = None
+        focus_snapshot: JobFocus | None = None
+        focus_section: str | None = None
         try:
+            # Capture before activating the Task so read failure uses ordinary
+            # unstarted-occurrence compensation. Disabled Jobs perform no focus reads.
+            if job.carry_forward_enabled:
+                focus_definition = self.jobs.focus_definition_identity(job.id)
+                candidate = self.jobs.get_focus(job.id)
+                if (candidate is not None and candidate.source_run_id != run.id
+                        and candidate.definition_identity == focus_definition):
+                    focus_snapshot = candidate
+                    focus_section = candidate.render(self._aware_wall_clock())
             if self._job_execution_contexts:
                 running_task = task.transition_to(TaskStatus.RUNNING)
                 assert running_task.goal is not None
@@ -2007,6 +2027,12 @@ class RobotApplication:
             raise
         binding = CurrentJobRun(job, running_run, running_task)
         self._current_job_run = binding
+        context = self._context_for_run(running_run.id)
+        assert context is not None
+        context.focus_enabled = job.carry_forward_enabled
+        context.focus_definition = focus_definition
+        context.focus_snapshot = focus_snapshot
+        context.focus_section = focus_section
         self._job_progress = JobProgress(job.id, running_run.id, running_task.id)
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s task=%s status=started",
@@ -2212,6 +2238,8 @@ class RobotApplication:
     def _finish_job_run_context(
         self, context: JobExecutionContext, status: JobRunStatus,
         summary: str | None, *, result_report: str | None,
+        focus_update: JobFocusProposal | None = None,
+        focus_episode_id: int | None = None,
     ) -> CurrentJobRun:
         """Apply a validated terminal decision to one exact context only."""
         binding = context.binding
@@ -2261,6 +2289,12 @@ class RobotApplication:
             if status is JobRunStatus.FAILED
             else {"outcome_summary": summary}
         )
+        if focus_update is not None:
+            kwargs.update(focus_update=focus_update,
+                          focus_definition=context.focus_definition,
+                          focus_job_id=context.job_id,
+                          focus_task_id=str(context.task_id),
+                          focus_episode_id=focus_episode_id)
         run = self.jobs.transition_run(
             binding.run.id, status, result_report=result_report, **kwargs
         )
@@ -2274,9 +2308,13 @@ class RobotApplication:
         context.execution_state = "terminal"
         self._remove_job_execution_context(binding.run.id)
         LOGGER.info(
-            "[JOBS] job=JOB%s run=RUN%s task=%s status=%s result=persisted report_chars=%s",
+            "[JOBS] job=JOB%s run=RUN%s task=%s status=%s result=persisted report_chars=%s "
+            "focus=%s question_chars=%s blocker_chars=%s",
             binding.job.id, run.id, task.id, status.value,
             len(result_report) if result_report is not None else 0,
+            focus_update.action if focus_update is not None else "keep",
+            len(focus_update.question or "") if focus_update is not None else 0,
+            len(focus_update.blocker or "") if focus_update is not None else 0,
         )
         counter = {JobRunStatus.COMPLETED: "job_runs_completed",
                    JobRunStatus.FAILED: "job_runs_failed",
@@ -3112,6 +3150,30 @@ class RobotApplication:
             and task_binding.active_goal is goal
         )
 
+    def _validate_job_focus_policy(self, binding: CurrentJobRun) -> None:
+        context = self._context_for_run(binding.run.id)
+        assert self.jobs is not None
+        job = self.jobs.get_job(binding.job.id)
+        if (context is None or context.binding is not binding or not context.focus_enabled
+                or job is None or not job.carry_forward_enabled):
+            raise ValueError("carry-forward is not enabled for this exact occurrence")
+        if context.focus_definition != self.jobs.focus_definition_identity(binding.job.id):
+            raise ValueError("focus Job definition changed")
+        run = self.jobs.get_run(binding.run.id)
+        if run is None or run.job_id != binding.job.id or run.status is not JobRunStatus.RUNNING:
+            raise ValueError("focus source Run ownership is stale")
+
+    def _job_focus_sections(self) -> tuple[str, ...]:
+        context = self._execution_job_context()
+        if context is None or not context.focus_enabled:
+            return ()
+        try:
+            self._validate_job_focus_policy(context.binding)
+        except ValueError:
+            return ()
+        return (context.focus_section or
+                "Carry-forward policy: enabled for this occurrence. No applicable historical focus.",)
+
     def _active_state_tending_conditions(
         self, job_id: int,
     ) -> tuple[tuple[JobTriggerType, JobReadinessEventType], ...]:
@@ -3196,6 +3258,7 @@ class RobotApplication:
         proposed_delay_seconds: int | None = None
         proposed_event_type: JobReadinessEventType | None = None
         proposed_progress_update: JobProgressUpdate | None = None
+        proposed_focus_update: JobFocusProposal | None = None
         consumed = False
         attempts = 0
 
@@ -3265,7 +3328,7 @@ class RobotApplication:
             nonlocal consumed, proposed_disposition, proposed_summary, proposed_report
             nonlocal proposed_readiness, proposed_delay_seconds
             nonlocal proposed_event_type
-            nonlocal proposed_progress_update, attempts
+            nonlocal proposed_progress_update, proposed_focus_update, attempts
             if consumed:
                 return self._rejected_tool(call.name, "Job outcome request already consumed",
                                            log_prefix="JOBS")
@@ -3277,7 +3340,7 @@ class RobotApplication:
                 # provider/test clients as the equivalent null for non-event modes.
                 arguments = json.loads(call.arguments)
                 required = {"disposition", "summary", "report", "readiness", "delay_seconds"}
-                optional = {"event_type", "progress_update"}
+                optional = {"event_type", "progress_update", "focus_update"}
                 if (not isinstance(arguments, dict)
                         or not required <= set(arguments)
                         or set(arguments) - required - optional):
@@ -3314,6 +3377,16 @@ class RobotApplication:
                     raise ValueError(
                         "terminal outcomes require null readiness, delay_seconds, and event_type"
                     )
+                focus_update = JobFocusProposal.parse(arguments.get("focus_update"))
+                if focus_update is not None and focus_update.action != "keep":
+                    if disposition is not JobWorkDisposition.COMPLETED:
+                        raise ValueError("focus changes require a completed outcome")
+                    self._validate_job_focus_policy(binding)
+                    if (focus_update.basis is not None and focus_update.basis not in
+                            self._job_progress_bases(initiative, wake_event)):
+                        raise ValueError("focus evidence reference is unavailable in this episode")
+                else:
+                    focus_update = None
                 progress_value = arguments.get("progress_update")
                 progress_update = self._validate_job_progress_update(
                     progress_value, disposition, initiative, wake_event,
@@ -3342,6 +3415,7 @@ class RobotApplication:
                 proposed_readiness, proposed_delay_seconds = readiness, delay_seconds
                 proposed_event_type = event_type
                 proposed_progress_update = progress_update
+                proposed_focus_update = focus_update
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as error:
                 if attempts >= 2:
                     consumed = True
@@ -3359,13 +3433,25 @@ class RobotApplication:
                 self.temporal_situation(), self.options.startup_prompt,
                 self.working_memory.snapshot(),
                 goal if self._active_goal is goal else None,
-            ), episode.render(), *evidence_lines(),
+            ), episode.render(), *self._job_focus_sections(), *evidence_lines(),
+            "focus_update defaults to null (keep source and age). When this Job has opted in, "
+            "a completed outcome may set one unresolved question (open or blocked) or clear "
+            "with a bounded reason. Continue/failed outcomes must use null. A blocked focus "
+            "does not request readiness or create future work. Any evidence basis refers only "
+            "to this episode's accepted runtime evidence, not proof of semantic resolution.",
         ))
-        await backend.respond(
-            JOB_OUTCOME_EVALUATION_REQUEST, instructions=instructions,
-            tools=(REPORT_JOB_OUTCOME_TOOL,), tool_executor=execute_tool,
-            refreshed_instructions=lambda: instructions,
-        )
+        try:
+            await backend.respond(
+                JOB_OUTCOME_EVALUATION_REQUEST, instructions=instructions,
+                tools=(REPORT_JOB_OUTCOME_TOOL,), tool_executor=execute_tool,
+                refreshed_instructions=lambda: instructions,
+            )
+        finally:
+            consumed = True
+
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            raise asyncio.CancelledError
         if proposed_disposition is None:
             return JobWorkDisposition.CONTINUE, None, None, None, None, None, None
         assert proposed_summary is not None
@@ -3379,9 +3465,17 @@ class RobotApplication:
                 if proposed_disposition is JobWorkDisposition.COMPLETED
                 else JobRunStatus.FAILED
             )
-            self.finish_job_run(
-                terminal, proposed_summary, result_report=proposed_report
-            )
+            context = self._context_for_run(binding.run.id)
+            assert context is not None
+            if proposed_focus_update is not None:
+                self._validate_job_focus_policy(binding)
+            if proposed_focus_update is None:
+                self.finish_job_run(terminal, proposed_summary, result_report=proposed_report)
+            else:
+                self._finish_job_run_context(
+                    context, terminal, proposed_summary, result_report=proposed_report,
+                    focus_update=proposed_focus_update, focus_episode_id=episode.id,
+                )
         elif proposed_progress_update is not None:
             if not self._job_work_binding_matches(binding, task_binding, goal):
                 self._clear_stale_job_progress(binding)
@@ -4933,10 +5027,12 @@ class RobotApplication:
             "references and explicitly intended logical paths. Never replay indeterminate "
             "writes or send unsolicited images."
             if any(tool.name in _IMAGE_ACQUISITIONS for tool in tools) else "")
+        focus_sections = self._job_focus_sections() if stimulus.kind == "job_run_work" else ()
+        focus_section = "\n\n" + "\n\n".join(focus_sections) if focus_sections else ""
         return (
             f"{context}{notification}\n\n{episode.render()}\n\n"
             f"{stimulus.render(actions_enabled=capabilities_available)}"
-            f"{continuity_section}{progress_section}{inspection_guidance}"
+            f"{continuity_section}{progress_section}{focus_section}{inspection_guidance}"
             f"{history_guidance}{finding_guidance}{image_guidance}{sequencing}"
         )
 
@@ -5244,6 +5340,7 @@ class RobotApplication:
             "unknown capture time means unknown age. Storage confirms neither visual truth nor current "
             "world state. Do not replay indeterminate writes, invent paths, or send unsolicited images.",
             episode.render(), stimulus.render(actions_enabled=None), *progress_section,
+            *(self._job_focus_sections() if job_work else ()),
             followup.render(),
         ))
 
@@ -5539,7 +5636,7 @@ class RobotApplication:
             ),
             *self._notification_sections(tools, notification_interaction),
             episode.render(), stimulus.render(actions_enabled=None),
-            *progress_section, continuation.render(),
+            *progress_section, *(self._job_focus_sections() if job_work else ()), continuation.render(),
         ))
 
     async def _request_continuation(

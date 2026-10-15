@@ -123,6 +123,7 @@ class Job:
     target: JobTarget | None
     created_at: datetime
     updated_at: datetime
+    carry_forward_enabled: bool = False
 
     def __post_init__(self) -> None:
         _positive_id(self.id, "job ID")
@@ -130,6 +131,8 @@ class Job:
         object.__setattr__(self, "description", _text(
             self.description, "description", MAX_JOB_DESCRIPTION_CHARS, empty=True
         ))
+        if not isinstance(self.carry_forward_enabled, bool):
+            raise TypeError("carry_forward_enabled must be boolean")
         if not isinstance(self.enabled, bool):
             raise TypeError("enabled must be boolean")
         if self.target is not None and not isinstance(self.target, JobTarget):

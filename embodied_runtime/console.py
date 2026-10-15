@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Callable
 import math
+import logging
 import os
 from pathlib import Path
 import re
@@ -21,6 +22,7 @@ from embodied_runtime.interaction import (
 from embodied_runtime.jobs import (
     JobRun, JobRunStatus, JobTarget, JobTriggerType, WorkspaceError,
 )
+from embodied_runtime.jobs.focus import JobFocusProposal
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
 from embodied_runtime.run_history import (
@@ -309,6 +311,10 @@ class RuntimeConsole:
                 "  job add <name> [options]       Add an enabled Job definition",
                 "  job update JOB<n> --description <text>",
                 "  job enable|disable JOB<n>      Change Job definition state",
+                "  job focus show|enable|disable JOB<n>",
+                "  job focus seed JOB<n> RUN<n> --question <text> [--status open|blocked] [--blocker <text>]",
+                "  job focus clear JOB<n> --reason <text>",
+                "  job focus snapshot RUN<n>      Show fixed occurrence focus context",
                 "  job start JOB<n>               Start a JobRun and bounded Task",
                 "  job schedule JOB<n> [daily HH:MM [--timezone ZONE]]",
                 "  job unschedule JOB<n>          Remove a Job's daily schedule",
@@ -416,6 +422,7 @@ class RuntimeConsole:
         return "\n".join(("Job", f"  id:            JOB{job.id}",
             f"  name:          {job.name}",
             f"  enabled:       {str(job.enabled).lower()}",
+            f"  carry_forward: {str(job.carry_forward_enabled).lower()}",
             f"  target:        {'unassigned' if job.target is None else job.target}",
             f"  description:   {job.description or '(none)'}"))
 
@@ -538,6 +545,8 @@ class RuntimeConsole:
 
     def _job_command(self, words: list[str]) -> str:
         action = words[1].lower() if len(words) > 1 else ""
+        if action == "focus":
+            return self._job_focus(words)
         if action == "add":
             return self._job_add(words)
         if action == "update":
@@ -715,6 +724,91 @@ class RuntimeConsole:
             self._application.discard_pending_job_activations(job_id)
         return f"JOB{job.id} {'enabled' if enabled else 'disabled'}."
 
+    def _job_focus(self, words: list[str]) -> str:
+        usage = ("Usage: job focus show|enable|disable JOB<n>; "
+                 "job focus seed JOB<n> RUN<n> --question <text> [--status open|blocked] [--blocker <text>]; "
+                 "job focus clear JOB<n> --reason <text>; job focus snapshot RUN<n>.")
+        if len(words) < 4:
+            return usage
+        action = words[2].lower()
+        app = self._application
+        store = app.jobs
+        if store is None:
+            return "Jobs persistence is disabled."
+        if action == "snapshot":
+            try:
+                run_id = _catalog_id(words[3], "RUN")
+                if len(words) != 4 or run_id is None:
+                    return usage
+                context = next((c for c in app.job_execution_contexts if c.run_id == run_id), None)
+                if context is None:
+                    return "No live occurrence snapshot for that Run."
+                job = store.get_job(context.job_id)
+                if (job is None or not context.focus_enabled or context.focus_definition !=
+                        store.focus_definition_identity(context.job_id)
+                        or not job.carry_forward_enabled):
+                    return "Carry-forward focus withheld: disabled or Job definition changed."
+                return context.focus_section or "No applicable focus in this occurrence snapshot."
+            except Exception:
+                return "Unable to inspect focus snapshot: persistence operation failed."
+        job_id = _catalog_id(words[3], "JOB")
+        if job_id is None or action not in ("show", "enable", "disable", "seed", "clear"):
+            return usage
+        try:
+            job = store.get_job(job_id)
+            if job is None:
+                return f"Job not found: JOB{job_id}."
+            if action == "show":
+                if len(words) != 4:
+                    return usage
+                focus = store.get_focus(job_id)
+                lines = [f"JOB{job_id} carry-forward enabled={str(job.carry_forward_enabled).lower()}"]
+                if focus is None:
+                    return "\n".join((*lines, "Current focus: none"))
+                applicable = (job.carry_forward_enabled and focus.definition_identity ==
+                              store.focus_definition_identity(job_id))
+                lines.extend((f"  applicable: {str(applicable).lower()}",
+                              f"  definition_identity: {focus.definition_identity}",
+                              f"  updated_at: {focus.updated_at.isoformat()}",
+                              focus.render(app._aware_wall_clock())))
+                return "\n".join(lines)
+            if any(c.job_id == job_id for c in app.job_execution_contexts):
+                return f"Unable to change JOB{job_id} focus: its current JobRun is still active."
+            if action in ("enable", "disable"):
+                if len(words) != 4:
+                    return usage
+                job = store.set_carry_forward_enabled(job_id, action == "enable")
+                return f"JOB{job.id} carry-forward {action}d; persisted."
+            if action == "clear":
+                if len(words) != 6 or words[4] != "--reason":
+                    return usage
+                proposal = JobFocusProposal("clear", reason=words[5])
+                source_id = None
+            else:
+                source_id = _catalog_id(words[4], "RUN") if len(words) > 4 else None
+                if source_id is None or len(words) < 7 or len(words[5:]) % 2:
+                    return usage
+                options = {}
+                for index in range(5, len(words), 2):
+                    key = words[index]
+                    if key not in ("--question", "--status", "--blocker") or key in options:
+                        return usage
+                    options[key] = words[index + 1]
+                proposal = JobFocusProposal("set", options.get("--question"),
+                                            options.get("--status", "open"), options.get("--blocker"))
+            focus = store.administer_focus(job_id, proposal, source_id)
+            logging.getLogger(__name__).info(
+                "[JOBS] job=JOB%s focus=%s source_run=%s status=%s version=%s question_chars=%s blocker_chars=%s",
+                job_id, action, focus.source_run_id if focus else 0,
+                focus.status if focus else "none", focus.version if focus else 0,
+                len(focus.question) if focus else 0, len(focus.blocker or "") if focus else 0)
+            return (f"JOB{job_id} focus persisted; version={focus.version} author=operator source=RUN{focus.source_run_id}."
+                    if focus else f"JOB{job_id} focus cleared; persisted.")
+        except (KeyError, TypeError, ValueError) as error:
+            return f"Unable to change focus: {error}."
+        except Exception:
+            return "Unable to administer focus: persistence operation failed."
+
     def _job_update(self, words: list[str]) -> str:
         usage = "Usage: job update JOB<n> --description <text>."
         if (len(words) != 5 or
@@ -724,8 +818,7 @@ class RuntimeConsole:
         store = self._application.jobs
         if store is None:
             return "Jobs persistence is disabled."
-        current = self._application.current_job_run
-        if current is not None and current.job.id == job_id:
+        if any(c.job_id == job_id for c in self._application.job_execution_contexts):
             return f"Unable to update JOB{job_id}: its current JobRun is still active."
         try:
             job = store.set_job_description(job_id, words[4])

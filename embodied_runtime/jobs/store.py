@@ -1,6 +1,7 @@
 """Narrow persistence contract for the durable Job catalog."""
 
 from typing import Protocol
+from .focus import JobFocus, JobFocusProposal
 
 from .model import (Finding, FindingEvidence, FindingKind, Job, JobRun, JobRunStatus,
                     JobSchedule, JobTarget, JobTrigger, JobTriggerType)
@@ -31,7 +32,17 @@ class JobStore(Protocol):
     def transition_run(self, run_id: int, status: JobRunStatus, *,
                        outcome_summary: str | None = None,
                        error_summary: str | None = None,
-                       result_report: str | None = None) -> JobRun: ...
+                       result_report: str | None = None,
+                       focus_update: JobFocusProposal | None = None,
+                       focus_definition: str | None = None,
+                       focus_job_id: int | None = None,
+                       focus_task_id: str | None = None,
+                       focus_episode_id: int | None = None) -> JobRun: ...
+    def focus_definition_identity(self, job_id: int) -> str: ...
+    def set_carry_forward_enabled(self, job_id: int, enabled: bool) -> Job: ...
+    def get_focus(self, job_id: int) -> JobFocus | None: ...
+    def administer_focus(self, job_id: int, proposal: JobFocusProposal,
+                         source_run_id: int | None = None) -> JobFocus | None: ...
     def create_finding(self, job_id: int, run_id: int, task_id: str, episode_id: int,
                        topic: str, kind: FindingKind, claim: str,
                        evidence_basis: tuple[FindingEvidence, ...]) -> Finding: ...
