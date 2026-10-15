@@ -1,0 +1,69 @@
+flowchart LR
+    N["Nick<br/>Console · SMS · Voice"]
+    T["Runtime events<br/>and daily schedules"]
+    J["Jobs → JobRuns → Tasks<br/>Responsibility · progress · results"]
+
+    M(["Mira's cognitive episode<br/>Current goal · evidence · bounded tools"])
+
+    subgraph CONTEXT["Evidence and continuity"]
+        direction LR
+        E["Current evidence<br/>Sensors · health · configuration"]
+        H["Recent context and history<br/>Working memory · conversations · run history"]
+        P[("Semantic memory<br/>Accepted operator-grounded knowledge")]
+        F[("Findings<br/>Historical Job-authored claims")]
+    end
+
+    W[("Job Workspace<br/>Durable text and image artifacts")]
+    TIMER["One-shot follow-up<br/>Goal-bound · lost on restart"]
+
+    subgraph IMAGES["Shared image pipeline"]
+        direction LR
+        C["Camera"]
+        R["Retained image snapshot<br/>Exact bytes · episode-bound reference"]
+        V["Configured vision chain<br/>Gemini → eligible OpenAI fallback"]
+    end
+
+    O["Communication<br/>Console · SMS/MMS · Voice"]
+
+    N -->|operator request| M
+    N -->|manual activation| J
+    T --> J
+    J -->|goal and execution context| M
+    M -->|progress and results| J
+
+    E -->|inspect or observe| M
+    H -->|selected context or inspection| M
+    P -->|recall_memory| M
+    M -->|operator-grounded remember| P
+    F -->|search or selected context| M
+    M -->|Job-only publish_finding| F
+
+    W -->|read text| M
+    M -->|authorized text write| W
+
+    M -->|capture or load| R
+    C -->|captured bytes| R
+    W -->|load image| R
+    R -->|authorized save| W
+    R -->|interpret_image| V
+    V -->|fallible visual interpretation| M
+    R -->|operator-authorized image delivery| O
+    M -->|permitted text or speech| O
+
+    M -->|schedule when eligible| TIMER
+    TIMER -->|new episode when due| M
+
+    classDef cognition fill:#5b21b6,color:#fff,stroke:#4c1d95,stroke-width:3px;
+    classDef durable fill:#dbeafe,color:#172554,stroke:#2563eb,stroke-width:2px;
+    classDef evidence fill:#ecfdf5,color:#064e3b,stroke:#059669;
+    classDef communication fill:#fff7ed,color:#7c2d12,stroke:#ea580c,stroke-width:2px;
+    classDef activation fill:#f1f5f9,color:#0f172a,stroke:#64748b;
+
+    class M cognition;
+    class W,P,F,J durable;
+    class E,H,C,R,V evidence;
+    class N,O communication;
+    class T,TIMER activation;
+
+    style CONTEXT fill:#f8fafc,stroke:#cbd5e1
+    style IMAGES fill:#f0fdf4,stroke:#86efac

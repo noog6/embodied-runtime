@@ -3,6 +3,9 @@
 Reusable software runtime for embodied agents. Mira is the working name of the
 initial reference/demo robot built with the runtime.
 
+The [cognitive work map](docs/cognitive-work.md) illustrates how Mira's bounded
+episodes connect Jobs, evidence, memory, durable artifacts, and communication.
+
 ## Run the scaffold
 
 Python 3.13 or later is required. From a fresh checkout, run:
