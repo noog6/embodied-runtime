@@ -1,12 +1,15 @@
 """SQLite-backed durable Job catalog."""
 
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import UTC, datetime
-from pathlib import Path
+import hashlib
 import json
+from pathlib import Path
 import sqlite3
 import unicodedata
 
+from .focus import JobFocus, JobFocusProposal
 from .model import (
     Finding, FindingEvidence, FindingEvidenceClass, FindingKind,
     MAX_FINDING_QUERY_CHARS, MAX_FINDING_SEARCH_LIMIT,
@@ -15,7 +18,17 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
+_FOCUS_SCHEMA = """CREATE TABLE job_focus (
+    job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
+    question TEXT NOT NULL CHECK(length(question) BETWEEN 1 AND 500),
+    status TEXT NOT NULL CHECK(status IN ('open','blocked')),
+    blocker TEXT CHECK(blocker IS NULL OR length(blocker) BETWEEN 1 AND 300),
+    source_run_id INTEGER NOT NULL REFERENCES job_runs(id) ON DELETE RESTRICT,
+    author TEXT NOT NULL CHECK(author IN ('model','operator')),
+    source_task_id TEXT, source_episode_id INTEGER, basis TEXT,
+    source_finished_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    version INTEGER NOT NULL, definition_identity TEXT NOT NULL)"""
 _FINDINGS_SCHEMA = """CREATE TABLE IF NOT EXISTS job_findings (
        id INTEGER PRIMARY KEY,
        job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
@@ -39,6 +52,8 @@ _SCHEMA = (
        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
        target_kind TEXT, target_identifier TEXT,
        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+       carry_forward_enabled INTEGER NOT NULL DEFAULT 0 CHECK(carry_forward_enabled IN (0,1)),
+       focus_version INTEGER NOT NULL DEFAULT 0,
        CHECK((target_kind IS NULL AND target_identifier IS NULL) OR
              (target_kind IS NOT NULL AND target_identifier IS NOT NULL)))""",
     _JOB_RUNS_SCHEMA,
@@ -56,6 +71,7 @@ _SCHEMA = (
        PRIMARY KEY(job_id,event_type))""",
     _FINDINGS_SCHEMA,
     *_FINDINGS_INDEXES,
+    _FOCUS_SCHEMA,
 )
 
 
@@ -79,6 +95,18 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
+        if version == 9:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute("ALTER TABLE jobs ADD COLUMN carry_forward_enabled INTEGER NOT NULL DEFAULT 0 CHECK(carry_forward_enabled IN (0,1))")
+                self._connection.execute("ALTER TABLE jobs ADD COLUMN focus_version INTEGER NOT NULL DEFAULT 0")
+                self._connection.execute(_FOCUS_SCHEMA)
+                self._connection.execute("PRAGMA user_version = 10")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+            return
         if version == 8:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -90,6 +118,7 @@ class SQLiteJobStore:
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version == 7:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -233,7 +262,7 @@ class SQLiteJobStore:
         now = self._now()
         replacement = Job(
             current.id, current.name, description, current.enabled, current.target,
-            current.created_at, now,
+            current.created_at, now, current.carry_forward_enabled,
         )
         cursor = self._connection.execute(
             "UPDATE jobs SET description = ?, updated_at = ? WHERE id = ?",
@@ -425,7 +454,12 @@ class SQLiteJobStore:
     def transition_run(self, run_id: int, status: JobRunStatus, *,
                        outcome_summary: str | None = None,
                        error_summary: str | None = None,
-                       result_report: str | None = None) -> JobRun:
+                       result_report: str | None = None,
+                       focus_update: JobFocusProposal | None = None,
+                       focus_definition: str | None = None,
+                       focus_job_id: int | None = None,
+                       focus_task_id: str | None = None,
+                       focus_episode_id: int | None = None) -> JobRun:
         _id(run_id, "job run")
         if not isinstance(status, JobRunStatus):
             raise TypeError("status must be a JobRunStatus")
@@ -456,11 +490,115 @@ class SQLiteJobStore:
             )
             if cursor.rowcount != 1:
                 raise InvalidJobRunTransitionError("job run changed concurrently")
+            if focus_update is not None:
+                if status is not JobRunStatus.COMPLETED or current.job_id != focus_job_id:
+                    raise ValueError("focus requires exact completed Job ownership")
+                self._validate_focus_policy(current.job_id, focus_definition)
+                self._apply_focus(current.job_id, next_run, focus_update, "model",
+                                  focus_task_id, focus_episode_id)
             self._connection.commit()
             return next_run
         except BaseException:
             self._connection.rollback()
             raise
+
+    def focus_definition_identity(self, job_id: int) -> str:
+        job = self.get_job(job_id)
+        if job is None:
+            raise KeyError("unknown focus Job")
+        schedule = self.get_schedule(job_id)
+        definition = {
+            "name": job.name, "description": job.description,
+            "target": None if job.target is None else str(job.target),
+            "triggers": [(row["event_type"], bool(row["enabled"]))
+                         for row in self._connection.execute(
+                             "SELECT event_type,enabled FROM job_triggers WHERE job_id=? ORDER BY event_type",
+                             (job_id,))],
+            "schedule": None if schedule is None else
+                        (schedule.enabled, schedule.local_time, schedule.timezone),
+        }
+        return hashlib.sha256(json.dumps(definition, sort_keys=True).encode()).hexdigest()
+
+    def set_carry_forward_enabled(self, job_id: int, enabled: bool) -> Job:
+        if type(enabled) is not bool:
+            raise TypeError("carry-forward enabled must be boolean")
+        if self.get_job(job_id) is None:
+            raise KeyError("unknown focus Job")
+        self._connection.execute(
+            "UPDATE jobs SET carry_forward_enabled=? WHERE id=?", (int(enabled), job_id))
+        return self.get_job(job_id)
+
+    def get_focus(self, job_id: int) -> JobFocus | None:
+        _id(job_id, "job")
+        row = self._connection.execute("SELECT * FROM job_focus WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        values = dict(row)
+        for key in ("created_at", "updated_at", "source_finished_at"):
+            values[key] = _parse(values[key])
+        return JobFocus(**values)
+
+    def _validate_focus_policy(self, job_id: int, definition: str | None) -> None:
+        job = self.get_job(job_id)
+        if job is None or not job.carry_forward_enabled:
+            raise ValueError("carry-forward is disabled")
+        if definition != self.focus_definition_identity(job_id):
+            raise ValueError("focus Job definition changed")
+
+    def administer_focus(self, job_id: int, proposal: JobFocusProposal,
+                         source_run_id: int | None = None) -> JobFocus | None:
+        """Exact completed Run seeds are operator-authored, never report quotations."""
+        if not isinstance(proposal, JobFocusProposal):
+            raise TypeError("focus requires a typed proposal")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            job = self.get_job(job_id)
+            if job is None:
+                raise KeyError("unknown focus Job")
+            # Clear remains possible while disabled; disabling retains history.
+            if proposal.action == "set":
+                self._validate_focus_policy(job_id, self.focus_definition_identity(job_id))
+                source = self.get_run(source_run_id)
+                if source is None or source.job_id != job_id or source.status is not JobRunStatus.COMPLETED:
+                    raise ValueError("focus seed requires an exact completed source Run belonging to this Job")
+            else:
+                source = None
+            if proposal.basis is not None:
+                raise ValueError("operator focus has no current episode evidence basis")
+            self._apply_focus(job_id, source, proposal, "operator", None, None)
+            focus = self.get_focus(job_id)
+            self._connection.commit()
+        except BaseException:
+            self._connection.rollback()
+            raise
+        return focus
+
+    def _apply_focus(self, job_id: int, source: JobRun | None,
+                     proposal: JobFocusProposal, author: str,
+                     task_id: str | None, episode_id: int | None) -> None:
+        if not isinstance(proposal, JobFocusProposal):
+            raise TypeError("focus requires a typed proposal")
+        if proposal.action == "keep":
+            return
+        self._connection.execute("UPDATE jobs SET focus_version=focus_version+1 WHERE id=?", (job_id,))
+        if proposal.action == "clear":
+            self._connection.execute("DELETE FROM job_focus WHERE job_id=?", (job_id,))
+            return
+        version = self._connection.execute("SELECT focus_version FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
+        if source is None or source.job_id != job_id or source.status is not JobRunStatus.COMPLETED:
+            raise ValueError("focus requires a completed source belonging to its Job")
+        now = self._now()
+        record = JobFocus(job_id, proposal.question, proposal.status, proposal.blocker,
+                          source.id, author, task_id, episode_id, proposal.basis,
+                          source.finished_at, now, now, version,
+                          self.focus_definition_identity(job_id))
+        values = asdict(record)
+        for key in ("source_finished_at", "created_at", "updated_at"):
+            values[key] = _format(values[key])
+        columns = ",".join(values)
+        parameters = ",".join("?" for _ in values)
+        self._connection.execute(
+            f"INSERT OR REPLACE INTO job_focus ({columns}) VALUES ({parameters})", tuple(values.values()))
 
     def create_finding(self, job_id: int, run_id: int, task_id: str, episode_id: int,
                        topic: str, kind: FindingKind, claim: str,
@@ -571,7 +709,8 @@ def _parse(value: str | None) -> datetime | None:
 def _job(row: sqlite3.Row) -> Job:
     target = None if row["target_kind"] is None else JobTarget(row["target_kind"], row["target_identifier"])
     return Job(row["id"], row["name"], row["description"], bool(row["enabled"]),
-               target, _parse(row["created_at"]), _parse(row["updated_at"]))  # type: ignore[arg-type]
+               target, _parse(row["created_at"]), _parse(row["updated_at"]),
+               bool(row["carry_forward_enabled"]))  # type: ignore[arg-type]
 
 
 def _run(row: sqlite3.Row) -> JobRun:

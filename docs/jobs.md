@@ -8,6 +8,10 @@ See [Findings and deliberate search](findings.md) for reusable, provenance-beari
 claims published by completed JobRuns. Findings complement rather than replace
 JobRun result reports and private Job Workspaces.
 
+See [Carry-forward Job focus](job-focus.md) for opt-in, bounded unresolved questions
+projected into later occurrences of the same Job without acquisition. It is disabled
+by default and grants no activation or action authority.
+
 ## Retained report retrieval and delivery
 
 Storage, retrieval, and delivery are separate runtime operations. A JobRun's
@@ -83,6 +87,7 @@ These concepts remain deliberately separate:
 | Job progress | Runtime-owned progress for the active occurrence |
 | Semantic continuity | Volatile, non-authoritative context between episodes |
 | JobRun result | Durable, bounded cognition work product after terminalization |
+| Carry-forward focus | One opt-in historical question for future occurrences of the same Job |
 | Job Workspace | Mutable durable working material owned by the Job across runs |
 
 A result may summarize or interpret evidence, but durability does not make the

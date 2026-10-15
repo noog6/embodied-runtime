@@ -183,3 +183,14 @@ To authorize one operator image save, enter a complete standalone command such a
 with an existing exact Job and intended path/mode. Natural-language save requests
 do not grant durable-write authority. The runtime enforces the scope before
 storage; capture and save remain separate budgeted operations.
+
+## Carry-forward focus administration
+
+`job focus enable|disable|show JOB<n>`, `job focus snapshot RUN<n>`,
+`job focus seed JOB<n> RUN<n> --question "Question?" [--status open|blocked]
+[--blocker "Explanation"]`, and `job focus clear JOB<n> --reason "Explanation"`
+use exact catalog IDs. Mutation rejects any live context for the same Job. Seed
+requires an exact completed source Run belonging to that Job and records operator
+authorship; its source reference does not establish that its text appeared in the
+report. See [Carry-forward Job focus](job-focus.md) for bounds, transaction and
+provenance rules, and the manual JOB15/RUN391 pilot.
