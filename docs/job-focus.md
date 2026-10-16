@@ -20,7 +20,7 @@ The Jobs SQLite database retains at most one current `JobFocus` per Job:
 | Runtime provenance | Job ID, exact completed source Run ID, author (`model` or `operator`), Task UUID (at most 100 characters) and episode ID for model nominations |
 | Timestamps | UTC source Run finish time, focus creation time, update time |
 | Version | Positive per-Job version, advanced on set/clear; keep advances nothing |
-| Definition identity | 64-character SHA-256 of normalized name, description, target, trigger configuration and daily schedule configuration |
+| Definition identity | 64-character SHA-256 of normalized name, description, target, trigger configuration and daily/hourly schedule configuration |
 
 Authored text must be nonempty plain text without Unicode control/format/surrogate
 characters. Limits apply **before** surrounding whitespace is trimmed; oversized
@@ -113,9 +113,9 @@ Keeping or clearing a question grants no external effect, image-save or delivery
 authority. Blocked focus itself never schedules, polls, notifies, reserves resources,
 or creates a Run. It creates no readiness condition and performs no activation.
 
-Name/description/target, trigger configuration or daily schedule configuration
+Name/description/target, trigger configuration or daily/hourly schedule configuration
 changes make a stored focus incompatible: it is retained for operator inspection
-but withheld from cognition. The schedule's consumed date marker, enablement of the
+but withheld from cognition. The schedule's consumed date/instant markers, enablement of the
 Job itself, and focus policy are not responsibility content in the fingerprint.
 Projection also checks current focus policy and definition, so an out-of-band change
 during a live occurrence withholds its old snapshot. It never substitutes a newly
@@ -123,7 +123,11 @@ edited focus into that occurrence. Identical normalized definitions are compatib
 this is a content identity, not a revision ledger. Explicitly replace or clear stale
 focus after reviewing the changed responsibility. Disabling withholds nomination
 and projection but retains the record; re-enabling with an identical definition
-makes that record applicable again. No focus/policy means ordinary work behavior.
+makes that record applicable again. Unchanged daily schedules retain their legacy
+identity after the hourly-scheduling migration. Hourly cadence, minute, timezone,
+and schedule enablement are definition content, so a cadence or minute change
+withholds incompatible focus. Focus remains informational and cannot activate
+work. No focus/policy means ordinary work behavior.
 
 | Other mechanism | Distinction |
 | --- | --- |

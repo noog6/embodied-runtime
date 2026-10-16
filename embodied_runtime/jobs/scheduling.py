@@ -1,4 +1,4 @@
-"""Lightweight timer for offering daily Job activation opportunities."""
+"""Lightweight timer for offering recurring Job activation opportunities."""
 
 import asyncio
 from collections.abc import Awaitable, Callable

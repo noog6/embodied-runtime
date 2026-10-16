@@ -1,7 +1,7 @@
 """Immutable domain records for durable responsibilities and their runs."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -44,20 +44,35 @@ class JobTrigger:
 
 @dataclass(frozen=True, slots=True)
 class JobSchedule:
-    """One durable daily, explicitly zoned activation schedule."""
+    """One durable, explicitly zoned daily or hourly activation schedule."""
 
     job_id: int
     enabled: bool
-    local_time: str
+    local_time: str | None
     timezone: str
     last_started_local_date: str | None = None
+    cadence: str = "daily"
+    minute: int | None = None
+    last_started_slot: datetime | None = None
 
     def __post_init__(self) -> None:
         _positive_id(self.job_id, "job ID")
         if not isinstance(self.enabled, bool):
             raise TypeError("enabled must be boolean")
-        if not isinstance(self.local_time, str) or _LOCAL_TIME.fullmatch(self.local_time) is None:
-            raise ValueError("local_time must use strict 24-hour HH:MM format")
+        if self.cadence not in ("daily", "hourly"):
+            raise ValueError("cadence must be daily or hourly")
+        if self.cadence == "daily":
+            if not isinstance(self.local_time, str) or _LOCAL_TIME.fullmatch(self.local_time) is None:
+                raise ValueError("local_time must use strict 24-hour HH:MM format")
+            if self.minute is not None:
+                raise ValueError("daily schedules cannot specify minute")
+        else:
+            if self.local_time is not None:
+                raise ValueError("hourly schedules cannot specify local_time")
+            if self.minute is None:
+                object.__setattr__(self, "minute", 0)
+            if type(self.minute) is not int or not 0 <= self.minute <= 59:
+                raise ValueError("hourly minute must be an integer from 0 through 59")
         if not isinstance(self.timezone, str):
             raise TypeError("timezone must be a string")
         try:
@@ -69,6 +84,39 @@ class JobSchedule:
                 datetime.strptime(self.last_started_local_date, "%Y-%m-%d")
             except (TypeError, ValueError) as error:
                 raise ValueError("last_started_local_date must use YYYY-MM-DD") from error
+        if self.last_started_slot is not None:
+            object.__setattr__(self, "last_started_slot", _time(
+                self.last_started_slot, "last_started_slot"))
+
+    def due_slot(self, now: datetime) -> datetime | None:
+        """Return only the latest due, unconsumed opportunity, as a UTC instant."""
+        now = _time(now, "schedule clock")
+        zone = ZoneInfo(self.timezone)
+        local = now.astimezone(zone)
+        if self.cadence == "daily":
+            hour, minute = map(int, self.local_time.split(":"))
+            slot = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            # Preserve daily calendar-date and DST behavior, including gap times.
+            if local < slot or self.last_started_local_date == local.date().isoformat():
+                return None
+            return slot.astimezone(UTC)
+
+        # Enumerate civil hours on both sides and both folds, validating by round
+        # trip. A rollback can put an already-passed instant at a later civil
+        # label than local now. Two days cover even date-line discontinuities;
+        # the UTC comparison below excludes instants that are actually future.
+        hour = local.replace(tzinfo=None, minute=self.minute, second=0, microsecond=0)
+        candidates = []
+        for offset in range(-48, 49):
+            civil = hour - timedelta(hours=offset)
+            for fold in (0, 1):
+                slot = civil.replace(tzinfo=zone, fold=fold).astimezone(UTC)
+                if slot <= now and slot.astimezone(zone).replace(tzinfo=None) == civil:
+                    candidates.append(slot)
+        slot = max(candidates) if candidates else None
+        if slot is None or (self.last_started_slot is not None and slot <= self.last_started_slot):
+            return None
+        return slot
 
 
 def _positive_id(value: int, label: str) -> int:

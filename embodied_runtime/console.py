@@ -317,7 +317,8 @@ class RuntimeConsole:
                 "  job focus snapshot RUN<n>      Show fixed occurrence focus context",
                 "  job start JOB<n>               Start a JobRun and bounded Task",
                 "  job schedule JOB<n> [daily HH:MM [--timezone ZONE]]",
-                "  job unschedule JOB<n>          Remove a Job's daily schedule",
+                "  job schedule JOB<n> hourly [--minute M] [--timezone ZONE]",
+                "  job unschedule JOB<n>          Remove a Job's schedule",
                 "  job work [RUN<n>]              Perform one bounded Job work episode",
                 "  job current                    Show current JobRun and Task",
                 "  job complete [RUN<n>] [summary] Complete one exact JobRun",
@@ -554,9 +555,15 @@ class RuntimeConsole:
         if action in ("enable", "disable"):
             return self._job_enable(words, action == "enable")
         if action == "schedule":
-            return self._job_schedule(words)
+            try:
+                return self._job_schedule(words)
+            except Exception:
+                return "Unable to inspect or configure Job schedule: persistence operation failed."
         if action == "unschedule":
-            return self._job_unschedule(words)
+            try:
+                return self._job_unschedule(words)
+            except Exception:
+                return "Unable to unschedule Job: persistence operation failed."
         if action in ("trigger", "untrigger"):
             return self._job_trigger(words, remove=action == "untrigger")
         if action == "start":
@@ -630,11 +637,13 @@ class RuntimeConsole:
         return f"Configured JOB{job_id} trigger {event_type.value}."
 
     def _job_schedule(self, words: list[str]) -> str:
+        usage = ("Usage: job schedule JOB<n> [daily HH:MM [--timezone ZONE] | "
+                 "hourly [--minute M] [--timezone ZONE]].")
         store = self._application.jobs
         if store is None:
             return "Jobs persistence is disabled."
         if len(words) < 3 or (job_id := _catalog_id(words[2], "JOB")) is None:
-            return "Usage: job schedule JOB<n> [daily HH:MM [--timezone ZONE]]."
+            return usage
         if store.get_job(job_id) is None:
             return f"Job not found: JOB{job_id}."
         if len(words) == 3:
@@ -643,17 +652,48 @@ class RuntimeConsole:
                 return f"JOB{job_id} has no schedule."
             return "\n".join(("Job schedule", f"  job:               JOB{job_id}",
                 f"  enabled:           {str(schedule.enabled).lower()}",
-                "  cadence:           daily", f"  local_time:        {schedule.local_time}",
+                f"  cadence:           {schedule.cadence}",
+                (f"  local_time:        {schedule.local_time}" if schedule.cadence == "daily"
+                 else f"  minute:            {schedule.minute}"),
                 f"  timezone:          {schedule.timezone}",
-                f"  last_started_date: {schedule.last_started_local_date or 'none'}"))
-        if len(words) not in (5, 7) or words[3].lower() != "daily" \
-                or (len(words) == 7 and words[5] != "--timezone"):
-            return "Usage: job schedule JOB<n> daily HH:MM [--timezone ZONE]."
-        timezone = words[6] if len(words) == 7 else self._application.timezone_name
+                f"  last_started_date: {schedule.last_started_local_date or 'none'}",
+                f"  last_started_slot: {schedule.last_started_slot.isoformat() if schedule.last_started_slot else 'none'}"))
+        cadence = words[3].lower()
+        if cadence == "daily":
+            if len(words) not in (5, 7) or (len(words) == 7 and words[5] != "--timezone"):
+                return usage
+            local_time, minute = words[4], None
+            timezone = words[6] if len(words) == 7 else self._application.timezone_name
+        elif cadence == "hourly":
+            options = words[4:]
+            if len(options) % 2:
+                return usage
+            parsed = {}
+            for flag, value in zip(options[::2], options[1::2]):
+                if flag not in ("--minute", "--timezone") or flag in parsed:
+                    return usage
+                parsed[flag] = value
+            raw_minute = parsed.get("--minute", "0")
+            if re.fullmatch(r"[0-9]+", raw_minute) is None:
+                return "Unable to schedule Job: hourly minute must be an integer from 0 through 59."
+            try:
+                minute = int(raw_minute)
+            except ValueError:
+                return "Unable to schedule Job: hourly minute must be an integer from 0 through 59."
+            local_time = None
+            timezone = parsed.get("--timezone", self._application.timezone_name)
+        else:
+            return usage
         try:
-            schedule = store.set_schedule(job_id, words[4], timezone)
+            schedule = store.set_schedule(job_id, local_time, timezone,
+                                          cadence=cadence, minute=minute)
         except (KeyError, TypeError, ValueError) as error:
             return f"Unable to schedule Job: {error}."
+        except Exception:
+            return "Unable to schedule Job: persistence operation failed."
+        if schedule.cadence == "hourly":
+            return (f"Scheduled JOB{job_id} hourly at minute {schedule.minute} "
+                    f"{schedule.timezone}.")
         return (f"Scheduled JOB{job_id} daily at {schedule.local_time} "
                 f"{schedule.timezone}.")
 
@@ -665,7 +705,10 @@ class RuntimeConsole:
             return "Jobs persistence is disabled."
         if store.get_job(job_id) is None:
             return f"Job not found: JOB{job_id}."
-        removed = store.remove_schedule(job_id)
+        try:
+            removed = store.remove_schedule(job_id)
+        except Exception:
+            return "Unable to unschedule Job: persistence operation failed."
         return f"Unscheduled JOB{job_id}." if removed else f"JOB{job_id} has no schedule."
 
     @staticmethod

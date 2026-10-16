@@ -175,7 +175,7 @@ class FindingStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_schedule(self.job.id), schedule)
         self.assertEqual(self.store.list_triggers(), (first_trigger, second_trigger))
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 10)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
             names = {row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type IN ('table','index')")}
             self.assertTrue({"job_findings", "idx_job_findings_job",
