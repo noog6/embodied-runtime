@@ -1900,7 +1900,7 @@ class RobotApplication:
         return True
 
     async def _offer_job_activations(self) -> None:
-        """Retry volatile trigger activations before ordinary daily schedules."""
+        """Retry volatile trigger activations before recurring schedules."""
         if self.jobs is None:
             return
         for job_id, trigger_type in sorted(
@@ -1956,7 +1956,7 @@ class RobotApplication:
         if any(context.job_id == job.id for context in self._job_execution_contexts.values()):
             raise RuntimeError(f"JOB{job.id} already has an active occurrence")
 
-        run = self.jobs.create_run(job.id)
+        run = self.jobs.create_run(job.id, require_idle=True)
         return self._start_job_occurrence(job, run)
 
     def _start_job_occurrence(self, job: Job, run: JobRun) -> CurrentJobRun:
@@ -2046,18 +2046,15 @@ class RobotApplication:
         return binding
 
     async def _offer_scheduled_job(self) -> None:
-        """Start at most one currently-due daily occurrence and its first episode."""
+        """Start at most one latest-due occurrence and its first episode."""
         if self.state is not LifecycleState.RUNNING or self.jobs is None:
             return
         now = self._aware_wall_clock()
         due = []
         for schedule in self.jobs.list_schedules():
-            local_now = now.astimezone(ZoneInfo(schedule.timezone))
-            local_date = local_now.date().isoformat()
-            hour, minute = map(int, schedule.local_time.split(":"))
-            instant = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if local_now >= instant and schedule.last_started_local_date != local_date:
-                due.append((instant.astimezone(UTC), schedule.job_id, schedule, local_date))
+            slot = schedule.due_slot(now)
+            if slot is not None:
+                due.append((slot, schedule.job_id, schedule))
         due.sort(key=lambda item: (item[0], item[1]))
         global_reason = None
         if self.state is not LifecycleState.RUNNING:
@@ -2076,30 +2073,33 @@ class RobotApplication:
             global_reason = "attention_busy"
         if global_reason is not None:
             if due:
-                schedule, local_date = due[0][2:]
-                LOGGER.info("[JOBS] job=JOB%s schedule=daily date=%s activation=deferred reason=%s",
-                            schedule.job_id, local_date, global_reason)
+                slot, _, schedule = due[0]
+                LOGGER.info("[JOBS] job=JOB%s schedule=%s slot=%s activation=deferred reason=%s",
+                            schedule.job_id, schedule.cadence, slot.isoformat(), global_reason)
             return
         selected = None
-        for _, _, schedule, local_date in due:
+        for slot, _, schedule in due:
             job = self.jobs.get_job(schedule.job_id)
             reason = ("schedule_disabled" if not schedule.enabled else
                       "job_missing" if job is None else
-                      "job_disabled" if not job.enabled else None)
+                      "job_disabled" if not job.enabled else
+                      "active_occurrence" if any(context.job_id == job.id
+                          for context in self._job_execution_contexts.values()) else None)
             if reason is not None:
-                LOGGER.info("[JOBS] job=JOB%s schedule=daily date=%s activation=deferred reason=%s",
-                            schedule.job_id, local_date, reason)
+                LOGGER.info("[JOBS] job=JOB%s schedule=%s slot=%s activation=deferred reason=%s",
+                            schedule.job_id, schedule.cadence, slot.isoformat(), reason)
                 continue
-            selected = (schedule, local_date, job)
+            # No await separates fairness checks, atomic durable admission, Task
+            # creation, and attention claim. A blocked Job cannot starve others.
+            run = self.jobs.create_scheduled_run(
+                schedule.job_id, slot, expected_schedule=schedule, clock=self._aware_wall_clock)
+            if run is None:
+                continue
+            selected = (schedule, slot, job, run)
             break
         if selected is None:
             return
-        schedule, local_date, job = selected
-        # No await occurs between the final fairness checks, durable consumption,
-        # Task creation, and attention claim.
-        run = self.jobs.create_scheduled_run(schedule.job_id, local_date)
-        if run is None:
-            return
+        schedule, slot, job, run = selected
         binding = self._start_job_occurrence(job, run)
         context = self._context_for_run(binding.run.id)
         assert context is not None
@@ -2110,11 +2110,11 @@ class RobotApplication:
         finally:
             self._job_execution_context.reset(token)
         if episode is None:
-            LOGGER.info("[JOBS] job=JOB%s run=RUN%s schedule=daily date=%s activation=deferred reason=attention_busy",
-                        job.id, run.id, local_date)
+            LOGGER.info("[JOBS] job=JOB%s run=RUN%s schedule=%s slot=%s activation=deferred reason=attention_busy",
+                        job.id, run.id, schedule.cadence, slot.isoformat())
             return
-        LOGGER.info("[JOBS] job=JOB%s run=RUN%s schedule=daily date=%s activation=started",
-                    job.id, run.id, local_date)
+        LOGGER.info("[JOBS] job=JOB%s run=RUN%s schedule=%s slot=%s activation=started",
+                    job.id, run.id, schedule.cadence, slot.isoformat())
         task = asyncio.create_task(
             self._run_scheduled_initial_work(prepared, episode),
             name="job-scheduled-initial-work",

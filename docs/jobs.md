@@ -368,7 +368,7 @@ instead supersede either a satisfied or unsatisfied event wait; it receives
 semantic continuity but no invented wake event.
 
 Readiness is volatile, belongs to one exact JobRun/Task binding, and is removed
-on terminal state, shutdown, or restart. A daily schedule starts a new
+on terminal state, shutdown, or restart. A recurring schedule starts a new
 occurrence; readiness only gates another episode of that same occurrence.
 Events never discover or create JobRuns, and no selector, payload, subscription,
 or event history is persisted.
@@ -511,42 +511,106 @@ This facility is counters only. It is not a generic key/value store, arbitrary
 checkpoint object, planner state, transcript, event history, or semantic-memory
 write.
 
-## Daily local-time activation
+## Daily and hourly wall-clock activation
 
-An ordinary Job may have one durable daily schedule: an enabled flag, strict
-24-hour `HH:MM` local time, explicit IANA timezone, and the last local calendar
-date whose occurrence was created. `job schedule JOB1 daily 02:00` uses the
-configured runtime timezone; `--timezone America/Toronto` makes it explicit,
-`job schedule JOB1` inspects it, and `job unschedule JOB1` removes only the
-schedule, never the Job or its history.
+Each Job has at most one durable schedule configuration. The console grammar is:
 
-At each lightweight scheduler opportunity the application orders due schedules
-by scheduled instant and Job ID. Schedule-local ineligibility (a disabled
-schedule, missing Job, or disabled Job) is skipped so it cannot starve a later
-eligible schedule. A runtime-wide blocker (current work, unavailable cognition,
-operator activity or waiting, or an occupied autonomous lane) ends that
-opportunity. The first eligible schedule starts, so at most one occurrence is
-activated. A time is due at its exact minute or any later time on that same local
-date, so restart at 08:00
-catches up a missed 02:00 occurrence but never backfills older dates. Disabled
-Jobs and busy Task, goal, Job, operator, attention, or Job-work state defer
-without consuming the date. The store atomically updates
-`last_started_local_date` and creates the pending JobRun in one transaction;
-repeated checks and ordinary restart therefore cannot create another occurrence
-for that Job/date.
+```text
+job schedule JOB<n>
+job schedule JOB<n> daily HH:MM [--timezone ZONE]
+job schedule JOB<n> hourly [--minute M] [--timezone ZONE]
+job unschedule JOB<n>
+```
 
-After Task binding, scheduled activation claims the autonomous attention lane
-and starts exactly one invocation of the existing bounded Job work
-executor. A `continue` result arms the existing Phase 4 heartbeat grant. There
-is no scheduling-specific cognition loop. Shutdown stops the schedule timer
-before cancelling work and dropping volatile Task coordination. A durable
-running occurrence is not adopted after restart. Cross-runtime execution
-claims and multi-body eligibility remain future work.
+Daily times use strict 24-hour `HH:MM`. Hourly minutes are integers from 0 through
+59 and default to 0. Omitted timezone uses the application's configured timezone;
+explicit zones must be valid IANA names, such as `America/Toronto`. Duplicate,
+conflicting, unknown, and incomplete arguments are rejected. Inspection shows
+cadence, local time or minute, timezone, enablement, and durable activation markers.
+A successful setting acknowledges a persisted configuration; persistence failures
+report failure. Administration and eligibility polling invoke no cognition.
 
-The timer offers an immediate check at startup before its first poll sleep.
-Ordinary check exceptions are logged and followed by the normal sleep before a
-later opportunity; they neither kill the timer nor retry Job work. Cancellation
-still stops the timer promptly.
+Hourly means each civil hour at the configured minute in that timezone: `:45`
+means 08:45, 09:45, and so on, irrespective of when the previous work finished.
+It is not an elapsed 60-minute interval. Each hourly slot is identified by its
+UTC instant, so repeated local times cannot collide. Non-whole-hour zones, such
+as `Asia/Kathmandu`, still use the configured **local** minute.
+
+| Situation | Hourly behavior |
+| --- | --- |
+| Startup/restart | Consider only the latest due slot, including the previous hour if the current hour's minute is still ahead. An unconsumed slot may start immediately. |
+| Missed polls or downtime | Coalesce to the latest due slot; never replay a backlog. |
+| Capacity, operator, unrelated Task/goal, or attention contention | Defer without consuming. Retry eligibility while that slot remains latest; replace it with the newer slot when one becomes due. |
+| Same Job already live | Defer while its pending/running occurrence exists, including paused or parked work. A parked occurrence frees work capacity for other Jobs, but remains live for its own Job. |
+| Forward wall-clock change | Consider the latest due slot at the new time, skipping intervening hours. |
+| Backward wall-clock change | Admit only instants later than the durable hourly high-water mark. Previously consumed or older instants cannot replay, even after restart. |
+| Failure, stop, interruption | The admitted slot remains consumed. Do not automatically retry that occurrence; a later slot can create a new occurrence after the Job is no longer live. |
+| Toronto fall-back | Both instances of a repeated hour are distinct instants and may each run once. If both were missed, only the latest due one is considered. |
+| Toronto spring-forward | Nonexistent local times create no slot. The last real due slot remains current until the next real slot becomes due. |
+
+Daily behavior remains calendar based: a time is due at its exact minute or later
+on that local date. A restart at 08:00 can catch up a missed 02:00 occurrence,
+but never backfills older dates. `last_started_local_date` permits one scheduled
+occurrence on that local date. Daily DST behavior is unchanged: a repeated hour
+runs once per local date; a nonexistent daily time becomes eligible after the
+clock passes the gap. Daily deduplication retains the existing last-date policy,
+rather than the hourly monotonic instant policy.
+
+Setting a schedule replaces the Job's previous configuration, including cadence,
+time/minute, and timezone; it never adds another schedule. The new configuration
+is eligible at the next poll. Replacement does not terminate existing work.
+Daily date markers and hourly instant markers survive replacement and cadence
+changes. For example, daily-to-hourly may admit the latest hourly slot if no
+hourly high-water mark prevents it; hourly-to-daily still honors a previously
+consumed daily date. Changing an hourly minute backwards cannot admit a slot
+at or before its hourly high-water mark. Removing a schedule prevents future
+scheduled admission and preserves Job history and live work. The hourly
+high-water mark survives removal/recreation as well, preventing same-slot replay;
+daily removal retains its existing behavior of removing the daily date marker.
+
+At each lightweight opportunity, the application orders latest due slots by
+scheduled instant and Job ID and admits at most one occurrence. Disabled Jobs or
+schedules and Jobs with live occurrences are skipped, allowing an independent
+Job to proceed. Runtime-wide blockers defer that opportunity. The store uses an
+immediate SQLite transaction to revalidate the selected schedule snapshot, Job
+enablement, slot eligibility, and absence of pending/running runs, then consumes
+the marker and creates the pending JobRun atomically. Update, insert, and commit
+failure roll back both. Scheduled, trigger, and explicit runtime admissions make
+the same-Job non-overlap decision under the store's write lock. Existing Task,
+goal, resource, lifecycle, capacity, and operator ownership checks still apply.
+
+Scheduled work binds an ordinary Task, claims the existing autonomous attention
+lane, and enters the existing bounded Job executor. Recurring schedules create
+**new occurrences**; continuation/readiness only advances an **existing
+occurrence**. A `continue` outcome uses the existing continuation policy and does
+not establish a recurring schedule. Scheduler polling frequency only controls
+when eligibility is checked; it changes neither cadence nor work budgets and
+does not itself invoke cognition. There is no new execution loop or cognition
+tool, general cron grammar, multiple schedule list, or arbitrary interval support.
+
+The timer checks immediately at startup before its first poll sleep. Check
+exceptions are logged and followed by the normal sleep. Shutdown stops the timer
+before cancelling work. Startup reconciliation interrupts orphaned pending/running
+runs before activation; it preserves both durable schedule markers and never
+adopts, resumes, or retries the interrupted occurrence. Cross-runtime execution
+leases and multi-body eligibility remain future work: the SQLite admission lock
+does not make concurrent application startup/reconciliation safe against another
+live runtime using the same store.
+
+Post-merge operator examples (configuration only; these have not been run against
+a deployment):
+
+```text
+job schedule JOB16 hourly --minute 45 --timezone America/Toronto
+job schedule JOB16
+job schedule JOB16 daily 12:45 --timezone America/Toronto
+job unschedule JOB16
+```
+
+These examples do not change a Job's description, responsibilities, completion
+criteria, acquisition/effect budgets, cognition, triggers, or carry-forward policy.
+JOB4 and the nightly reviewer are outside this experiment; no deployed Job
+configuration is changed by this implementation or its migration.
 
 While a Task is paused, its JobRun remains `running`. Existing Task behavior
 releases Task-owned resources and suspends its ActiveGoal; resume creates a
@@ -618,9 +682,10 @@ the old occurrence. For this crash-reconciliation case, `finished_at` is the
 time the new process detected and durably reconciled the orphan, not an inferred
 crash time. Startup fails closed if the transaction cannot complete.
 
-The reconciliation preserves Job definitions, schedules, and
-`last_started_local_date`. Consequently, an interrupted scheduled occurrence is
-not recreated on the same local date; the next eligible date can start normally.
+The reconciliation preserves Job definitions, schedules, daily
+`last_started_local_date`, and hourly `last_started_slot`. Consequently, an
+interrupted scheduled occurrence is not recreated in its consumed daily date or
+hourly slot; a later eligible slot can start normally.
 Durable Workspace artifacts published before interruption survive independently,
 but their existence does not turn the interrupted JobRun into completed work.
 Automatic JobRun recovery is not implemented.
@@ -719,11 +784,17 @@ authority; a new JobRun performs bounded cognition; and a later event may wake
 that same run. Interrupted runs are never resurrected. Startup attention creates
 a new occurrence when the condition remains unresolved.
 
-The Jobs database schema version is 8. Opening a version-4 database transactionally
+The Jobs database schema version is 11. Opening a version-4 database transactionally
 adds the trigger table; opening version 5 expands its bounded event-type constraint.
 Opening version 7 removes the former globally unique enabled-event index without
 rewriting or deleting trigger rows. All migrations preserve Jobs, JobRuns,
-schedules, result reports, and trigger rows.
+schedules, result reports, and trigger rows. Version 11 extends the single
+schedule configuration with daily/hourly cadence and hourly minute and adds a
+per-Job hourly activation high-water mark. Existing schedules migrate as daily,
+with their date markers intact. IDs, results, Findings, triggers, and focus are
+preserved; migration performs no activation. Unchanged daily schedules keep
+their legacy focus identity. Hourly cadence, minute, timezone, and schedule
+enablement participate in definition identity; activation markers do not.
 
 ## Session execution contexts
 

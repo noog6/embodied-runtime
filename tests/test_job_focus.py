@@ -677,4 +677,4 @@ class JobFocusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_triggers(), (trigger,))
         self.assertEqual(self.store.list_findings(), (finding,))
         self.assertIsNone(self.store.get_focus(job.id))
-        self.assertEqual(self.store._connection.execute("PRAGMA user_version").fetchone()[0], 10)
+        self.assertEqual(self.store._connection.execute("PRAGMA user_version").fetchone()[0], 11)

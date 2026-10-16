@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sqlite3
 import unicodedata
+from zoneinfo import ZoneInfo
 
 from .focus import JobFocus, JobFocusProposal
 from .model import (
@@ -18,7 +19,19 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
+_SCHEDULES_SCHEMA = """CREATE TABLE job_schedules (
+       job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
+       enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+       local_time TEXT, timezone TEXT NOT NULL,
+       last_started_local_date TEXT,
+       cadence TEXT NOT NULL DEFAULT 'daily' CHECK(cadence IN ('daily','hourly')),
+       minute INTEGER CHECK(minute BETWEEN 0 AND 59),
+       CHECK((cadence='daily' AND local_time IS NOT NULL AND minute IS NULL) OR
+             (cadence='hourly' AND local_time IS NULL AND minute IS NOT NULL)))"""
+_HOURLY_ACTIVATION_SCHEMA = """CREATE TABLE IF NOT EXISTS job_hourly_activation (
+    job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
+    last_started_slot TEXT NOT NULL)"""
 _FOCUS_SCHEMA = """CREATE TABLE job_focus (
     job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
     question TEXT NOT NULL CHECK(length(question) BETWEEN 1 AND 500),
@@ -58,11 +71,7 @@ _SCHEMA = (
              (target_kind IS NOT NULL AND target_identifier IS NOT NULL)))""",
     _JOB_RUNS_SCHEMA,
     "CREATE INDEX idx_job_runs_job ON job_runs(job_id, id)",
-    """CREATE TABLE job_schedules (
-       job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
-       enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
-       local_time TEXT NOT NULL, timezone TEXT NOT NULL,
-       last_started_local_date TEXT)""",
+    _SCHEDULES_SCHEMA,
     """CREATE TABLE IF NOT EXISTS job_triggers (
        job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
        event_type TEXT NOT NULL CHECK(event_type IN ('power_attention_required',
@@ -72,6 +81,7 @@ _SCHEMA = (
     _FINDINGS_SCHEMA,
     *_FINDINGS_INDEXES,
     _FOCUS_SCHEMA,
+    _HOURLY_ACTIVATION_SCHEMA,
 )
 
 
@@ -95,6 +105,23 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
+        if version == 10:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute("ALTER TABLE job_schedules RENAME TO job_schedules_v10")
+                self._connection.execute(_SCHEDULES_SCHEMA)
+                self._connection.execute("""INSERT INTO job_schedules
+                    (job_id,enabled,local_time,timezone,last_started_local_date)
+                    SELECT job_id,enabled,local_time,timezone,last_started_local_date
+                    FROM job_schedules_v10""")
+                self._connection.execute("DROP TABLE job_schedules_v10")
+                self._connection.execute(_HOURLY_ACTIVATION_SCHEMA)
+                self._connection.execute("PRAGMA user_version = 11")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+            return
         if version == 9:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -106,6 +133,7 @@ class SQLiteJobStore:
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version == 8:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -272,8 +300,13 @@ class SQLiteJobStore:
             raise KeyError(f"unknown job: {job_id}")
         return replacement
 
-    def create_run(self, job_id: int) -> JobRun:
+    def create_run(self, job_id: int, *, require_idle: bool = False) -> JobRun:
         _id(job_id, "job")
+        if require_idle:
+            run = self.create_triggered_run(job_id)
+            if run is None:
+                raise RuntimeError(f"JOB{job_id} is disabled or already has an active occurrence")
+            return run
         now = self._now()
         try:
             cursor = self._connection.execute(
@@ -284,29 +317,33 @@ class SQLiteJobStore:
             raise ValueError(f"job does not exist: {job_id}") from error
         return JobRun(cursor.lastrowid, job_id, JobRunStatus.PENDING, now)
 
-    def set_schedule(self, job_id: int, local_time: str, timezone: str, *,
-                     enabled: bool = True) -> JobSchedule:
-        schedule = JobSchedule(job_id, enabled, local_time, timezone)
+    def set_schedule(self, job_id: int, local_time: str | None, timezone: str, *,
+                     enabled: bool = True, cadence: str = "daily",
+                     minute: int | None = None) -> JobSchedule:
+        schedule = JobSchedule(job_id, enabled, local_time, timezone,
+                               cadence=cadence, minute=minute)
         if self.get_job(job_id) is None:
             raise KeyError(f"unknown job: {job_id}")
         self._connection.execute(
-            """INSERT INTO job_schedules(job_id, enabled, local_time, timezone)
-               VALUES (?, ?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET
+            """INSERT INTO job_schedules(job_id, enabled, local_time, timezone,cadence,minute)
+               VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET
                enabled=excluded.enabled, local_time=excluded.local_time,
-               timezone=excluded.timezone""",
-            (job_id, int(enabled), local_time, timezone),
+               timezone=excluded.timezone,cadence=excluded.cadence,minute=excluded.minute""",
+            (job_id, int(enabled), local_time, timezone, cadence, schedule.minute),
         )
         return self.get_schedule(job_id)  # type: ignore[return-value]
 
     def get_schedule(self, job_id: int) -> JobSchedule | None:
         _id(job_id, "job")
         row = self._connection.execute(
-            "SELECT * FROM job_schedules WHERE job_id=?", (job_id,)
+            """SELECT s.*, a.last_started_slot FROM job_schedules s
+               LEFT JOIN job_hourly_activation a ON a.job_id=s.job_id WHERE s.job_id=?""", (job_id,)
         ).fetchone()
         return _schedule(row) if row is not None else None
 
     def list_schedules(self) -> tuple[JobSchedule, ...]:
-        rows = self._connection.execute("SELECT * FROM job_schedules ORDER BY job_id").fetchall()
+        rows = self._connection.execute("""SELECT s.*, a.last_started_slot FROM job_schedules s
+            LEFT JOIN job_hourly_activation a ON a.job_id=s.job_id ORDER BY s.job_id""").fetchall()
         return tuple(_schedule(row) for row in rows)
 
     def remove_schedule(self, job_id: int) -> bool:
@@ -356,6 +393,10 @@ class SQLiteJobStore:
         now = self._now()
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            job = self.get_job(job_id)
+            if job is None or not job.enabled:
+                self._connection.rollback()
+                return None
             active = self._connection.execute(
                 "SELECT id FROM job_runs WHERE job_id=? AND status IN ('pending','running') LIMIT 1",
                 (job_id,)).fetchone()
@@ -371,27 +412,61 @@ class SQLiteJobStore:
             self._connection.rollback()
             raise
 
-    def create_scheduled_run(self, job_id: int, local_date: str) -> JobRun | None:
-        """Atomically consume today's schedule marker and create its occurrence."""
-        probe = JobSchedule(job_id, True, "00:00", "UTC", local_date)
-        now = self._now()
+    def create_scheduled_run(self, job_id: int, slot: str | datetime, *,
+                             expected_schedule: JobSchedule | None = None,
+                             clock: Callable[[], datetime] | None = None) -> JobRun | None:
+        """Revalidate, consume a slot, and create a nonoverlapping run atomically.
+
+        Date strings preserve the daily store API. Runtime admission supplies an
+        instant, its schedule snapshot, and the application clock for revalidation
+        after acquiring the write lock, which may have crossed a slot boundary.
+        """
+        _id(job_id, "job")
+        created_at = self._now()
         self._connection.execute("BEGIN IMMEDIATE")
         try:
-            cursor = self._connection.execute(
-                """UPDATE job_schedules SET last_started_local_date=?
-                   WHERE job_id=? AND enabled=1 AND
-                   (last_started_local_date IS NULL OR last_started_local_date<>?)""",
-                (probe.last_started_local_date, job_id, probe.last_started_local_date),
-            )
-            if cursor.rowcount != 1:
+            schedule = self.get_schedule(job_id)
+            job = self.get_job(job_id)
+            active = self._connection.execute(
+                "SELECT id FROM job_runs WHERE job_id=? AND status IN ('pending','running') LIMIT 1",
+                (job_id,)).fetchone()
+            if (schedule is None or not schedule.enabled or job is None or not job.enabled
+                    or active is not None
+                    or (expected_schedule is not None and schedule != expected_schedule)):
                 self._connection.rollback()
                 return None
+            if isinstance(slot, str):
+                JobSchedule(job_id, True, "00:00", "UTC", slot)
+                if schedule.cadence != "daily" or schedule.last_started_local_date == slot:
+                    self._connection.rollback()
+                    return None
+                marker, value = "last_started_local_date", slot
+            else:
+                if slot.tzinfo is None or slot.utcoffset() is None:
+                    raise ValueError("scheduled slot must be timezone-aware")
+                slot = slot.astimezone(UTC)
+                if schedule.due_slot((clock or self._now)()) != slot:
+                    self._connection.rollback()
+                    return None
+                if schedule.cadence == "hourly":
+                    marker, value = "last_started_slot", _format(slot)
+                else:
+                    marker, value = "last_started_local_date", slot.astimezone(
+                        ZoneInfo(schedule.timezone)).date().isoformat()
+            if marker == "last_started_local_date":
+                self._connection.execute(
+                    "UPDATE job_schedules SET last_started_local_date=? WHERE job_id=?", (value, job_id))
             cursor = self._connection.execute(
                 "INSERT INTO job_runs(job_id,status,created_at) VALUES(?,'pending',?)",
-                (job_id, _format(now)),
+                (job_id, _format(created_at)),
             )
+            run = JobRun(cursor.lastrowid, job_id, JobRunStatus.PENDING, created_at)
+            if marker == "last_started_slot":
+                self._connection.execute("""INSERT INTO job_hourly_activation(job_id,last_started_slot)
+                    VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET last_started_slot=excluded.last_started_slot""",
+                    (job_id, value))
             self._connection.commit()
-            return JobRun(cursor.lastrowid, job_id, JobRunStatus.PENDING, now)
+            return run
         except BaseException:
             self._connection.rollback()
             raise
@@ -514,8 +589,12 @@ class SQLiteJobStore:
                          for row in self._connection.execute(
                              "SELECT event_type,enabled FROM job_triggers WHERE job_id=? ORDER BY event_type",
                              (job_id,))],
+            # Keep the legacy daily encoding byte-for-byte compatible. Durable
+            # admission markers do not change the informational focus definition.
             "schedule": None if schedule is None else
-                        (schedule.enabled, schedule.local_time, schedule.timezone),
+                        ((schedule.enabled, schedule.local_time, schedule.timezone)
+                         if schedule.cadence == "daily" else
+                         (schedule.enabled, "hourly", schedule.minute, schedule.timezone)),
         }
         return hashlib.sha256(json.dumps(definition, sort_keys=True).encode()).hexdigest()
 
@@ -737,4 +816,6 @@ def _finding(row: sqlite3.Row) -> Finding:
 
 def _schedule(row: sqlite3.Row) -> JobSchedule:
     return JobSchedule(row["job_id"], bool(row["enabled"]), row["local_time"],
-                       row["timezone"], row["last_started_local_date"])
+                       row["timezone"], row["last_started_local_date"],
+                       row["cadence"], row["minute"],
+                       _parse(row["last_started_slot"]) if row["last_started_slot"] else None)

@@ -74,6 +74,13 @@ The supported commands are exactly:
   responsibility description for future occurrences; it preserves the Job's
   identity, history, schedule, and Workspace, and is rejected while that same
   Job is currently executing;
+- `job schedule JOB<n>` to inspect the single durable schedule;
+  `job schedule JOB<n> daily HH:MM [--timezone ZONE]` or
+  `job schedule JOB<n> hourly [--minute M] [--timezone ZONE]` to replace it;
+  `job unschedule JOB<n>` to remove it. Hourly minute defaults to 0 and must be
+  an integer from 0 through 59; omitted timezone uses the application timezone.
+  See [wall-clock scheduling](jobs.md#daily-and-hourly-wall-clock-activation) for
+  DST, contention, restart, and durable deduplication semantics;
 - `job trigger JOB<n> runtime_ready` to durably activate an enabled Job once
   when each future runtime instance becomes ready; `job trigger JOB<n>` reports
   configured triggers and `job untrigger JOB<n> runtime_ready` removes it;
