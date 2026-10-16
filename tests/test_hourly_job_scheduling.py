@@ -68,6 +68,22 @@ class HourlyScheduleStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(self.schedule(), last_started_slot=datetime(2026, 1, 1))
 
+    def test_two_hour_rollback_selects_latest_instant_across_later_local_labels(self):
+        schedule = JobSchedule(1, True, None, "Antarctica/Troll", cadence="hourly", minute=45)
+        for now, expected in (
+            ("2026-10-25T00:44:59Z", "2026-10-24T23:45:00Z"),
+            ("2026-10-25T00:45:00Z", "2026-10-25T00:45:00Z"),
+            ("2026-10-25T00:59:59Z", "2026-10-25T00:45:00Z"),
+            ("2026-10-25T01:00:00Z", "2026-10-25T00:45:00Z"),
+            ("2026-10-25T01:15:00Z", "2026-10-25T00:45:00Z"),
+            ("2026-10-25T01:44:59Z", "2026-10-25T00:45:00Z"),
+            ("2026-10-25T01:45:00Z", "2026-10-25T01:45:00Z"),
+            ("2026-10-25T02:44:59Z", "2026-10-25T01:45:00Z"),
+            ("2026-10-25T02:45:00Z", "2026-10-25T02:45:00Z"),
+        ):
+            with self.subTest(now=now):
+                self.assertEqual(schedule.due_slot(instant(now)), instant(expected))
+
     def test_atomic_admission_revalidates_schedule_job_and_live_runs(self):
         original = self.schedule(minute=45)
         self.schedule(minute=30)
@@ -537,6 +553,37 @@ class HourlyRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.poll(app)
             self.assertEqual(len(self.store.list_runs(job.id)), count)
             self.assertEqual(self.store.get_schedule(job.id).last_started_slot, instant(marker))
+
+    async def test_two_hour_rollback_admits_latest_slot_on_startup(self):
+        self.clock.value = instant("2026-10-25T01:15:00Z")
+        job = self.hourly(timezone="Antarctica/Troll")
+        app = await self.app()
+        await self.poll(app)
+        self.assertEqual(self.store.get_schedule(job.id).last_started_slot,
+                         instant("2026-10-25T00:45:00Z"))
+        run, = self.store.list_runs(job.id)
+        self.assertIs(run.status, JobRunStatus.COMPLETED)
+        await self.poll(app)
+        self.assertEqual(len(self.store.list_runs(job.id)), 1)
+
+    async def test_two_hour_rollback_consumed_older_slot_does_not_hide_latest(self):
+        app = await self.app()
+        job = self.hourly(timezone="Antarctica/Troll")
+        for now, expected, count in (
+            ("2026-10-24T23:45:00Z", "2026-10-24T23:45:00Z", 1),
+            ("2026-10-25T01:15:00Z", "2026-10-25T00:45:00Z", 2),
+            ("2026-10-25T01:44:59Z", "2026-10-25T00:45:00Z", 2),
+            ("2026-10-25T01:45:00Z", "2026-10-25T01:45:00Z", 3),
+        ):
+            self.clock.value = instant(now)
+            await self.poll(app)
+            self.assertEqual(len(self.store.list_runs(job.id)), count)
+            self.assertEqual(self.store.get_schedule(job.id).last_started_slot, instant(expected))
+        await app.stop()
+        self.store = SQLiteJobStore(self.path, clock=self.clock)
+        app = await self.app()
+        await self.poll(app)
+        self.assertEqual(len(self.store.list_runs(job.id)), 3)
 
     async def test_non_whole_hour_timezone_uses_local_minute(self):
         app = await self.app()

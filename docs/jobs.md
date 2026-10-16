@@ -536,6 +536,11 @@ It is not an elapsed 60-minute interval. Each hourly slot is identified by its
 UTC instant, so repeated local times cannot collide. Non-whole-hour zones, such
 as `Asia/Kathmandu`, still use the configured **local** minute.
 
+Rollbacks can repeat more than one local hour, as in `Antarctica/Troll`. Slot
+selection includes later local clock labels that already occurred before the
+rollback and chooses the latest due UTC instant, even if the current local
+clock reads earlier than that label.
+
 | Situation | Hourly behavior |
 | --- | --- |
 | Startup/restart | Consider only the latest due slot, including the previous hour if the current hour's minute is still ahead. An unconsumed slot may start immediately. |

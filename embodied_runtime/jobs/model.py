@@ -101,11 +101,13 @@ class JobSchedule:
                 return None
             return slot.astimezone(UTC)
 
-        # Enumerate civil hours and both folds, validating each by round trip.
-        # Two days bound even IANA date-line discontinuities; no backlog is kept.
+        # Enumerate civil hours on both sides and both folds, validating by round
+        # trip. A rollback can put an already-passed instant at a later civil
+        # label than local now. Two days cover even date-line discontinuities;
+        # the UTC comparison below excludes instants that are actually future.
         hour = local.replace(tzinfo=None, minute=self.minute, second=0, microsecond=0)
         candidates = []
-        for offset in range(49):
+        for offset in range(-48, 49):
             civil = hour - timedelta(hours=offset)
             for fold in (0, 1):
                 slot = civil.replace(tzinfo=zone, fold=fold).astimezone(UTC)
