@@ -1,0 +1,30 @@
+{
+  "purpose": "Scripted authored accounts exercising real Job and Workspace persistence; not a model-quality benchmark.",
+  "source_reports": {
+    "A1": "This camera review could not establish the stored image capture time. Storage time alone does not establish image age.",
+    "B1": "My timestamp review distinguishes captured_at from stored_at; a storage timestamp is not capture provenance. This repeats a methodological distinction, not an independent camera measurement.",
+    "A2": "This later camera review retained captured_at=2026-10-17T10:00:00Z for a new frame. The earlier frame's capture time remains unknown. This report is authored analysis, not a live sensor observation."
+  },
+  "first": {
+    "kind": "first",
+    "account": "The camera Job reports missing capture provenance for its earlier frame; I cannot infer its age from storage time.",
+    "note": "I have one useful unresolved question about capture provenance.",
+    "question": "Can a later camera review retain a capture timestamp without retroactively dating the earlier frame?"
+  },
+  "connection": {
+    "kind": "connection",
+    "account": "The camera and timestamp reviews connect on a limitation: stored_at does not date a capture. Their repeated distinction is not independent corroboration of any frame's age.",
+    "note": "I have narrowed the earlier question using the timestamp review.",
+    "question": "Can a later camera review identify captured_at for its new frame while preserving uncertainty about the earlier frame?"
+  },
+  "revision": {
+    "kind": "revision",
+    "account": "The later camera report supplies a capture timestamp for its new frame. I can retire the narrow question about whether a later report could retain provenance; the old frame's age remains unknown. I have no independent current observation.",
+    "note": "I revised the earlier account rather than treating the earlier uncertainty as a current finding.",
+    "retirement": "The later camera report answers Q1 for its new frame only; it does not resolve the earlier frame's capture time."
+  },
+  "quiet": {
+    "kind": "quiet",
+    "note": "No meaningful change in the one source I revisited; its stable reference was already incorporated. No useful follow-up emerged."
+  }
+}
