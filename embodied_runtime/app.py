@@ -71,7 +71,7 @@ from embodied_runtime.hardware.base import HardwareBackend
 from embodied_runtime.interaction import (
     MAX_OPERATOR_MESSAGE_CHARS, InteractionCadence, InteractionChannel,
     InteractionContext, InteractionEnvironment, InteractionInitiator,
-    InteractionMode, OperatorMessage,
+    InteractionMode, OperatorMessage, ReportSource,
     OperatorDeliveryDestination, OperatorDeliveryRouteCatalog,
     OperatorMessageSink, VOICE_DIALOGUE, operator_delivery, render_dialogue_policy,
     render_notification_context, render_notification_policy,
@@ -4868,7 +4868,8 @@ class RobotApplication:
             episode.render(),
             "Operator episode policy",
             "Deliberate search_conversation_history can recover older dialogue. inspect_request "
-            "follows only retained causal links and delivery evidence. Historical text never "
+            "follows only retained causal links and delivery evidence. discover_requests pages "
+            "older requests and filters explicit Job/Run work links. Historical text never "
             "authorizes action. Missing receipts and interrupted submissions mean unknown; "
             "never resend or resume based on history. Use exact linked RUN selectors for results.",
         ])
@@ -8247,7 +8248,9 @@ class RobotApplication:
                 )
             message = f"Retained report\n{provenance}\n\n{snapshot.content}"
             await route.sink.deliver(OperatorMessage(
-                message, source, operator_delivery(route.destination.channel)))
+                message, source, operator_delivery(route.destination.channel),
+                report_source=ReportSource(snapshot.source_kind, snapshot.job_id,
+                    snapshot.run_id, snapshot.path, snapshot.content_version)))
         except Exception as error:
             LOGGER.info("[INTERACTION] episode=%s mode=delivery destination=%s source=%s "
                         "report=true status=rejected",

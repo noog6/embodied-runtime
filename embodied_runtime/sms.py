@@ -487,7 +487,9 @@ class TwilioSmsService(OperatorMessageSink):
             raise ValueError(
                 f"SMS operator message must be at most {MAX_SMS_BODY_CHARS} characters"
             )
-        attempt = delivery_attempt(channel=self.channel, kind='message')
+        attempt = delivery_attempt(channel=self.channel,
+            kind='report' if message.report_source is not None else 'message',
+            report_source=message.report_source)
         try:
             receipt = await asyncio.to_thread(
                 self._gateway.send, from_=self.settings.twilio_number,

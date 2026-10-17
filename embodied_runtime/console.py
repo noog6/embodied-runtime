@@ -83,6 +83,8 @@ class RuntimeConsole:
         try:
             report, done = self._execute(command)
             self._application.continuity.prepared(evidence)
+            if self._application.conversation_history is not None:
+                report += f"\nRequest: {evidence.id}"
             return AuthoredResponse(report, evidence), done
         finally:
             CURRENT_REQUEST.reset(token)
@@ -184,6 +186,8 @@ class RuntimeConsole:
         try:
             report, done = await self._execute_async(command)
             self._application.continuity.prepared(evidence)
+            if self._application.conversation_history is not None:
+                report += f"\nRequest: {evidence.id}"
             return AuthoredResponse(report, evidence), done
         finally:
             CURRENT_REQUEST.reset(token)

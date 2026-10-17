@@ -230,6 +230,17 @@ CONSOLE_ADMINISTRATIVE = InteractionContext(
 
 
 @dataclass(frozen=True, slots=True)
+class ReportSource:
+    """Runtime-captured identity of the exact retained report being submitted."""
+
+    source_kind: str
+    job_id: int
+    run_id: int | None = None
+    path: str | None = None
+    content_version: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OperatorMessage:
     """One bounded, runtime-sourced plain-text message for the operator."""
 
@@ -237,6 +248,7 @@ class OperatorMessage:
     source: str
     interaction: InteractionContext
     delivery_attempt: object | None = None
+    report_source: ReportSource | None = None
 
 
 class OperatorMessageSink(ABC):
@@ -350,7 +362,8 @@ class ConsoleOperatorMessageChannel(OperatorMessageSink):
         # Import locally: continuity uses the provider-neutral channel model.
         from embodied_runtime.conversation_history.continuity import delivery_attempt
         attempt = delivery_attempt(channel=self.channel,
-            kind='notification' if notification else 'message')
+            kind='report' if message.report_source is not None else (
+                'notification' if notification else 'message'), report_source=message.report_source)
         queued = replace(message, delivery_attempt=attempt) if attempt.evidence is not None else message
         await self._messages.put(queued)
         attempt.finish('queued')

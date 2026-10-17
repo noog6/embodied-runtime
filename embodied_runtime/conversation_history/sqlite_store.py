@@ -15,7 +15,7 @@ from .model import (
     bounded_text,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_RETAINED_RECORDS = 2000
 MAX_QUERY_CHARS = 200
 MAX_SEARCH_RESULTS = 5
@@ -43,7 +43,7 @@ class SQLiteConversationHistoryStore:
         tables = self._connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
-        if version not in (0, 1, SCHEMA_VERSION):
+        if version not in (0, 1, 2, SCHEMA_VERSION):
             raise ValueError(f"unsupported conversation schema version {version}")
         if version == 0 and tables:
             raise ValueError("unversioned non-empty conversation database")
@@ -89,8 +89,12 @@ class SQLiteConversationHistoryStore:
                 request_id TEXT NOT NULL REFERENCES operator_requests(id) ON DELETE CASCADE,
                 attempted_at TEXT NOT NULL, channel TEXT NOT NULL, kind TEXT NOT NULL,
                 status TEXT NOT NULL, outcome_recorded_at TEXT, provider_reference TEXT, failure TEXT,
-                output_variant TEXT NOT NULL
+                output_variant TEXT NOT NULL, report_source TEXT
             )""")
+            if version == 2:
+                self._connection.execute("ALTER TABLE delivery_attempts ADD COLUMN report_source TEXT")
+            self._connection.execute("CREATE INDEX IF NOT EXISTS request_work_lookup "
+                "ON request_work(job_id, run_id, request_id)")
             self._connection.execute("CREATE INDEX IF NOT EXISTS delivery_request ON delivery_attempts(request_id)")
             # Bound a legacy archive before building its search index on small hardware.
             self._cleanup()
@@ -104,7 +108,7 @@ class SQLiteConversationHistoryStore:
                 AFTER DELETE ON conversation_turns BEGIN
                 INSERT INTO conversation_search(conversation_search, rowid, operator_text, assistant_text)
                 VALUES ('delete', old.id, old.operator_text, old.assistant_text); END""")
-            if version < SCHEMA_VERSION:
+            if version < 2:
                 self._connection.execute("INSERT INTO conversation_search(conversation_search) VALUES ('rebuild')")
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -198,7 +202,11 @@ class SQLiteConversationHistoryStore:
 
     def begin_delivery(self, attempt_id: str, request_id: str, attempted_at: datetime,
                        channel: InteractionChannel, kind: str,
-                       output_variant: str = 'authored_output') -> None:
+                       output_variant: str = 'authored_output',
+                       report_source: dict | None = None) -> None:
+        source_json = _validated_report_source(report_source)
+        if report_source is not None and kind != 'report':
+            raise ValueError('report source requires report delivery')
         if output_variant not in ('authored_output', 'sms_length_explanation'):
             raise ValueError("invalid output variant")
         if kind not in ('reply', 'message', 'report', 'image', 'notification'):
@@ -211,9 +219,9 @@ class SQLiteConversationHistoryStore:
                 raise ValueError("request delivery bound reached")
             self._connection.execute(
                 "INSERT INTO delivery_attempts VALUES "
-                "(?, ?, ?, ?, ?, 'submission_unconfirmed', NULL, NULL, NULL, ?)",
+                "(?, ?, ?, ?, ?, 'submission_unconfirmed', NULL, NULL, NULL, ?, ?)",
                 (attempt_id, request_id, _aware_utc(attempted_at).isoformat(), channel.value,
-                 kind, output_variant))
+                 kind, output_variant, source_json))
 
     def finish_delivery(self, attempt_id: str, outcome_recorded_at: datetime, status: str,
                         provider_reference: str | None, failure: str | None) -> None:
@@ -231,6 +239,46 @@ class SQLiteConversationHistoryStore:
                 "provider_reference=?, failure=? WHERE id=? "
                 "AND (outcome_recorded_at IS NULL OR status='queued')",
                 (status, _aware_utc(outcome_recorded_at).isoformat(), reference, failure, attempt_id))
+
+    def discover_requests(self, *, work_selector: str | None = None,
+                          before: str | None = None, limit: int = 5) -> dict:
+        """Page inserted request metadata, never inferred prose or Job ownership."""
+        if type(limit) is not int or not 1 <= limit <= 5:
+            raise ValueError('invalid discovery limit')
+        predicates, values = [], []
+        if work_selector is not None:
+            if not isinstance(work_selector, str) or len(work_selector) > 24:
+                raise ValueError('invalid work selector')
+            match = re.fullmatch(r'(JOB|RUN)([1-9][0-9]{0,18})', work_selector)
+            if match is None or int(match[2]) > 2**63 - 1:
+                raise ValueError('invalid work selector')
+            column = 'job_id' if match[1] == 'JOB' else 'run_id'
+            predicates.append('EXISTS (SELECT 1 FROM request_work w '
+                f'WHERE w.request_id=r.id AND w.{column}=?)')
+            values.append(int(match[2]))
+        if before is not None:
+            if not isinstance(before, str) or not re.fullmatch(r'REQ[0-9a-f]{32}', before):
+                raise ValueError('invalid request cursor')
+            cursor = self._connection.execute(
+                'SELECT rowid FROM operator_requests WHERE id=?', (before,)).fetchone()
+            if cursor is None:
+                return {'status': 'unavailable', 'reason': 'cursor_expired'}
+            predicates.append('r.rowid < ?')
+            values.append(cursor[0])
+        where = ' WHERE ' + ' AND '.join(predicates) if predicates else ''
+        rows = self._connection.execute(
+            'SELECT r.* FROM operator_requests r' + where + ' ORDER BY r.rowid DESC LIMIT ?',
+            (*values, limit + 1)).fetchall()
+        requests = []
+        for row in rows[:limit]:
+            item = dict(row)
+            item['work'] = [dict(link) for link in self._connection.execute(
+                'SELECT kind, job_id, run_id FROM request_work WHERE request_id=? '
+                'ORDER BY job_id, run_id LIMIT ?', (row['id'], MAX_REQUEST_LINKS))]
+            requests.append(item)
+        return {'status': 'ok', 'requests': requests,
+                'ordering': 'request insertion DESC',
+                'next_before': rows[limit - 1]['id'] if len(rows) > limit else None}
 
     def inspect_request(self, selector: str) -> dict:
         if not isinstance(selector, str) or len(selector) > 40:
@@ -264,7 +312,7 @@ class SQLiteConversationHistoryStore:
             "work": [dict(r) for r in self._connection.execute(
                 "SELECT kind, job_id, run_id FROM request_work WHERE request_id=? "
                 "ORDER BY job_id, run_id LIMIT ?", (selector, MAX_REQUEST_LINKS))],
-            "delivery": [dict(r) for r in self._connection.execute(
+            "delivery": [_delivery_projection(r) for r in self._connection.execute(
                 "SELECT * FROM delivery_attempts WHERE request_id=? "
                 "ORDER BY attempted_at, id LIMIT ?", (selector, MAX_REQUEST_DELIVERIES))],
             "delivery_evidence": "retained_attempts_only; missing evidence is unknown; no proof of human receipt"}
@@ -336,3 +384,35 @@ def _dialogue_projection(row: sqlite3.Row) -> dict:
         "assistant": row['assistant_text'],
         "content_authority": "historical_authored_non_authoritative",
     }
+
+
+def _validated_report_source(source: dict | None) -> str | None:
+    if source is None:
+        return None
+    if not isinstance(source, dict) or set(source) != {
+            'source_kind', 'job_id', 'run_id', 'path', 'content_version'}:
+        raise ValueError('invalid report source')
+    if type(source['job_id']) is not int or not 1 <= source['job_id'] <= 2**63 - 1:
+        raise ValueError('invalid report Job')
+    if source['source_kind'] == 'job_run_result':
+        if (type(source['run_id']) is not int or not 1 <= source['run_id'] <= 2**63 - 1
+                or source['path'] is not None or source['content_version'] is not None):
+            raise ValueError('invalid report Run')
+    elif source['source_kind'] == 'workspace_artifact':
+        path, version = source['path'], source['content_version']
+        if (source['run_id'] is not None or not isinstance(path, str)
+                or not 1 <= len(path.encode('utf-8')) <= 240
+                or path.startswith('/') or '\\' in path
+                or any(part in ('', '.', '..') for part in path.split('/'))
+                or any(unicodedata.category(c) == 'Cc' for c in path)
+                or not isinstance(version, str) or not re.fullmatch(r'[0-9a-f]{64}', version)):
+            raise ValueError('invalid report Workspace version')
+    else:
+        raise ValueError('invalid report source kind')
+    return json.dumps(source, ensure_ascii=False, sort_keys=True)
+
+
+def _delivery_projection(row: sqlite3.Row) -> dict:
+    result = dict(row)
+    result['report_source'] = json.loads(row['report_source']) if row['report_source'] else None
+    return result

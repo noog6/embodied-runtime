@@ -26,6 +26,7 @@ receives these read-only acquisitions:
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `search_conversation_history` | `query`, `limit` | Older completed dialogue across channels and sessions, including same-process working-memory evictions |
+| `discover_requests` | `work_selector: "JOB1"`, `"RUN2"`, or `null`; `before: REQ…` or `null`; `limit: 1..5` | Page retained requests and their explicit work links, including older administrative requests |
 | `inspect_request` | `selector: "recent"` | Five most recently accepted request references, including failed and administrative interactions |
 | `inspect_request` | `selector: "CONV41"` or exact `REQ…` | Completed dialogue, response preparation, exact causal work links and retained delivery evidence |
 
@@ -68,7 +69,24 @@ before cognition can invoke effects. A failed or cancelled request can have an i
 without a completed dialogue record. Successful dialogue gets a separate monotonic
 `CONV<n>` and references its request. Runtime session identity is independent.
 Console `job …` administrative interactions also get request references; their command
-reports do not masquerade as completed dialogue.
+reports do not masquerade as completed dialogue. When history is enabled, their
+printed output includes `Request: REQ…`, so Nick can cite the interaction directly.
+
+To answer “what happened to the Job I started earlier?”, `discover_requests` can
+filter explicit definition/start links with `work_selector: "JOB1"` or an exact
+`"RUN2"`. Use `null` to page all retained requests when the Job is unknown. Each
+page contains at most five requests and eight work links per request, newest
+insertion first, independently of clock ties or rollback. Pass `next_before` as
+`before` for the next page; no offset or whole-history cache accumulates. Inserts
+after a page do not shift its continuation. A pruned cursor returns `cursor_expired`
+without falling back to recent requests. Each page is one ordinary read-only
+acquisition, available only in explicit operator dialogue. Filtering work links
+does not infer that a report was sent, and report deliveries are not work-start links.
+
+For example, after six unrelated dialogue exchanges, use
+`discover_requests({"work_selector":"JOB1","before":null,"limit":5})`, then inspect
+the returned exact `REQ…`. The earlier console start remains discoverable after
+restart while retained, even though it has no searchable dialogue.
 
 Only explicit runtime calls create work links:
 
@@ -103,6 +121,24 @@ request reference, channel, kind, attempted timestamp, outcome-recorded timestam
 status, optional validated Twilio Message SID, and a fixed sanitized failure category.
 Raw exceptions, arbitrary provider values, phone numbers, credentials, bearer URLs,
 provider payloads, images and audio are excluded.
+
+Report submissions have `kind: report` and a separate bounded `report_source`.
+It is copied from the runtime-retained snapshot, never parsed from message text:
+
+- Job result: `source_kind: job_run_result`, exact `job_id` and `run_id`.
+- Workspace artifact: `source_kind: workspace_artifact`, `job_id`, logical `path`
+  (at most 240 UTF-8 bytes), and the exact 64-character SHA-256 `content_version`.
+
+The source is written with attempt intent before enqueueing/submission and stays on
+that same attempt as console evidence advances from `queued` to `terminal_written`,
+or SMS becomes accepted, rejected, or uncertain. Delivering the result from RUN2
+therefore remains attributable to RUN2 after restart, even if RUN3 later completes;
+`work` can correctly remain empty. Changing a Workspace file after retrieval does
+not change the source version recorded for the retained bytes actually submitted.
+This adds no report body or second work relationship. A source reference identifies
+content; it does not prove receipt, guarantee the source is still retained, or grant
+access to otherwise unavailable material. Legacy `report_source: null` means source
+evidence unavailable; prose is never used to fill it in.
 
 | Status | What the retained evidence establishes |
 | --- | --- |
@@ -156,17 +192,21 @@ database_path = "../data/conversations.sqlite3"
 ```
 
 Relative paths resolve from the configuration file. SQLite must support FTS5. Schema
-v2 transactionally migrates v1, preserving dialogue IDs, timestamps, channels, and text,
+v3 transactionally migrates v1, preserving dialogue IDs, timestamps, channels, and text,
 adding nullable request references and separate request/work/delivery tables, and
 building an external-content FTS index. Legacy request/delivery evidence remains null;
-no receipts or causal links are backfilled. Unknown versions and unversioned nonempty
-databases are rejected. Opening/migration failures retain the existing composition
+no receipts or causal links are backfilled. Opening v2 adds a nullable report-source
+column and a bounded work-lookup index without rewriting request references,
+work links, outcomes or the existing FTS index. Existing delivery sources stay
+unavailable; no JobRun is inferred or retroactively linked. Unknown versions and
+unversioned nonempty databases are rejected. Opening/migration failures retain the existing composition
 failure policy; runtime read/write failures are best effort.
 
 Retention is a fixed small-device bound: at most 2,000 dialogue rows (2,000 characters
 per side), 2,000 requests, eight work links and eight delivery attempts per request.
-Oldest inserted rows are pruned on opening and on request/dialogue insertion. IDs are
-never reused after pruning. Request pruning cascades work/delivery deletion and nulls
+Report-source metadata lives on its delivery attempt and is deleted with it;
+there is no separate orphanable source ledger. Oldest inserted rows are pruned on
+opening and on request/dialogue insertion. IDs are never reused after pruning. Request pruning cascades work/delivery deletion and nulls
 any surviving dialogue reference, explicitly leaving evidence unavailable. Dialogue
 pruning deletes its FTS entries; failed requests without dialogue age out too. Metadata
 has no growing in-memory registry: caches and exclusions are episode-local and bounded;
@@ -186,7 +226,10 @@ be reconstructed, and lexical search is not semantic understanding.
    to the earlier voice exchange and its timestamp. Restart and repeat the question.
 2. Use console `job add` and `job start`, finish that occurrence, then start/finish a
    later occurrence. Ask Mira to inspect the earlier start request and retrieve its
-   linked exact Run. Confirm the later report is not substituted.
+   linked exact Run. After six unrelated exchanges, discover the old start by Job
+   filter or pagination and confirm the printed request reference agrees. Deliver an
+   exact retained report and inspect its persisted source after restart; confirm
+   the later report is not substituted.
 3. **Live Twilio verification:** request an ordinary SMS reply and an explicit MMS.
    Inspect each originating request. Confirm provider acceptance is described without
    claiming handset receipt, and the normal reply stays on its originating channel.

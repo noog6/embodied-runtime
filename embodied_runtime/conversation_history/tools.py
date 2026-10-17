@@ -23,7 +23,18 @@ INSPECT_REQUEST_TOOL = CognitionToolDefinition(
     parameters={'type': 'object', 'properties': {
         'selector': {'type': 'string', 'minLength': 1, 'maxLength': 40}},
         'required': ['selector'], 'additionalProperties': False})
-HISTORY_TOOLS = (SEARCH_CONVERSATION_TOOL, INSPECT_REQUEST_TOOL)
+DISCOVER_REQUESTS_TOOL = CognitionToolDefinition(
+    name='discover_requests',
+    description=('Discover retained operator requests, including older console Job commands. '
+                 'Optionally filter explicit work links by JOB<n> or RUN<n>. Page newest '
+                 'insertion first with next_before; inspect an exact returned request for '
+                 'outcomes. Work filters do not imply report delivery or authority to act.'),
+    parameters={'type': 'object', 'properties': {
+        'work_selector': {'type': ['string', 'null'], 'maxLength': 24},
+        'before': {'type': ['string', 'null'], 'maxLength': 35},
+        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 5}},
+        'required': ['work_selector', 'before', 'limit'], 'additionalProperties': False})
+HISTORY_TOOLS = (SEARCH_CONVERSATION_TOOL, INSPECT_REQUEST_TOOL, DISCOVER_REQUESTS_TOOL)
 
 
 def execute_history_tool(store, jobs, call, *, exclude_ids=(), exclude_requests=()):
@@ -33,6 +44,8 @@ def execute_history_tool(store, jobs, call, *, exclude_ids=(), exclude_requests=
             raise ValueError
         if call.name == SEARCH_CONVERSATION_TOOL.name and set(args) == {'query', 'limit'}:
             result = store.search(**args, exclude_ids=exclude_ids, exclude_requests=exclude_requests)
+        elif call.name == DISCOVER_REQUESTS_TOOL.name and set(args) == {'work_selector', 'before', 'limit'}:
+            result = store.discover_requests(**args)
         elif call.name == INSPECT_REQUEST_TOOL.name and set(args) == {'selector'}:
             result = store.inspect_request(args['selector'])
             for link in result.get('work', []):
@@ -63,4 +76,8 @@ def execute_history_tool(store, jobs, call, *, exclude_ids=(), exclude_requests=
             turn.pop('assistant', None)
         result['projection_truncated'] = True
         output = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        while len(output) > MAX_PROJECTION_CHARS and result.get('delivery'):
+            result['delivery'].pop()
+            result['delivery_omitted'] = result.get('delivery_omitted', 0) + 1
+            output = json.dumps(result, ensure_ascii=False, sort_keys=True)
     return CognitionToolResult(output)

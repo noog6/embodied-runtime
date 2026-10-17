@@ -837,8 +837,9 @@ With conversation history enabled, an explicit console `job add` interaction lin
 its request reference to the created definition; `job start` links a distinct
 request to the exact newly created JobRun. Later scheduled or triggered occurrences
 are never inferred to belong to the definition-creation request. Operator cognition's
-`inspect_request` can follow these durable links to exact status and retained-result
-selectors, including after restart. Reports remain in the Jobs database. Missing or
+`discover_requests` can find older interactions by explicit Job/Run links or bounded
+pagination, and console Job responses print their request references. `inspect_request`
+can follow these durable links to exact status and retained-result selectors, including after restart. Reports remain in the Jobs database. Missing or
 interrupted work is not resumed, and links grant no new authority. See
 [conversation continuity](conversation-history.md) for identity, retention, storage
 failure limits, and the bounded operator-only inspection tools.

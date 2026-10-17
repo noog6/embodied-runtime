@@ -22,6 +22,9 @@ class ConversationHistoryStore(Protocol):
     def search(self, query: str, *, limit: int = 5, exclude_ids=(),
                exclude_requests=()) -> dict: ...
 
+    def discover_requests(self, *, work_selector: str | None = None,
+                          before: str | None = None, limit: int = 5) -> dict: ...
+
     def inspect_request(self, selector: str) -> dict: ...
 
     def begin_request(self, request_id: str, session_id: str, accepted_at: datetime,
@@ -34,7 +37,8 @@ class ConversationHistoryStore(Protocol):
 
     def begin_delivery(self, attempt_id: str, request_id: str, attempted_at: datetime,
                        channel: InteractionChannel, kind: str,
-                       output_variant: str = 'authored_output') -> None: ...
+                       output_variant: str = 'authored_output',
+                       report_source: dict | None = None) -> None: ...
 
     def finish_delivery(self, attempt_id: str, outcome_recorded_at: datetime, status: str,
                         provider_reference: str | None, failure: str | None) -> None: ...

@@ -3,12 +3,12 @@
 import asyncio
 from collections.abc import Callable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime
 import logging
 from uuid import uuid4
 
-from embodied_runtime.interaction import InteractionChannel
+from embodied_runtime.interaction import InteractionChannel, ReportSource
 from .store import ConversationHistoryStore
 
 LOGGER = logging.getLogger(__name__)
@@ -83,12 +83,14 @@ class DeliveryAttempt:
     """Persist intent before entering a transport; missing confirmation is unknown."""
 
     def __init__(self, evidence: RequestEvidence | None, channel: InteractionChannel,
-                 kind: str, output_variant: str = 'authored_output') -> None:
+                 kind: str, output_variant: str = 'authored_output',
+                 report_source: ReportSource | None = None) -> None:
         self.evidence = evidence
         self.id = 'DEL' + uuid4().hex
         if evidence is not None:
             evidence.recorder.write('begin_delivery', self.id, evidence.id,
-                                    evidence.recorder.clock(), channel, kind, output_variant)
+                                    evidence.recorder.clock(), channel, kind, output_variant,
+                                    asdict(report_source) if report_source is not None else None)
 
     def finish(self, status: str, *, provider_reference: str | None = None,
                failure: str | None = None) -> None:
@@ -98,6 +100,7 @@ class DeliveryAttempt:
 
 
 def delivery_attempt(text: str | None = None, *, channel: InteractionChannel,
-                     kind: str = 'reply', output_variant: str = 'authored_output') -> DeliveryAttempt:
+                     kind: str = 'reply', output_variant: str = 'authored_output',
+                     report_source: ReportSource | None = None) -> DeliveryAttempt:
     evidence = getattr(text, 'evidence', None) if text is not None else current_request()
-    return DeliveryAttempt(evidence, channel, kind, output_variant)
+    return DeliveryAttempt(evidence, channel, kind, output_variant, report_source)
