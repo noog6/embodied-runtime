@@ -1,0 +1,27 @@
+# Explicit local pilot: no Job is created until job procedure experiment is invoked.
+[runtime]
+profile = "mira"
+hardware = "virtual"
+camera = "none"
+cognition = "openai-responses"
+vision = "none"
+mode = "console"
+timezone = "America/Toronto"
+
+[cognition]
+model = "gpt-6.1-sol"
+
+[initiative]
+enabled = true
+actions = false
+messages = false
+continuation = false
+goal_closure = false
+
+[earcons]
+enabled = false
+
+[jobs]
+enabled = true
+database_path = "../work/procedure-experiment.sqlite3"
+auto_continue = false

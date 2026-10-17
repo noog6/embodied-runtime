@@ -172,6 +172,8 @@ class Job:
     created_at: datetime
     updated_at: datetime
     carry_forward_enabled: bool = False
+    procedure_enabled: bool = False
+    procedure_experiment: bool = False
 
     def __post_init__(self) -> None:
         _positive_id(self.id, "job ID")
@@ -179,6 +181,10 @@ class Job:
         object.__setattr__(self, "description", _text(
             self.description, "description", MAX_JOB_DESCRIPTION_CHARS, empty=True
         ))
+        if type(self.procedure_experiment) is not bool:
+            raise TypeError("procedure_experiment must be boolean")
+        if type(self.procedure_enabled) is not bool:
+            raise TypeError("procedure_enabled must be boolean")
         if not isinstance(self.carry_forward_enabled, bool):
             raise TypeError("carry_forward_enabled must be boolean")
         if not isinstance(self.enabled, bool):

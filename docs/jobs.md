@@ -651,7 +651,7 @@ claim or lease with a runtime identity. There is still no `claimed_by` column.
 
 ## Persistence, shutdown, and restart
 
-Jobs use their own `SQLiteJobStore`, schema version 4, normally in
+Jobs use their own `SQLiteJobStore`, schema version 12, normally in
 `data/jobs.sqlite3`. They are independent of persistent memory and Tasks. Jobs
 and memory can each be enabled or disabled independently.
 
@@ -789,7 +789,7 @@ authority; a new JobRun performs bounded cognition; and a later event may wake
 that same run. Interrupted runs are never resurrected. Startup attention creates
 a new occurrence when the condition remains unresolved.
 
-The Jobs database schema version is 11. Opening a version-4 database transactionally
+The Jobs database schema version is 12. Opening a version-4 database transactionally
 adds the trigger table; opening version 5 expands its bounded event-type constraint.
 Opening version 7 removes the former globally unique enabled-event index without
 rewriting or deleting trigger rows. All migrations preserve Jobs, JobRuns,
@@ -843,3 +843,9 @@ can follow these durable links to exact status and retained-result selectors, in
 interrupted work is not resumed, and links grant no new authority. See
 [conversation continuity](conversation-history.md) for identity, retention, storage
 failure limits, and the bounded operator-only inspection tools.
+
+## Opt-in procedure learning
+
+Private bounded methods and the explicit disabled, unscheduled experimental Job
+are documented in [Job procedures](job-procedures.md). Schema 12 adds default-off
+procedure policy and bounded per-Run snapshots without changing existing Jobs.

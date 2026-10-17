@@ -163,6 +163,11 @@ class FindingStoreTests(unittest.TestCase):
             connection.execute("DROP INDEX idx_job_findings_run")
             connection.execute("DROP INDEX idx_job_findings_published")
             connection.execute("DROP TABLE job_findings")
+            connection.execute("DROP TABLE job_run_procedures")
+            connection.execute("DROP TABLE job_procedures")
+            connection.execute("ALTER TABLE jobs DROP COLUMN procedure_enabled")
+            connection.execute("ALTER TABLE jobs DROP COLUMN procedure_experiment")
+            connection.execute("ALTER TABLE jobs DROP COLUMN procedure_version")
             connection.execute("DROP TABLE job_focus")
             connection.execute("ALTER TABLE jobs DROP COLUMN carry_forward_enabled")
             connection.execute("ALTER TABLE jobs DROP COLUMN focus_version")
@@ -175,7 +180,7 @@ class FindingStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_schedule(self.job.id), schedule)
         self.assertEqual(self.store.list_triggers(), (first_trigger, second_trigger))
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 12)
             names = {row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type IN ('table','index')")}
             self.assertTrue({"job_findings", "idx_job_findings_job",
