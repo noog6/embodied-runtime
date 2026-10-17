@@ -176,6 +176,7 @@ class JobsFileConfig:
     max_auto_steps: int = 3
     max_concurrent_work: int = 1
     scheduler_poll_seconds: float = 30.0
+    shared_reads_enabled: bool = False
     findings_context_selection_enabled: bool = False
 
 
@@ -260,6 +261,7 @@ class LaunchConfiguration:
     jobs_max_auto_steps: int
     jobs_max_concurrent_work: int
     jobs_scheduler_poll_seconds: float
+    shared_reads_enabled: bool
     findings_context_selection_enabled: bool
     sms_enabled: bool
     sms_backend: str
@@ -297,6 +299,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
     jobs_enabled=False, jobs_database_path=None, jobs_auto_continue=False,
     jobs_heartbeat_seconds=30.0, jobs_max_auto_steps=3, jobs_max_concurrent_work=1,
     jobs_scheduler_poll_seconds=30.0,
+    shared_reads_enabled=False,
     findings_context_selection_enabled=False,
     sms_enabled=False, sms_backend="twilio", sms_bind_host="127.0.0.1",
     sms_bind_port=8080, sms_webhook_path="/sms",
@@ -329,7 +332,7 @@ _JOBS_KEYS = {
     "enabled", "database_path", "auto_continue", "heartbeat_seconds",
     "max_auto_steps", "max_concurrent_work",
     "scheduler_poll_seconds",
-    "findings_context_selection_enabled",
+    "findings_context_selection_enabled", "shared_reads_enabled",
 }
 _INTERACTION_KEYS = {"environment"}
 _SMS_KEYS = {"enabled", "backend", "bind_host", "bind_port", "webhook_path"}
@@ -501,6 +504,8 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     if ("findings_context_selection_enabled" in jobs
             and not isinstance(jobs["findings_context_selection_enabled"], bool)):
         raise ConfigurationError("jobs.findings_context_selection_enabled must be boolean")
+    if "shared_reads_enabled" in jobs and type(jobs["shared_reads_enabled"]) is not bool:
+        raise ConfigurationError("jobs.shared_reads_enabled must be boolean")
     heartbeat_seconds = jobs.get("heartbeat_seconds", 30.0)
     if (isinstance(heartbeat_seconds, bool)
             or not isinstance(heartbeat_seconds, (int, float))
@@ -625,6 +630,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
             jobs_enabled, jobs_database_path, jobs.get("auto_continue", False),
             float(heartbeat_seconds), max_auto_steps, max_concurrent_work,
             float(scheduler_poll_seconds),
+            jobs.get("shared_reads_enabled", False),
             jobs.get("findings_context_selection_enabled", False),
         ),
         InteractionFileConfig(**interaction),
@@ -753,6 +759,7 @@ def resolve_launch_configuration(
         jobs_max_concurrent_work=scalar(
             "jobs_max_concurrent_work", jobs.max_concurrent_work, 1),
         jobs_scheduler_poll_seconds=jobs.scheduler_poll_seconds,
+        shared_reads_enabled=jobs.shared_reads_enabled,
         findings_context_selection_enabled=jobs.findings_context_selection_enabled,
         sms_enabled=opt_in("sms", sms.enabled, False),
         sms_backend=sms.backend,

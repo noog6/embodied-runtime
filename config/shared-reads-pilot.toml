@@ -1,0 +1,28 @@
+# Operator-invoked isolated pilot; startup creates no Job definitions.
+[runtime]
+profile = "mira"
+hardware = "virtual"
+camera = "none"
+cognition = "openai-responses"
+vision = "none"
+mode = "console"
+timezone = "America/Toronto"
+
+[cognition]
+model = "gpt-6.1-sol"
+
+[initiative]
+enabled = true
+actions = false
+messages = false
+continuation = false
+goal_closure = false
+
+[earcons]
+enabled = false
+
+[jobs]
+enabled = true
+database_path = "../work/shared-reads-pilot.sqlite3"
+auto_continue = false
+shared_reads_enabled = true

@@ -48,7 +48,10 @@ by the limit. Phase-1 lexical scan time may still grow with the completed-Findin
 corpus; indexed full-text or semantic search remains deferred.
 
 A Job can discover another Job's completed Findings or its own prior-run Findings,
-but receives no access to the source Job's Workspace. Search consumes the ordinary
+but search itself grants no access to the source Job's Workspace. Separate
+opt-in [shared reads](job-shared-reads.md) may consult Workspace text and retained
+Runs during eligible Job work; their historical evidence classes cannot establish
+a current observation or Job progress. Search consumes the ordinary
 episode acquisition budget and does not modify WorkingMemory or persistent memory.
 
 The console commands `findings`, `findings <query>`, and `finding show FIND<n>`

@@ -232,6 +232,8 @@ class FindingKind(StrEnum):
 class FindingEvidenceClass(StrEnum):
     RUNTIME_INSPECTION = "runtime_inspection"
     SENSOR_OBSERVATION = "sensor_observation"
+    JOB_RUN_HISTORICAL = "job_run_historical"
+    JOB_CATALOG_HISTORICAL = "job_catalog_historical"
     JOB_WORKSPACE_HISTORICAL = "job_workspace_historical"
     HISTORICAL_FINDING = "historical_finding"
     PERSISTENT_MEMORY = "persistent_memory"
