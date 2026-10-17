@@ -6006,10 +6006,20 @@ class RobotApplication:
         LOGGER.info("[OUTCOME] tool=%s status=applied", call.name)
         return CognitionToolResult(json.dumps({"status": "completed"}, sort_keys=True))
 
+    def _initiative_goal_is_current(self) -> bool:
+        """Use exact Job execution authority instead of a sibling's global goal."""
+        context = self._job_execution_context.get()
+        if context is None:
+            return self._active_goal is not None
+        binding = context.task_binding
+        if binding is None or binding.active_goal is None:
+            return False
+        return self._job_work_binding_matches(context.binding, binding, binding.active_goal)
+
     def initiative_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project bounded autonomous capabilities at request time."""
         if not (self.options.initiative_enabled and
-                self.state is LifecycleState.RUNNING and self._active_goal is not None):
+                self.state is LifecycleState.RUNNING and self._initiative_goal_is_current()):
             return ()
         return (*self.acquisition_tools(), *self.effect_tools())
 
@@ -6086,7 +6096,7 @@ class RobotApplication:
     def acquisition_tools(self) -> tuple[CognitionToolDefinition, ...]:
         """Project only read-only autonomous acquisition capabilities."""
         if not (self.options.initiative_enabled and
-                self.state is LifecycleState.RUNNING and self._active_goal is not None):
+                self.state is LifecycleState.RUNNING and self._initiative_goal_is_current()):
             return ()
         visual = (OBSERVE_SCENE_TOOL,) if self.visual_perception_available() else ()
         recall = (RECALL_MEMORY_TOOL,) if self._memory_recall is not None else ()
@@ -6111,7 +6121,7 @@ class RobotApplication:
         if not (
             self.options.initiative_enabled
             and self.state is LifecycleState.RUNNING
-            and self._active_goal is not None
+            and self._initiative_goal_is_current()
         ):
             return ()
         body = self.body_backend

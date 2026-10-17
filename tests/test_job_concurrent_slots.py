@@ -418,3 +418,52 @@ class ConcurrentJobSlotTests(unittest.IsolatedAsyncioTestCase):
             while tokens:
                 app._job_execution_context.reset(tokens.pop())
         await app.stop()
+
+    async def test_exact_run_keeps_ordinary_tools_after_global_goal_owner_finishes(self):
+        app = self.app(ConcurrentBackend(), 2)
+        await app.start()
+        try:
+            owner = app.start_job_run(self.store.create_job('Global owner').id)
+            sibling = app.start_job_run(self.store.create_job('Independent work').id)
+            context = app._context_for_run(sibling.run.id)
+            await app.finish_job_run_by_id(owner.run.id, JobRunStatus.COMPLETED)
+            self.assertIsNone(app._active_goal)
+            token = app._job_execution_context.set(context)
+            try:
+                self.assertIn('inspect_self', tuple(tool.name for tool in app.acquisition_tools()))
+                self.assertIn('schedule_followup', tuple(tool.name for tool in app.effect_tools()))
+                self.assertIn('inspect_self', tuple(tool.name for tool in app.initiative_tools()))
+            finally:
+                app._job_execution_context.reset(token)
+        finally:
+            await app.stop()
+
+    async def test_invalid_exact_context_cannot_borrow_sibling_global_goal(self):
+        app = self.app(ConcurrentBackend(), 2)
+        await app.start()
+        try:
+            owner = app.start_job_run(self.store.create_job('Unrelated live goal').id)
+            sibling = app.start_job_run(self.store.create_job('Selected work').id)
+            context = app._context_for_run(sibling.run.id)
+            token = app._job_execution_context.set(context)
+            try:
+                self.assertIsNotNone(app._active_goal)
+                context.execution_state = 'stopping'
+                for projection in (app.acquisition_tools, app.effect_tools, app.initiative_tools):
+                    self.assertEqual(projection(), ())
+                context.execution_state = 'runnable'
+                app._park_job_context(context)
+                for projection in (app.acquisition_tools, app.effect_tools, app.initiative_tools):
+                    self.assertEqual(projection(), ())
+            finally:
+                app._job_execution_context.reset(token)
+            await app.finish_job_run_by_id(sibling.run.id, JobRunStatus.STOPPED)
+            token = app._job_execution_context.set(context)
+            try:
+                for projection in (app.acquisition_tools, app.effect_tools, app.initiative_tools):
+                    self.assertEqual(projection(), ())
+            finally:
+                app._job_execution_context.reset(token)
+            self.assertIsNotNone(app._context_for_run(owner.run.id).task_binding.active_goal)
+        finally:
+            await app.stop()

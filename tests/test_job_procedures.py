@@ -754,3 +754,49 @@ class JobProcedureTests(unittest.IsolatedAsyncioTestCase):
         await app.work_current_job_once()
         self.assertNotIn('Job procedure:', backend.requests[0][1])
         self.assertIsNone(self.store.get_run_procedure(binding.run.id))
+
+    async def test_experiment_can_acquire_and_reuse_after_global_goal_owner_finishes(self):
+        backend = ProcedureBackend(candidate(basis='acquisition_1'))
+        respond = backend.respond
+        async def require_inspection(message, **kwargs):
+            if backend.inspect_next and message != JOB_OUTCOME_EVALUATION_REQUEST:
+                self.assertEqual(tuple(tool.name for tool in kwargs['tools']), ('inspect_self',))
+            return await respond(message, **kwargs)
+        backend.respond = require_inspection
+        app = self.app(backend, capacity=2)
+        await app.start()
+        owner = app.start_job_run(self.job('Initial global goal owner', opted=False).id)
+        sibling = app.start_job_run(self.job('Existing waiting work', opted=False).id)
+        sibling_context = app._context_for_run(sibling.run.id)
+        await app.finish_job_run_by_id(owner.run.id, JobRunStatus.COMPLETED)
+        self.assertIsNone(app._active_goal)
+        experiment = self.store.create_procedure_experiment()
+        self.store.set_job_enabled(experiment.id, True)
+        first = app.start_job_run(experiment.id)
+        self.assertIsNotNone(app._context_for_run(first.run.id).task_binding.active_goal)
+        self.assertIsNone(app._active_goal)
+        backend.inspect_next = True
+        await app.work_job_run_once(first.run.id)
+        self.assertEqual(backend.requests[0][2], ('inspect_self',))
+        self.assertEqual(json.loads(backend.results[0].output)['status'], 'applied')
+        pending = self.store.get_procedure(experiment.id, 'pending')
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending['source_run_id'], first.run.id)
+        self.store.review_procedure(experiment.id, pending['version'], activate=True)
+        # Retained parked work also must not suppress the new occurrence's tools.
+        app._park_job_context(sibling_context)
+        backend.requests.clear()
+        backend.results.clear()
+        backend.inspect_next = True
+        backend.proposal = None
+        backend.feedback = dict(version=pending['version'], response='followed', reason=None, improvement=None)
+        second = app.start_job_run(experiment.id)
+        await app.work_job_run_once(second.run.id)
+        self.assertEqual(backend.requests[0][2], ('inspect_self',))
+        self.assertEqual(json.loads(backend.results[0].output)['status'], 'applied')
+        evidence = self.store.get_run_procedure(second.run.id)
+        self.assertTrue(evidence['supplied'])
+        self.assertEqual(evidence['snapshot']['version'], pending['version'])
+        self.assertEqual(evidence['feedback'], backend.feedback)
+        self.assertEqual(sibling_context.execution_state, 'parked')
+        self.assertIs(self.store.get_run(sibling.run.id).status, JobRunStatus.RUNNING)
