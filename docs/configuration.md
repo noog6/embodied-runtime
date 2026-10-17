@@ -148,8 +148,8 @@ scheduler_poll_seconds = 30
 ```
 
 `conversation_history` is optional and disabled when absent. When enabled its
-non-empty SQLite path is required. It provides bounded prior-session dialogue
-continuity; see [Conversation history](conversation-history.md).
+non-empty SQLite path is required. It provides bounded dialogue recall across
+working-memory eviction and restarts, plus request/work/delivery continuity; see [Conversation history](conversation-history.md).
 
 `interaction.environment` is one of `workstation`, `companion`, `unattended`,
 or `remote`, and defaults to `workstation`. It is a fixed runtime interaction

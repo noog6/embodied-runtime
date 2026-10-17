@@ -44,7 +44,12 @@ Jobs cannot send unsolicited images.
 The history box combines several distinct sources for readability: working memory
 is volatile, conversation history is durable completed operator dialogue, and
 run history is operational evidence. Their selection and tool availability differ
-by episode type.
+by episode type. Explicit operator dialogue can deliberately search retained older
+conversation turns, including same-process evictions, and inspect exact request
+links to JobRuns and delivery attempts. These acquisitions share the existing
+budgets and are unavailable to Job work. Authored output, transport acceptance,
+playback completion, and human receipt remain separate facts; see
+[conversation continuity](conversation-history.md) for examples and bounds.
 
 Semantic-memory recall is read-only. Operator dialogue may request one bounded
 `remember` admission grounded in the current operator statement about an existing

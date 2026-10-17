@@ -830,3 +830,15 @@ stores. Workspace authority remains captured from the exact Job context for each
 bounded cognition episode. Phase 3B-2 priority, fairness, preemption, and durable
 activation queuing remain deferred; subscriber ordering is deterministic admission
 iteration, not priority.
+
+## Request provenance
+
+With conversation history enabled, an explicit console `job add` interaction links
+its request reference to the created definition; `job start` links a distinct
+request to the exact newly created JobRun. Later scheduled or triggered occurrences
+are never inferred to belong to the definition-creation request. Operator cognition's
+`inspect_request` can follow these durable links to exact status and retained-result
+selectors, including after restart. Reports remain in the Jobs database. Missing or
+interrupted work is not resumed, and links grant no new authority. See
+[conversation continuity](conversation-history.md) for identity, retention, storage
+failure limits, and the bounded operator-only inspection tools.

@@ -94,7 +94,11 @@ Replies longer than 1,600
 characters are not truncated or split; the runtime makes at most one send using a
 short deterministic explanation. Empty responses are not sent. Cognition failure
 gets no SMS response. Provider sending runs off the asyncio event loop, has one
-attempt, and has no retry queue, delivery callback, or receipt persistence.
+attempt, and has no retry queue, delivery callback, or receipt polling. When conversation
+history is enabled, request-correlated attempts and provider acceptance/rejection or
+uncertainty are retained as described in [conversation continuity](conversation-history.md).
+Provider acceptance does not establish handset delivery; no raw provider payload or
+message body is copied into the delivery ledger.
 
 Raw runtime logs intentionally contain the text of accepted configured-operator
 messages and successfully sent replies, notifications, and operator deliveries for

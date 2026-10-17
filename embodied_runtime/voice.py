@@ -17,6 +17,8 @@ import time
 from typing import Protocol, TypeVar
 import wave
 
+from embodied_runtime.conversation_history.continuity import delivery_attempt
+from embodied_runtime.interaction import InteractionChannel
 from embodied_runtime.earcons import (
     Earcon, EarconPlayer, FusionHatEarconOutput, earcon_wav,
 )
@@ -446,7 +448,17 @@ class VoiceInteraction:
                 response = await self._handle_utterance(text)
                 LOGGER.info("[VOICE] response turn=%s text=%r", turn, response)
                 LOGGER.info("[VOICE] speaking turn=%s", turn)
-                await self._text_to_speech_provider.speak(response)
+                attempt = delivery_attempt(response, channel=InteractionChannel.VOICE)
+                try:
+                    await self._text_to_speech_provider.speak(response)
+                except asyncio.CancelledError:
+                    attempt.finish('submission_unconfirmed', failure='cancelled')
+                    raise
+                except Exception:
+                    attempt.finish('submission_unconfirmed', failure='output_error')
+                    raise
+                else:
+                    attempt.finish('playback_completed')
                 if self._observability is not None:
                     self._observability.increment("voice_turns")
                 reason = "max_turns" if turn == 2 else reason
