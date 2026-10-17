@@ -94,6 +94,10 @@ from embodied_runtime.jobs import (
     ScheduledJobController, project_job_continuity_summary, render_job_continuity,
     JobTriggerType, STATE_TENDING_CONDITIONS,
 )
+from embodied_runtime.jobs.procedure import (
+    ProcedureProposal, ProcedureFeedback, ProcedureRunSnapshot,
+    PROCEDURE_CANDIDATE_SCHEMA, PROCEDURE_FEEDBACK_SCHEMA,
+)
 from embodied_runtime.jobs.focus import (
     JobFocus, JobFocusProposal, FOCUS_PROPOSAL_SCHEMA,
 )
@@ -1098,6 +1102,7 @@ class JobExecutionContext:
     focus_enabled: bool = False
     focus_snapshot: JobFocus | None = None
     focus_section: str | None = None
+    procedure_snapshot: ProcedureRunSnapshot | None = None
 
     def __post_init__(self) -> None:
         if (self.task_binding is not None
@@ -1977,9 +1982,12 @@ class RobotApplication:
         focus_definition: str | None = None
         focus_snapshot: JobFocus | None = None
         focus_section: str | None = None
+        procedure_evidence: dict | None = None
         try:
             # Capture before activating the Task so read failure uses ordinary
             # unstarted-occurrence compensation. Disabled Jobs perform no focus reads.
+            if job.procedure_enabled:
+                procedure_evidence = self.jobs.capture_run_procedure(job.id, run.id)
             if job.carry_forward_enabled:
                 focus_definition = self.jobs.focus_definition_identity(job.id)
                 candidate = self.jobs.get_focus(job.id)
@@ -2040,6 +2048,8 @@ class RobotApplication:
         context.focus_definition = focus_definition
         context.focus_snapshot = focus_snapshot
         context.focus_section = focus_section
+        if procedure_evidence is not None:
+            context.procedure_snapshot = ProcedureRunSnapshot.capture(procedure_evidence)
         self._job_progress = JobProgress(job.id, running_run.id, running_task.id)
         LOGGER.info(
             "[JOBS] job=JOB%s run=RUN%s task=%s status=started",
@@ -2247,6 +2257,9 @@ class RobotApplication:
         summary: str | None, *, result_report: str | None,
         focus_update: JobFocusProposal | None = None,
         focus_episode_id: int | None = None,
+        procedure_candidate: ProcedureProposal | None = None,
+        procedure_feedback: ProcedureFeedback | None = None,
+        procedure_episode_id: int | None = None,
     ) -> CurrentJobRun:
         """Apply a validated terminal decision to one exact context only."""
         binding = context.binding
@@ -2302,6 +2315,11 @@ class RobotApplication:
                           focus_job_id=context.job_id,
                           focus_task_id=str(context.task_id),
                           focus_episode_id=focus_episode_id)
+        if procedure_candidate is not None or procedure_feedback is not None:
+            kwargs.update(procedure_candidate=procedure_candidate, procedure_feedback=procedure_feedback,
+                          procedure_definition=context.procedure_snapshot.definition_identity,
+                          procedure_job_id=context.job_id, procedure_task_id=str(context.task_id),
+                          procedure_episode_id=procedure_episode_id)
         run = self.jobs.transition_run(
             binding.run.id, status, result_report=result_report, **kwargs
         )
@@ -3181,6 +3199,35 @@ class RobotApplication:
         return (context.focus_section or
                 "Carry-forward policy: enabled for this occurrence. No applicable historical focus.",)
 
+    def _validate_job_procedure_policy(self, binding: CurrentJobRun) -> JobExecutionContext:
+        context = self._context_for_run(binding.run.id)
+        assert self.jobs is not None
+        if (context is None or context.binding is not binding
+                or context.procedure_snapshot is None):
+            raise ValueError('procedure policy was not enabled for this exact occurrence')
+        self.jobs.validate_procedure_policy(binding.job.id,
+            context.procedure_snapshot.definition_identity)
+        run = self.jobs.get_run(binding.run.id)
+        if run is None or run.job_id != binding.job.id or run.status is not JobRunStatus.RUNNING:
+            raise ValueError('procedure source Run ownership is stale')
+        return context
+
+    def _job_procedure_sections(self) -> tuple[str, ...]:
+        context = self._execution_job_context()
+        if context is None or context.procedure_snapshot is None:
+            return ()
+        try:
+            self._validate_job_procedure_policy(context.binding)
+        except ValueError:
+            return ()
+        if context.procedure_snapshot.section is None:
+            return ('Procedure policy enabled: no applicable active method in this Run snapshot. '
+                    'Optional completed outcomes may propose a reusable method for operator review; '
+                    'do not narrate an incident or assume activation.',)
+        assert self.jobs is not None
+        self.jobs.mark_procedure_supplied(context.run_id)
+        return (context.procedure_snapshot.section,)
+
     def _active_state_tending_conditions(
         self, job_id: int,
     ) -> tuple[tuple[JobTriggerType, JobReadinessEventType], ...]:
@@ -3266,6 +3313,9 @@ class RobotApplication:
         proposed_event_type: JobReadinessEventType | None = None
         proposed_progress_update: JobProgressUpdate | None = None
         proposed_focus_update: JobFocusProposal | None = None
+        proposed_procedure: ProcedureProposal | None = None
+        proposed_feedback: ProcedureFeedback | None = None
+        procedure_disposition: str | None = None
         consumed = False
         attempts = 0
 
@@ -3336,6 +3386,7 @@ class RobotApplication:
             nonlocal proposed_readiness, proposed_delay_seconds
             nonlocal proposed_event_type
             nonlocal proposed_progress_update, proposed_focus_update, attempts
+            nonlocal proposed_procedure, proposed_feedback, procedure_disposition
             if consumed:
                 return self._rejected_tool(call.name, "Job outcome request already consumed",
                                            log_prefix="JOBS")
@@ -3347,7 +3398,7 @@ class RobotApplication:
                 # provider/test clients as the equivalent null for non-event modes.
                 arguments = json.loads(call.arguments)
                 required = {"disposition", "summary", "report", "readiness", "delay_seconds"}
-                optional = {"event_type", "progress_update", "focus_update"}
+                optional = {"event_type", "progress_update", "focus_update", "procedure_candidate", "procedure_feedback"}
                 if (not isinstance(arguments, dict)
                         or not required <= set(arguments)
                         or set(arguments) - required - optional):
@@ -3394,6 +3445,24 @@ class RobotApplication:
                         raise ValueError("focus evidence reference is unavailable in this episode")
                 else:
                     focus_update = None
+                candidate = ProcedureProposal.parse(arguments.get('procedure_candidate'))
+                feedback = ProcedureFeedback.parse(arguments.get('procedure_feedback'))
+                candidate_disposition = None
+                if candidate is not None or feedback is not None:
+                    context = self._validate_job_procedure_policy(binding)
+                    if candidate is not None:
+                        if disposition is not JobWorkDisposition.COMPLETED:
+                            raise ValueError('procedure nomination requires completed outcome')
+                        if candidate.basis is not None and candidate.basis not in self._job_progress_bases(initiative, wake_event):
+                            raise ValueError('procedure evidence reference unavailable in this episode')
+                        candidate_disposition = ('pending_exists' if self.jobs.get_procedure(binding.job.id, 'pending')
+                                                 else 'staged_for_completed_commit')
+                    if feedback is not None:
+                        evidence = self.jobs.get_run_procedure(binding.run.id)
+                        snapshot = evidence['snapshot']
+                        if (disposition is JobWorkDisposition.CONTINUE or not evidence['supplied']
+                                or snapshot is None or snapshot['version'] != feedback.version):
+                            raise ValueError('feedback requires the exact supplied procedure version and terminal outcome')
                 progress_value = arguments.get("progress_update")
                 progress_update = self._validate_job_progress_update(
                     progress_value, disposition, initiative, wake_event,
@@ -3423,6 +3492,8 @@ class RobotApplication:
                 proposed_event_type = event_type
                 proposed_progress_update = progress_update
                 proposed_focus_update = focus_update
+                proposed_procedure, proposed_feedback = candidate, feedback
+                procedure_disposition = candidate_disposition
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as error:
                 if attempts >= 2:
                     consumed = True
@@ -3432,26 +3503,42 @@ class RobotApplication:
                 "status": "accepted",
                 "disposition": proposed_disposition.value,
                 "commit": "after_outcome_evaluation",
+                **({'procedure_candidate': procedure_disposition} if procedure_disposition else {}),
             }, sort_keys=True))
 
-        instructions = "\n\n".join((
-            compose_cognition_instructions(
-                self.cognition_context(), self.temporal_context(),
-                self.temporal_situation(), self.options.startup_prompt,
-                self.working_memory.snapshot(),
-                goal if self._active_goal is goal else None,
-            ), episode.render(), *self._job_focus_sections(), *evidence_lines(),
-            "focus_update defaults to null (keep source and age). When this Job has opted in, "
-            "a completed outcome may set one unresolved question (open or blocked) or clear "
-            "with a bounded reason. Continue/failed outcomes must use null. A blocked focus "
-            "does not request readiness or create future work. Any evidence basis refers only "
-            "to this episode's accepted runtime evidence, not proof of semantic resolution.",
-        ))
+        def outcome_instructions():
+            return "\n\n".join((
+                compose_cognition_instructions(
+                    self.cognition_context(), self.temporal_context(),
+                    self.temporal_situation(), self.options.startup_prompt,
+                    self.working_memory.snapshot(),
+                    goal if self._active_goal is goal else None,
+                ), episode.render(), *self._job_focus_sections(), *self._job_procedure_sections(), *evidence_lines(),
+                "focus_update defaults to null (keep source and age). When this Job has opted in, "
+                "a completed outcome may set one unresolved question (open or blocked) or clear "
+                "with a bounded reason. Continue/failed outcomes must use null. A blocked focus "
+                "does not request readiness or create future work. Any evidence basis refers only "
+                "to this episode's accepted runtime evidence, not proof of semantic resolution.",
+            ))
+        context = self._context_for_run(binding.run.id)
+        outcome_tool = REPORT_JOB_OUTCOME_TOOL
+        if context is not None and context.procedure_snapshot is not None:
+            outcome_tool = replace(REPORT_JOB_OUTCOME_TOOL, parameters={
+                **REPORT_JOB_OUTCOME_TOOL.parameters,
+                'properties': {**REPORT_JOB_OUTCOME_TOOL.parameters['properties'],
+                               'procedure_candidate': PROCEDURE_CANDIDATE_SCHEMA,
+                               'procedure_feedback': PROCEDURE_FEEDBACK_SCHEMA},
+                'required': [*REPORT_JOB_OUTCOME_TOOL.parameters['required'],
+                             'procedure_candidate', 'procedure_feedback'],
+            })
+        instructions = outcome_instructions()
+        refreshed = (outcome_instructions if context is not None and context.procedure_snapshot is not None
+                     else lambda: instructions)
         try:
             await backend.respond(
                 JOB_OUTCOME_EVALUATION_REQUEST, instructions=instructions,
-                tools=(REPORT_JOB_OUTCOME_TOOL,), tool_executor=execute_tool,
-                refreshed_instructions=lambda: instructions,
+                tools=(outcome_tool,), tool_executor=execute_tool,
+                refreshed_instructions=refreshed,
             )
         finally:
             consumed = True
@@ -3476,12 +3563,16 @@ class RobotApplication:
             assert context is not None
             if proposed_focus_update is not None:
                 self._validate_job_focus_policy(binding)
-            if proposed_focus_update is None:
+            if proposed_procedure is not None or proposed_feedback is not None:
+                self._validate_job_procedure_policy(binding)
+            if proposed_focus_update is None and proposed_procedure is None and proposed_feedback is None:
                 self.finish_job_run(terminal, proposed_summary, result_report=proposed_report)
             else:
                 self._finish_job_run_context(
                     context, terminal, proposed_summary, result_report=proposed_report,
                     focus_update=proposed_focus_update, focus_episode_id=episode.id,
+                    procedure_candidate=proposed_procedure, procedure_feedback=proposed_feedback,
+                    procedure_episode_id=episode.id,
                 )
         elif proposed_progress_update is not None:
             if not self._job_work_binding_matches(binding, task_binding, goal):
@@ -5066,7 +5157,7 @@ class RobotApplication:
             "references and explicitly intended logical paths. Never replay indeterminate "
             "writes or send unsolicited images."
             if any(tool.name in _IMAGE_ACQUISITIONS for tool in tools) else "")
-        focus_sections = self._job_focus_sections() if stimulus.kind == "job_run_work" else ()
+        focus_sections = (*self._job_focus_sections(), *self._job_procedure_sections()) if stimulus.kind == "job_run_work" else ()
         focus_section = "\n\n" + "\n\n".join(focus_sections) if focus_sections else ""
         return (
             f"{context}{notification}\n\n{episode.render()}\n\n"
@@ -5379,7 +5470,7 @@ class RobotApplication:
             "unknown capture time means unknown age. Storage confirms neither visual truth nor current "
             "world state. Do not replay indeterminate writes, invent paths, or send unsolicited images.",
             episode.render(), stimulus.render(actions_enabled=None), *progress_section,
-            *(self._job_focus_sections() if job_work else ()),
+            *((*self._job_focus_sections(), *self._job_procedure_sections()) if job_work else ()),
             followup.render(),
         ))
 
@@ -5675,7 +5766,7 @@ class RobotApplication:
             ),
             *self._notification_sections(tools, notification_interaction),
             episode.render(), stimulus.render(actions_enabled=None),
-            *progress_section, *(self._job_focus_sections() if job_work else ()), continuation.render(),
+            *progress_section, *((*self._job_focus_sections(), *self._job_procedure_sections()) if job_work else ()), continuation.render(),
         ))
 
     async def _request_continuation(
@@ -5936,6 +6027,9 @@ class RobotApplication:
         self, *, job_work: bool, image_references: dict[str, RetainedImage] | None = None
     ) -> tuple[CognitionToolDefinition, ...]:
         tools = self.acquisition_tools()
+        context = self._execution_job_context() if job_work else None
+        if context is not None and context.binding.job.procedure_experiment:
+            return tuple(tool for tool in tools if tool.name == INSPECT_SELF_TOOL.name)
         if job_work and self.jobs is not None:
             tools = (*tools, SEARCH_FINDINGS_TOOL)
         if job_work and self._job_workspace_tools_available():
@@ -5959,6 +6053,9 @@ class RobotApplication:
     def _effect_tools_for_episode(
         self, *, job_work: bool, image_references: dict[str, RetainedImage] | None = None
     ) -> tuple[CognitionToolDefinition, ...]:
+        context = self._execution_job_context() if job_work else None
+        if context is not None and context.binding.job.procedure_experiment:
+            return ()
         tools = self.effect_tools()
         if not job_work:
             return tools

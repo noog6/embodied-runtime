@@ -1,6 +1,7 @@
 """Small local development and control interface for the running application."""
 
 import asyncio
+import json
 from collections.abc import Callable
 import math
 import logging
@@ -26,6 +27,7 @@ from embodied_runtime.jobs import (
     JobRun, JobRunStatus, JobTarget, JobTriggerType, WorkspaceError,
 )
 from embodied_runtime.jobs.focus import JobFocusProposal
+from embodied_runtime.jobs.procedure import ProcedureProposal, CONTENT_LIMITS
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
 from embodied_runtime.console_style import ConsoleStyle, colour_enabled
 from embodied_runtime.run_history import (
@@ -344,6 +346,11 @@ class RuntimeConsole:
                 "  job add <name> [options]       Add an enabled Job definition",
                 "  job update JOB<n> --description <text>",
                 "  job enable|disable JOB<n>      Change Job definition state",
+                "  job procedure experiment       Create disabled unscheduled experiment Job",
+                "  job procedure show|enable|disable JOB<n>",
+                "  job procedure activate|reject JOB<n> PROC<version>",
+                "  job procedure snapshot RUN<n>  Inspect retained snapshot and feedback",
+                "  job procedure seed JOB<n> --name <text> --purpose <text> --applicability <text> --required-capabilities <text> --steps <text> --verification <text> --stopping-conditions <text> [--source RUN<n>]",
                 "  job focus show|enable|disable JOB<n>",
                 "  job focus seed JOB<n> RUN<n> --question <text> [--status open|blocked] [--blocker <text>]",
                 "  job focus clear JOB<n> --reason <text>",
@@ -579,6 +586,8 @@ class RuntimeConsole:
 
     def _job_command(self, words: list[str]) -> str:
         action = words[1].lower() if len(words) > 1 else ""
+        if action == "procedure":
+            return self._job_procedure(words)
         if action == "focus":
             return self._job_focus(words)
         if action == "add":
@@ -800,6 +809,97 @@ class RuntimeConsole:
         if not enabled:
             self._application.discard_pending_job_activations(job_id)
         return f"JOB{job.id} {'enabled' if enabled else 'disabled'}."
+
+    def _job_procedure(self, words: list[str]) -> str:
+        usage = ('Usage: job procedure experiment; job procedure show|enable|disable JOB<n>; '
+                 'job procedure activate|reject JOB<n> PROC<version>; '
+                 'job procedure snapshot RUN<n>; job procedure seed JOB<n> '
+                 '--name <text> --purpose <text> --applicability <text> '
+                 '--required-capabilities <text> --steps <text> --verification <text> '
+                 '--stopping-conditions <text> [--source RUN<n>].')
+        app = self._application
+        store = app.jobs
+        if store is None:
+            return 'Jobs persistence is disabled.'
+        if len(words) < 3:
+            return usage
+        action = words[2].lower()
+        try:
+            if action == 'experiment' and len(words) == 3:
+                job = store.create_procedure_experiment()
+                link_work('definition_created', job.id)
+                return (f'Created JOB{job.id}: {job.name}; persisted; disabled, unscheduled; '
+                        'procedure policy enabled for this exact new Job. No Run started.')
+            if len(words) < 4:
+                return usage
+            if action == 'snapshot':
+                run_id = _catalog_id(words[3], 'RUN')
+                if len(words) != 4 or run_id is None:
+                    return usage
+                run = store.get_run(run_id)
+                if run is None:
+                    return f'Run not found: RUN{run_id}.'
+                evidence = store.get_run_procedure(run_id)
+                if evidence is None:
+                    return 'No retained procedure evidence: not opted in or outside the retention window.'
+                job = store.get_job(run.job_id)
+                applicable = (job is not None and job.procedure_enabled and
+                              evidence['definition_identity'] == store.focus_definition_identity(job.id))
+                return '\n'.join((f'RUN{run_id} JOB{run.job_id} independently accepted status={run.status.value}',
+                    f'Guidance currently permitted={str(applicable).lower()}; captured version is immutable.',
+                    'supplied records runtime projection; feedback is a cognition report, not verified use or effectiveness.',
+                    json.dumps(evidence, ensure_ascii=True, sort_keys=True)))
+            job_id = _catalog_id(words[3], 'JOB')
+            if job_id is None or action not in ('show', 'enable', 'disable', 'seed', 'activate', 'reject'):
+                return usage
+            job = store.get_job(job_id)
+            if job is None:
+                return f'Job not found: JOB{job_id}.'
+            if action == 'show' and len(words) == 4:
+                active, pending = store.get_procedure(job_id, 'active'), store.get_procedure(job_id, 'pending')
+                return '\n'.join((f'JOB{job_id} procedure enabled={str(job.procedure_enabled).lower()}',
+                    f'Active: {"PROC" + str(active["version"]) if active else "none"}; pending: {"PROC" + str(pending["version"]) if pending else "none"}',
+                    f'Active compatible={str(active is not None and active["definition_identity"] == store.focus_definition_identity(job_id)).lower()}',
+                    'Operator review is a runtime fact, not proof of current-world truth or effectiveness.',
+                    json.dumps(dict(active=active, pending=pending), ensure_ascii=True, sort_keys=True)))
+            # Disablement is an immediate kill switch, including live/parked work.
+            if action == 'disable' and len(words) == 4:
+                store.set_procedure_enabled(job_id, False)
+                return f'JOB{job_id} procedure disabled; persisted; live guidance withheld.'
+            if any(c.job_id == job_id for c in app.job_execution_contexts):
+                return f'Unable to change JOB{job_id} procedure: its current JobRun is still active.'
+            if action == 'enable' and len(words) == 4:
+                store.set_procedure_enabled(job_id, True)
+                return f'JOB{job_id} procedure enabled; persisted.'
+            if action in ('activate', 'reject'):
+                version = _catalog_id(words[4], 'PROC') if len(words) == 5 else None
+                if version is None:
+                    return usage
+                store.review_procedure(job_id, version, activate=action == 'activate')
+                return f'JOB{job_id} PROC{version} {"activated" if action == "activate" else "rejected"}; persisted.'
+            if action == 'seed':
+                if len(words[4:]) % 2:
+                    return usage
+                options = {}
+                for index in range(4, len(words), 2):
+                    key = words[index].removeprefix('--').replace('-', '_')
+                    if not words[index].startswith('--') or key not in (*CONTENT_LIMITS, 'source') or key in options:
+                        return usage
+                    options[key] = words[index + 1]
+                source_text = options.pop('source', None)
+                source_id = _catalog_id(source_text, 'RUN') if source_text else None
+                if source_text is not None and source_id is None:
+                    return usage
+                proposal = ProcedureProposal.parse({**options, 'basis': None})
+                disposition = store.seed_procedure(job_id, proposal, source_id)
+                pending = store.get_procedure(job_id, 'pending')
+                return (f'JOB{job_id} candidate disposition={disposition}; pending PROC{pending["version"]}; '
+                        'persisted; operator-authored seed requires explicit activation.')
+            return usage
+        except (KeyError, TypeError, ValueError) as error:
+            return f'Unable to administer procedure: {error}.'
+        except Exception:
+            return 'Unable to administer procedure: persistence operation failed.'
 
     def _job_focus(self, words: list[str]) -> str:
         usage = ("Usage: job focus show|enable|disable JOB<n>; "

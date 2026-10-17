@@ -201,3 +201,7 @@ requires an exact completed source Run belonging to that Job and records operato
 authorship; its source reference does not establish that its text appeared in the
 report. See [Carry-forward Job focus](job-focus.md) for bounds, transaction and
 provenance rules, and the manual JOB15/RUN391 pilot.
+
+Procedure administration and the exact `job procedure` command grammar, including
+explicit experimental Job setup and retained Run inspection, are documented in
+[Job procedures](job-procedures.md).

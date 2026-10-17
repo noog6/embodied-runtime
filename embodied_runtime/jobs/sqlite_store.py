@@ -11,6 +11,8 @@ import unicodedata
 from zoneinfo import ZoneInfo
 
 from .focus import JobFocus, JobFocusProposal
+from .procedure import (ProcedureProposal, ProcedureFeedback, MAX_PROCEDURE_RUNS,
+                        EXPERIMENT_DESCRIPTION, render_procedure)
 from .model import (
     Finding, FindingEvidence, FindingEvidenceClass, FindingKind,
     MAX_FINDING_QUERY_CHARS, MAX_FINDING_SEARCH_LIMIT,
@@ -19,7 +21,7 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _SCHEDULES_SCHEMA = """CREATE TABLE job_schedules (
        job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
@@ -59,6 +61,21 @@ _JOB_RUNS_SCHEMA = """CREATE TABLE job_runs (
        status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','stopped','interrupted')),
        created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
        outcome_summary TEXT, error_summary TEXT, result_report TEXT)"""
+_PROCEDURE_SCHEMA = (
+    """CREATE TABLE job_procedures (
+        job_id INTEGER NOT NULL REFERENCES jobs(id), version INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('active','pending')),
+        record_json TEXT NOT NULL CHECK(length(record_json)<=24000),
+        PRIMARY KEY(job_id,version), UNIQUE(job_id,state))""",
+    """CREATE TABLE job_run_procedures (
+        run_id INTEGER PRIMARY KEY REFERENCES job_runs(id),
+        job_id INTEGER NOT NULL REFERENCES jobs(id), definition_identity TEXT NOT NULL,
+        snapshot_json TEXT CHECK(snapshot_json IS NULL OR length(snapshot_json)<=24000),
+        supplied INTEGER NOT NULL DEFAULT 0 CHECK(supplied IN (0,1)),
+        feedback_json TEXT CHECK(feedback_json IS NULL OR length(feedback_json)<=8000),
+        candidate_disposition TEXT CHECK(candidate_disposition IS NULL OR candidate_disposition IN ('proposed','pending_exists')))""",
+    "CREATE INDEX idx_job_run_procedures_job ON job_run_procedures(job_id,run_id)",
+)
 _SCHEMA = (
     """CREATE TABLE jobs (
        id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
@@ -67,6 +84,9 @@ _SCHEMA = (
        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
        carry_forward_enabled INTEGER NOT NULL DEFAULT 0 CHECK(carry_forward_enabled IN (0,1)),
        focus_version INTEGER NOT NULL DEFAULT 0,
+       procedure_enabled INTEGER NOT NULL DEFAULT 0 CHECK(procedure_enabled IN (0,1)),
+       procedure_version INTEGER NOT NULL DEFAULT 0,
+       procedure_experiment INTEGER NOT NULL DEFAULT 0 CHECK(procedure_experiment IN (0,1)),
        CHECK((target_kind IS NULL AND target_identifier IS NULL) OR
              (target_kind IS NOT NULL AND target_identifier IS NOT NULL)))""",
     _JOB_RUNS_SCHEMA,
@@ -82,6 +102,7 @@ _SCHEMA = (
     *_FINDINGS_INDEXES,
     _FOCUS_SCHEMA,
     _HOURLY_ACTIVATION_SCHEMA,
+    *_PROCEDURE_SCHEMA,
 )
 
 
@@ -105,6 +126,20 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
+        if version == 11:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute("ALTER TABLE jobs ADD COLUMN procedure_enabled INTEGER NOT NULL DEFAULT 0 CHECK(procedure_enabled IN (0,1))")
+                self._connection.execute("ALTER TABLE jobs ADD COLUMN procedure_version INTEGER NOT NULL DEFAULT 0")
+                self._connection.execute("ALTER TABLE jobs ADD COLUMN procedure_experiment INTEGER NOT NULL DEFAULT 0 CHECK(procedure_experiment IN (0,1))")
+                for statement in _PROCEDURE_SCHEMA:
+                    self._connection.execute(statement)
+                self._connection.execute("PRAGMA user_version=12")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+            return
         if version == 10:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -121,6 +156,7 @@ class SQLiteJobStore:
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version == 9:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -534,7 +570,13 @@ class SQLiteJobStore:
                        focus_definition: str | None = None,
                        focus_job_id: int | None = None,
                        focus_task_id: str | None = None,
-                       focus_episode_id: int | None = None) -> JobRun:
+                       focus_episode_id: int | None = None,
+                       procedure_candidate: ProcedureProposal | None = None,
+                       procedure_feedback: ProcedureFeedback | None = None,
+                       procedure_definition: str | None = None,
+                       procedure_job_id: int | None = None,
+                       procedure_task_id: str | None = None,
+                       procedure_episode_id: int | None = None) -> JobRun:
         _id(run_id, "job run")
         if not isinstance(status, JobRunStatus):
             raise TypeError("status must be a JobRunStatus")
@@ -571,6 +613,31 @@ class SQLiteJobStore:
                 self._validate_focus_policy(current.job_id, focus_definition)
                 self._apply_focus(current.job_id, next_run, focus_update, "model",
                                   focus_task_id, focus_episode_id)
+            if procedure_candidate is not None or procedure_feedback is not None:
+                if current.job_id != procedure_job_id:
+                    raise ValueError("procedure requires exact Job ownership")
+                self.validate_procedure_policy(current.job_id, procedure_definition)
+                evidence = self.get_run_procedure(run_id)
+                if (evidence is None or evidence['job_id'] != current.job_id
+                        or evidence['definition_identity'] != procedure_definition):
+                    raise ValueError("procedure occurrence was not opted in")
+                if procedure_candidate is not None:
+                    if status is not JobRunStatus.COMPLETED:
+                        raise ValueError("procedure nomination requires completed outcome")
+                    disposition = self._nominate_procedure(current.job_id, procedure_candidate,
+                        next_run, 'model', procedure_task_id, procedure_episode_id)
+                    self._connection.execute("UPDATE job_run_procedures SET candidate_disposition=? WHERE run_id=?",
+                                             (disposition, run_id))
+                if procedure_feedback is not None:
+                    if not isinstance(procedure_feedback, ProcedureFeedback):
+                        raise TypeError("typed procedure feedback required")
+                    snapshot = evidence['snapshot']
+                    if (status not in (JobRunStatus.COMPLETED, JobRunStatus.FAILED)
+                            or not evidence['supplied'] or snapshot is None
+                            or snapshot['version'] != procedure_feedback.version):
+                        raise ValueError("feedback requires the exact supplied procedure version")
+                    self._connection.execute("UPDATE job_run_procedures SET feedback_json=? WHERE run_id=?",
+                        (json.dumps(asdict(procedure_feedback)), run_id))
             self._connection.commit()
             return next_run
         except BaseException:
@@ -678,6 +745,160 @@ class SQLiteJobStore:
         parameters = ",".join("?" for _ in values)
         self._connection.execute(
             f"INSERT OR REPLACE INTO job_focus ({columns}) VALUES ({parameters})", tuple(values.values()))
+
+    def validate_procedure_policy(self, job_id: int, definition: str | None) -> None:
+        job = self.get_job(job_id)
+        if job is None or not job.procedure_enabled:
+            raise ValueError('procedure policy is disabled')
+        if definition != self.focus_definition_identity(job_id):
+            raise ValueError('procedure Job definition changed')
+
+    def set_procedure_enabled(self, job_id: int, enabled: bool) -> Job:
+        if type(enabled) is not bool:
+            raise TypeError('procedure enabled must be boolean')
+        if self.get_job(job_id) is None:
+            raise KeyError('unknown procedure Job')
+        self._connection.execute('UPDATE jobs SET procedure_enabled=? WHERE id=?', (int(enabled), job_id))
+        return self.get_job(job_id)
+
+    def create_procedure_experiment(self) -> Job:
+        # Definition and policy are one explicit administrative transaction.
+        self._connection.execute('BEGIN IMMEDIATE')
+        try:
+            job = self.create_job('Procedure Learning Experiment', EXPERIMENT_DESCRIPTION, enabled=False)
+            self._connection.execute('UPDATE jobs SET procedure_experiment=1 WHERE id=?', (job.id,))
+            job = self.set_procedure_enabled(job.id, True)
+            self._connection.commit()
+            return job
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+    def get_procedure(self, job_id: int, state: str) -> dict | None:
+        _id(job_id, 'job')
+        if state not in ('active', 'pending'):
+            raise ValueError('invalid procedure state')
+        row = self._connection.execute(
+            'SELECT record_json FROM job_procedures WHERE job_id=? AND state=?', (job_id, state)).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def _nominate_procedure(self, job_id: int, proposal: ProcedureProposal,
+                            source: JobRun | None, author: str,
+                            task_id: str | None = None, episode_id: int | None = None) -> str:
+        if not isinstance(proposal, ProcedureProposal):
+            raise TypeError('typed procedure proposal required')
+        if source is not None and (source.job_id != job_id or source.status is not JobRunStatus.COMPLETED):
+            raise ValueError('procedure source must be an exact completed Run belonging to this Job')
+        if author == 'model':
+            if source is None or not isinstance(task_id, str) or not task_id or len(task_id) > 100:
+                raise ValueError('model procedure requires exact source Task')
+            _id(episode_id, 'episode')
+        elif author != 'operator' or task_id is not None or episode_id is not None or proposal.basis is not None:
+            raise ValueError('invalid operator procedure provenance')
+        if self.get_procedure(job_id, 'pending') is not None:
+            return 'pending_exists'
+        self._connection.execute('UPDATE jobs SET procedure_version=procedure_version+1 WHERE id=?', (job_id,))
+        version = self._connection.execute('SELECT procedure_version FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
+        record = dict(job_id=job_id, version=version, author=author,
+                      source_run_id=source.id if source else None,
+                      source_finished_at=_format(source.finished_at) if source else None,
+                      source_task_id=task_id, source_episode_id=episode_id,
+                      created_at=_format(self._now()), activated_at=None,
+                      definition_identity=self.focus_definition_identity(job_id),
+                      basis=proposal.basis,
+                      instructions={key: value for key, value in asdict(proposal).items() if key != 'basis'})
+        render_procedure(record)  # Validate projection bound before publishing.
+        self._connection.execute('INSERT INTO job_procedures VALUES (?,?,?,?)',
+                                 (job_id, version, 'pending', json.dumps(record)))
+        return 'proposed'
+
+    def seed_procedure(self, job_id: int, proposal: ProcedureProposal,
+                       source_run_id: int | None = None) -> str:
+        self._connection.execute('BEGIN IMMEDIATE')
+        try:
+            self.validate_procedure_policy(job_id, self.focus_definition_identity(job_id))
+            source = None if source_run_id is None else self.get_run(source_run_id)
+            if source_run_id is not None and source is None:
+                raise ValueError('unknown procedure source Run')
+            disposition = self._nominate_procedure(job_id, proposal, source, 'operator')
+            self._connection.commit()
+            return disposition
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+    def review_procedure(self, job_id: int, version: int, *, activate: bool) -> None:
+        _id(job_id, 'job')
+        _id(version, 'procedure version')
+        if type(activate) is not bool:
+            raise TypeError('activate must be boolean')
+        self._connection.execute('BEGIN IMMEDIATE')
+        try:
+            pending = self.get_procedure(job_id, 'pending')
+            if pending is None or pending['version'] != version:
+                raise ValueError('exact pending procedure version does not match')
+            if activate:
+                self.validate_procedure_policy(job_id, pending['definition_identity'])
+                pending['activated_at'] = _format(self._now())
+                render_procedure(pending)
+                self._connection.execute("DELETE FROM job_procedures WHERE job_id=? AND state='active'", (job_id,))
+                self._connection.execute("UPDATE job_procedures SET state='active',record_json=? WHERE job_id=? AND version=? AND state='pending'",
+                                         (json.dumps(pending), job_id, version))
+            else:
+                self._connection.execute("DELETE FROM job_procedures WHERE job_id=? AND version=? AND state='pending'", (job_id, version))
+            self._connection.commit()
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+    def capture_run_procedure(self, job_id: int, run_id: int) -> dict:
+        """Persist selection once, before cognition; never recover execution on restart."""
+        self._connection.execute('BEGIN IMMEDIATE')
+        try:
+            run = self.get_run(run_id)
+            if run is None or run.job_id != job_id or run.status is not JobRunStatus.PENDING:
+                raise ValueError('procedure snapshot requires exact pending occurrence')
+            definition = self.focus_definition_identity(job_id)
+            self.validate_procedure_policy(job_id, definition)
+            active = self.get_procedure(job_id, 'active')
+            if active is not None and active['definition_identity'] != definition:
+                active = None
+            if active is not None:
+                active['snapshot_at'] = _format(self._now())
+                render_procedure(active)
+            # Retain a fixed per-Job window including this Run. Never delete live evidence.
+            self._connection.execute('''DELETE FROM job_run_procedures WHERE run_id IN (
+                SELECT p.run_id FROM job_run_procedures p JOIN job_runs r ON r.id=p.run_id
+                WHERE p.job_id=? AND r.status NOT IN ('pending','running')
+                ORDER BY p.run_id DESC LIMIT -1 OFFSET ?)''', (job_id, MAX_PROCEDURE_RUNS - 1))
+            count = self._connection.execute('SELECT count(*) FROM job_run_procedures WHERE job_id=?', (job_id,)).fetchone()[0]
+            if count >= MAX_PROCEDURE_RUNS:
+                raise ValueError('procedure Run retention limit reached by live occurrences')
+            self._connection.execute('''INSERT INTO job_run_procedures
+                (run_id,job_id,definition_identity,snapshot_json) VALUES (?,?,?,?)''',
+                (run_id, job_id, definition, json.dumps(active) if active else None))
+            evidence = self.get_run_procedure(run_id)
+            self._connection.commit()
+            return evidence
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+    def get_run_procedure(self, run_id: int) -> dict | None:
+        _id(run_id, 'run')
+        row = self._connection.execute('SELECT * FROM job_run_procedures WHERE run_id=?', (run_id,)).fetchone()
+        if row is None:
+            return None
+        return dict(run_id=run_id, job_id=row['job_id'], definition_identity=row['definition_identity'],
+                    snapshot=json.loads(row['snapshot_json']) if row['snapshot_json'] else None,
+                    supplied=bool(row['supplied']),
+                    feedback=json.loads(row['feedback_json']) if row['feedback_json'] else None,
+                    candidate_disposition=row['candidate_disposition'])
+
+    def mark_procedure_supplied(self, run_id: int) -> None:
+        # A projection is a runtime fact, never a claim of use or effectiveness.
+        self._connection.execute('''UPDATE job_run_procedures SET supplied=1
+            WHERE run_id=? AND snapshot_json IS NOT NULL AND supplied=0''', (run_id,))
 
     def create_finding(self, job_id: int, run_id: int, task_id: str, episode_id: int,
                        topic: str, kind: FindingKind, claim: str,
@@ -789,7 +1010,8 @@ def _job(row: sqlite3.Row) -> Job:
     target = None if row["target_kind"] is None else JobTarget(row["target_kind"], row["target_identifier"])
     return Job(row["id"], row["name"], row["description"], bool(row["enabled"]),
                target, _parse(row["created_at"]), _parse(row["updated_at"]),
-               bool(row["carry_forward_enabled"]))  # type: ignore[arg-type]
+               bool(row["carry_forward_enabled"]), bool(row["procedure_enabled"]),
+               bool(row["procedure_experiment"]))  # type: ignore[arg-type]
 
 
 def _run(row: sqlite3.Row) -> JobRun:

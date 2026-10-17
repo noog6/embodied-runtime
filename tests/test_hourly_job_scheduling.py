@@ -191,6 +191,11 @@ class HourlyScheduleStoreTests(unittest.TestCase):
                     self.store.get_schedule(self.job.id), focus)
         # Rebuild only the schedule table as the actual v10 shape.
         self.store._connection.executescript("""
+            DROP TABLE job_run_procedures;
+            DROP TABLE job_procedures;
+            ALTER TABLE jobs DROP COLUMN procedure_enabled;
+            ALTER TABLE jobs DROP COLUMN procedure_experiment;
+            ALTER TABLE jobs DROP COLUMN procedure_version;
             ALTER TABLE job_schedules RENAME TO schedules_new;
             CREATE TABLE job_schedules (
                 job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
