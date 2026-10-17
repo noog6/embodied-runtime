@@ -49,6 +49,7 @@ class WorkingMemoryTurn:
     tool_outcomes: tuple[WorkingMemoryToolOutcome, ...] = ()
     observations: tuple[WorkingMemoryObservation, ...] = ()
     channel: InteractionChannel | None = None
+    request_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_aware(self.completed_at, "completed_at")
@@ -85,6 +86,7 @@ class WorkingMemory:
         completed_at: datetime,
         observations: Sequence[WorkingMemoryObservation] = (),
         channel: InteractionChannel | None = None,
+        request_id: str | None = None,
     ) -> WorkingMemoryTurn:
         turn = WorkingMemoryTurn(
             operator_text=_bounded(operator_text, self.text_limit),
@@ -102,6 +104,7 @@ class WorkingMemory:
                 for observation in observations[:MAX_OBSERVATIONS_PER_TURN]
             ),
             channel=channel,
+            request_id=request_id,
         )
         self._turns.append(turn)
         return turn
@@ -142,6 +145,7 @@ def render_working_memory(turns: Sequence[WorkingMemoryTurn]) -> str:
             (
                 "",
                 f"Turn {index}",
+                f"  request_id: {turn.request_id or 'unavailable'}",
                 f"  completed_at: {turn.completed_at.isoformat(timespec='seconds')}",
                 f"  channel: {turn.channel.value if turn.channel is not None else 'none'}",
                 f"  operator: {json.dumps(turn.operator_text, ensure_ascii=False)}",

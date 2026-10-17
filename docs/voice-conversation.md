@@ -252,3 +252,9 @@ is passed to `RobotApplication` with source `voice` and creates a separate opera
 episode. That episode closes before TTS playback and before follow-up listening;
 a second voice turn creates a new episode and obtains continuity from bounded
 WorkingMemory. Voice owns no episode identity or provider conversation session.
+
+With conversation history enabled, completed bounded voice dialogue references its
+operator request. The playback boundary separately records an attempted output and
+adapter-returned `playback_completed`, or uncertainty after errors/cancellation.
+Completion does not prove that anyone heard the speech; no audio is retained by this
+ledger. See [conversation continuity](conversation-history.md).

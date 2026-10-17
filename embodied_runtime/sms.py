@@ -14,6 +14,7 @@ import time
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from embodied_runtime.conversation_history.continuity import delivery_attempt
 from embodied_runtime.attachments import (
     ImageAttachment, MAX_INTERACTION_IMAGE_BYTES,
     SUPPORTED_INTERACTION_IMAGE_TYPES,
@@ -258,7 +259,7 @@ def _matches_magic(media_type: str, data: bytes) -> bool:
 
 
 class SmsSender(Protocol):
-    def send(self, *, from_: str, to: str, body: str) -> None: ...
+    def send(self, *, from_: str, to: str, body: str) -> Any: ...
 
 
 @dataclass(slots=True)
@@ -375,8 +376,8 @@ class TwilioSmsGateway:
     ) -> bool:
         return bool(signature) and self._validator.validate(url, form, signature)
 
-    def send(self, *, from_: str, to: str, body: str) -> None:
-        self._client.messages.create(from_=from_, to=to, body=body)
+    def send(self, *, from_: str, to: str, body: str) -> Any:
+        return self._client.messages.create(from_=from_, to=to, body=body)
 
     def send_media(self, *, from_: str, to: str, body: str,
                    media_url: str) -> Any:
@@ -429,22 +430,27 @@ class TwilioSmsService(OperatorMessageSink):
         token = self._outbound_media.stage(image.data, image.media_type)
         extension = "jpg" if image.media_type == "image/jpeg" else "png"
         media_url = f"{self.settings.public_media_base_url}{OUTBOUND_MEDIA_PATH}{token}.{extension}"
+        attempt = delivery_attempt(channel=self.channel, kind='image')
         try:
             response = await asyncio.to_thread(
                 self._gateway.send_media, from_=self.settings.twilio_number,
                 to=self.settings.operator_number, body=caption, media_url=media_url,
             )
         except asyncio.CancelledError:
+            attempt.finish('submission_unconfirmed', failure='cancelled')
             # Submission may already have happened in the worker thread. Retain media
             # for the fetch window and do not invite an automatic duplicate.
             raise
         except Exception as error:
             if _provider_failure_is_rejection(error):
+                attempt.finish('provider_rejected', failure='provider_rejected')
                 self._outbound_media.remove(token)
                 return ImageDeliveryEvidence("rejected", reason="provider_rejected")
             # Timeouts, connection failures, and unknown transport errors may happen
             # after submission. Retain the bearer and never automatically resend.
+            attempt.finish('submission_unconfirmed', failure='transport_error')
             return ImageDeliveryEvidence("uncertain", reason="submission_uncertain")
+        attempt.finish('provider_accepted', provider_reference=getattr(response, 'sid', None))
         return ImageDeliveryEvidence(
             "accepted",
             _bounded_provider_value(getattr(response, "sid", None), 64),
@@ -481,14 +487,25 @@ class TwilioSmsService(OperatorMessageSink):
             raise ValueError(
                 f"SMS operator message must be at most {MAX_SMS_BODY_CHARS} characters"
             )
+        attempt = delivery_attempt(channel=self.channel,
+            kind='report' if message.report_source is not None else 'message',
+            report_source=message.report_source)
         try:
-            await asyncio.to_thread(
+            receipt = await asyncio.to_thread(
                 self._gateway.send, from_=self.settings.twilio_number,
                 to=self.settings.operator_number, body=body,
             )
-        except Exception:
+        except asyncio.CancelledError:
+            attempt.finish('submission_unconfirmed', failure='cancelled')
+            raise
+        except Exception as error:
+            rejected = _provider_failure_is_rejection(error)
+            attempt.finish('provider_rejected' if rejected else 'submission_unconfirmed',
+                           failure='provider_rejected' if rejected else 'transport_error')
             LOGGER.error("[SMS] operator_delivery status=failed reason=provider_error")
             raise
+        else:
+            attempt.finish('provider_accepted', provider_reference=getattr(receipt, 'sid', None))
         LOGGER.info("[SMS] operator_delivery chars=%s text=%r status=sent",
                     len(body), body)
 
@@ -749,23 +766,37 @@ class TwilioSmsService(OperatorMessageSink):
                     continue
                 body = response.strip()
                 if not body:
+                    delivery_attempt(response, channel=self.channel).finish(
+                        'not_submitted', failure='empty_response')
                     LOGGER.info("[SMS] reply status=failed reason=empty")
                     continue
                 if len(body) > MAX_SMS_BODY_CHARS:
                     LOGGER.info("[SMS] reply status=failed reason=too_long")
                     body = TOO_LONG_REPLY
-                await self._send_reply(message, body)
+                await self._send_reply(message, body, response=response,
+                    replaced=body != response.strip())
             finally:
                 self._inbox.task_done()
 
-    async def _send_reply(self, message: SmsInboundMessage, body: str) -> None:
+    async def _send_reply(self, message: SmsInboundMessage, body: str, *,
+                          response=None, replaced=False) -> None:
+        attempt = delivery_attempt(response, channel=self.channel,
+            output_variant='sms_length_explanation' if replaced else 'authored_output')
         try:
-            await asyncio.to_thread(
+            receipt = await asyncio.to_thread(
                 self._gateway.send, from_=self.settings.twilio_number,
                 to=message.sender, body=body,
             )
-        except Exception:
+        except asyncio.CancelledError:
+            attempt.finish('submission_unconfirmed', failure='cancelled')
+            raise
+        except Exception as error:
+            rejected = _provider_failure_is_rejection(error)
+            attempt.finish('provider_rejected' if rejected else 'submission_unconfirmed',
+                           failure='provider_rejected' if rejected else 'transport_error')
             LOGGER.error("[SMS] reply status=failed reason=provider_error")
         else:
+            attempt.finish('provider_accepted', provider_reference=getattr(receipt, 'sid', None),
+                           failure='response_replaced' if replaced else None)
             LOGGER.info("[SMS] reply message_sid=%s chars=%s text=%r status=sent",
                         message.message_sid, len(body), body)

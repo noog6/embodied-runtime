@@ -64,7 +64,7 @@ class ConversationHistoryStoreTests(unittest.TestCase):
             connection.close()
             self.assertEqual(columns, (
                 "id", "session_id", "completed_at", "channel",
-                "operator_text", "assistant_text",
+                "operator_text", "assistant_text", "request_id",
             ))
 
     def test_naive_completion_timestamp_is_rejected(self):

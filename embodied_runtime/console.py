@@ -12,12 +12,15 @@ import sys
 import time
 from typing import TextIO
 
+from embodied_runtime.conversation_history.continuity import (
+    AuthoredResponse, CURRENT_REQUEST, delivery_attempt, link_work,
+)
 from embodied_runtime.app import RobotApplication
 from embodied_runtime.cognition import CognitionError
 from embodied_runtime.platform import PlatformSnapshot
 from embodied_runtime.interaction import (
     CONSOLE_ADMINISTRATIVE, CONSOLE_DIALOGUE, ConsoleOperatorMessageChannel,
-    InteractionContext,
+    InteractionContext, InteractionChannel,
 )
 from embodied_runtime.jobs import (
     JobRun, JobRunStatus, JobTarget, JobTriggerType, WorkspaceError,
@@ -73,6 +76,20 @@ class RuntimeConsole:
         return CONSOLE_ADMINISTRATIVE
 
     def execute(self, command: str) -> tuple[str, bool]:
+        if not command.lstrip().lower().startswith('job ') or CURRENT_REQUEST.get() is not None:
+            return self._execute(command)
+        evidence = self._application.continuity.begin(InteractionChannel.CONSOLE, 'administrative')
+        token = CURRENT_REQUEST.set(evidence)
+        try:
+            report, done = self._execute(command)
+            self._application.continuity.prepared(evidence)
+            if self._application.conversation_history is not None:
+                report += f"\nRequest: {evidence.id}"
+            return AuthoredResponse(report, evidence), done
+        finally:
+            CURRENT_REQUEST.reset(token)
+
+    def _execute(self, command: str) -> tuple[str, bool]:
         """Return report text and whether the session should terminate."""
         raw_parts = command.lstrip().split(maxsplit=1)
         if (raw_parts and raw_parts[0].lower() in {"ask", "voice"}) or (
@@ -162,6 +179,20 @@ class RuntimeConsole:
         return f"Unknown command: {words[0]}. Type 'help' for commands.", False
 
     async def execute_async(self, command: str) -> tuple[str, bool]:
+        if not command.lstrip().lower().startswith('job '):
+            return await self._execute_async(command)
+        evidence = self._application.continuity.begin(InteractionChannel.CONSOLE, 'administrative')
+        token = CURRENT_REQUEST.set(evidence)
+        try:
+            report, done = await self._execute_async(command)
+            self._application.continuity.prepared(evidence)
+            if self._application.conversation_history is not None:
+                report += f"\nRequest: {evidence.id}"
+            return AuthoredResponse(report, evidence), done
+        finally:
+            CURRENT_REQUEST.reset(token)
+
+    async def _execute_async(self, command: str) -> tuple[str, bool]:
         """Execute commands, including semantic operations that must be awaited."""
         raw_parts = command.lstrip().split(maxsplit=1)
         if raw_parts and raw_parts[0].lower() == "voice":
@@ -178,7 +209,9 @@ class RuntimeConsole:
                 )
             except (CognitionError, RuntimeError, ValueError) as error:
                 return f"Cognition request failed: {error}.", False
-            return f"{self._application.profile.name}: {response}", False
+            report = f"{self._application.profile.name}: {response}"
+            return (response.with_text(report) if isinstance(response, AuthoredResponse)
+                    else report), False
         try:
             words = shlex.split(command)
         except ValueError as error:
@@ -742,6 +775,7 @@ class RuntimeConsole:
             if store is None:
                 raise RuntimeError("Jobs persistence is disabled")
             job = store.create_job(name, description, target=target)
+            link_work('definition_created', job.id)
         except (KeyError, RuntimeError, TypeError, ValueError):
             return "Unable to add Job: invalid name, description, or target."
         except Exception:
@@ -1465,7 +1499,15 @@ async def run_console_session(
                 rendered = style.operator_message(
                     console.operator_message_prefix, message.text
                 )
-                terminal.write(f"\n{rendered}\n\n")
+                try:
+                    terminal.write(f"\n{rendered}\n\n")
+                except BaseException:
+                    if message.delivery_attempt is not None:
+                        message.delivery_attempt.finish('submission_unconfirmed', failure='output_error')
+                    raise
+                else:
+                    if message.delivery_attempt is not None:
+                        message.delivery_attempt.finish('terminal_written')
                 if input_task in done and input_task.result() is not None:
                     # Input and delivery became ready together; process input next.
                     line = input_task.result()
@@ -1477,6 +1519,13 @@ async def run_console_session(
             return
         report, should_exit = await console.execute_async(line)
         if report:
-            terminal.write(f"\n{style.report(report)}\n\n")
+            attempt = delivery_attempt(report, channel=InteractionChannel.CONSOLE)
+            try:
+                terminal.write(f"\n{style.report(report)}\n\n")
+            except BaseException:
+                attempt.finish('submission_unconfirmed', failure='output_error')
+                raise
+            else:
+                attempt.finish('terminal_written')
         if should_exit:
             return

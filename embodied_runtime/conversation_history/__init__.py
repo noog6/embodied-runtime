@@ -1,4 +1,4 @@
-"""Durable, bounded dialogue history for cross-session continuity."""
+"""Durable, bounded dialogue history and request continuity."""
 
 from .model import (
     MAX_ASSISTANT_TEXT_CHARS, MAX_CROSS_CHANNEL_RECORDS, MAX_OPERATOR_TEXT_CHARS,
