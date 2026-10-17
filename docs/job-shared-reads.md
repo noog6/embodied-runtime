@@ -225,6 +225,14 @@ these are documentation placeholders, not literal selector syntax.
    Operator inspection uses its existing authority. This walkthrough validates
    information access, not improved autonomous reasoning or physical observations.
 
+## Ordinary reflection composition
+
+The [reflective continuity experiment](reflective-continuity.md) combines one own
+state read, one selected historical source, and one own-Workspace write per
+occurrence. Its small ledger records incorporated references rather than claiming
+all activity before a finish time was examined. Installation and scheduling are
+explicit operator actions; it grants no additional permissions or execution budget.
+
 ## Automated validation
 
 ```sh

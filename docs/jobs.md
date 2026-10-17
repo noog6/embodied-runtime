@@ -1,5 +1,9 @@
 # Jobs
 
+For an operator-installed ordinary Job connecting earlier accounts to selected
+historical sources, see the [reflective continuity experiment](reflective-continuity.md).
+It adds no runtime mechanism or startup Job.
+
 This page specifies how the generic Job machinery works. For a concise gallery
 of practical compositions exercised during Mira development, see [Tested Job
 patterns](tested-jobs.md); those examples are not built-in Jobs.

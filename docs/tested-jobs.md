@@ -248,6 +248,25 @@ semantics.
 
 **Validation:** Automated mechanisms + Physical Mira runtime.
 
+## Opt-in reflective continuity experiment
+
+**Responsibility:** Revisit a small prior account against one source from an
+operator-selected set of two or three Jobs; save a dated, attributed reflection,
+at most three unresolved questions, and a bounded record of incorporated sources.
+A quiet or limited reflection is valid.
+
+**Runtime features exercised:** Existing shared historical reads, exact
+Job/Run or Workspace version provenance, own-Job atomic text writes, bounded
+episodes, terminal reports, and existing operator schedule/stop controls.
+
+**What this pattern demonstrates:** A later ordinary occurrence can revise an
+earlier question using a new source without a continuous provider session,
+reflection scheduler, semantic-memory promotion, or invented coverage watermark.
+
+**Validation:** Automated scripted fixture only. Its insights are explicitly
+authored test data; independent model usefulness and adherence still need a live
+trial. See the [complete definition and operator walkthrough](reflective-continuity.md).
+
 ## Development context and boundaries
 
 Physical development runs have exercised multiple stewardship Jobs concurrently,

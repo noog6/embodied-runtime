@@ -1,0 +1,30 @@
+# Ordinary-Job experiment; creates/schedules no Jobs at startup.
+# Uses Mira's existing catalog. Shut down its other runtime before launching.
+# These action/message restrictions apply to every Job in this runtime process.
+[runtime]
+profile = "mira"
+hardware = "virtual"
+camera = "none"
+cognition = "openai-responses"
+vision = "none"
+mode = "console"
+timezone = "America/Toronto"
+
+[cognition]
+model = "gpt-6.1-sol"
+
+[initiative]
+enabled = true
+actions = false
+messages = false
+continuation = false
+goal_closure = false
+
+[earcons]
+enabled = false
+
+[jobs]
+enabled = true
+database_path = "../data/jobs.sqlite3"
+auto_continue = false
+shared_reads_enabled = true
