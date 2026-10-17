@@ -820,6 +820,13 @@ not independent mutable owners. A parked context retains the exact paused Task
 and continuation but owns no active attention episode, provider request, or
 physical-resource lease.
 
+Within Job work, ordinary acquisition and effect projection validates the exact
+context's running Task/ActiveGoal binding. It does not depend on a global goal
+left by another Job: completing or parking that other occurrence must not remove
+inspection tools from valid work. Conversely, a stopping, parked, terminal or stale
+context cannot borrow a sibling's global goal to obtain tools. Existing initiative
+permissions, episode budgets and capability-specific execution checks still apply.
+
 The context registry is the authority for bounded Phase-3A Job-vs-Job cognition
 concurrency. Runnable and parked contexts consume no work slot until their exact
 asyncio cognition task starts. The operator lane remains independent, while
