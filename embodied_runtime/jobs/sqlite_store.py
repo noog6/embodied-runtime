@@ -304,6 +304,18 @@ class SQLiteJobStore:
             ).fetchall()
         return tuple(_job(row) for row in rows)
 
+    def discover_jobs(self, *, after_id: int = 0, limit: int = 5) -> tuple[Job, ...]:
+        """Bounded catalog page, including disabled Jobs, in stable numeric ID order."""
+        if type(after_id) is not int or not 0 <= after_id <= 2**63 - 1:
+            raise ValueError("invalid catalog cursor")
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("invalid catalog limit")
+        rows = self._connection.execute(
+            "SELECT * FROM jobs WHERE id > ? ORDER BY id LIMIT ?",
+            (after_id, limit),
+        ).fetchall()
+        return tuple(_job(row) for row in rows)
+
     def set_job_enabled(self, job_id: int, enabled: bool) -> Job:
         _id(job_id, "job")
         if not isinstance(enabled, bool):

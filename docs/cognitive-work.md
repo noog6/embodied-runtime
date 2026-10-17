@@ -36,8 +36,10 @@ interpretation and delivery use retained snapshots; saving and sending require
 no vision call. The Gemini/OpenAI label illustrates Mira's configured deployment;
 the runtime supports an explicitly configured ordered provider chain.
 
-Job work accesses only its own Workspace through the exact live execution
-binding. Operator access resolves an exact existing Job. Durable writes require
+Job work writes only its own Workspace through the exact live execution
+binding. Opt-in [shared reads](job-shared-reads.md) allow bounded discovery and
+historical text/result consultation across the same catalog without transferring
+execution or action authority. Operator access resolves an exact existing Job. Durable writes require
 the applicable authority; operator image saves use an exact request-scoped grant.
 Jobs cannot send unsolicited images.
 
@@ -55,8 +57,8 @@ Semantic-memory recall is read-only. Operator dialogue may request one bounded
 `remember` admission grounded in the current operator statement about an existing
 entity. Autonomous conclusions are not admitted as semantic memory. Jobs can
 instead write authorized Workspace artifacts and publish bounded Findings.
-Completed-run Findings can be searched across Jobs without granting access to
-another Job's Workspace.
+Completed-run Findings can be searched across Jobs. Workspace/result access uses
+the independent shared-read policy and remains historical, not current evidence.
 
 An explicitly maintained handoff note is an ordinary text artifact, not a new
 memory mechanism. It can carry an agreed objective, a dated result with its

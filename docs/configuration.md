@@ -412,3 +412,12 @@ cognition, and deterministic hardware/BMS protection remains outside Jobs.
 operator-only historical Finding selector. It defaults to `false`, independently
 of deliberate `search_findings` availability. The checked-in Mira agentic
 configuration enables it for physical validation. See [Findings](findings.md).
+
+# Cross-Job historical reads
+
+`jobs.shared_reads_enabled` is a strict boolean, default `false`. Nick can set it
+to `true` in the existing `[jobs]` table in `config/mira-agentic.toml` and restart
+with that configuration. It enables bounded catalog discovery, source-selecting
+text Workspace reads, and exact retained Run inspection only during eligible Job
+cognition. Writes remain Job-owned and the Procedure Learning Experiment remains
+restricted. See [policy, tool contracts, and disposable pilot](job-shared-reads.md).

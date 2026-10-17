@@ -6,7 +6,8 @@ patterns](tested-jobs.md); those examples are not built-in Jobs.
 
 See [Findings and deliberate search](findings.md) for reusable, provenance-bearing
 claims published by completed JobRuns. Findings complement rather than replace
-JobRun result reports and private Job Workspaces.
+JobRun result reports and Job-owned Workspaces. See [bounded shared reads](job-shared-reads.md)
+for opt-in historical consultation across Jobs without shared mutation authority.
 
 See [Carry-forward Job focus](job-focus.md) for opt-in, bounded unresolved questions
 projected into later occurrences of the same Job without acquisition. It is disabled
@@ -124,11 +125,15 @@ memory, which stores durable semantic knowledge associated with entities.
 The acquisition is offered only in explicit operator dialogue when Jobs
 persistence exists. It shares the ordinary two-acquisition operator budget and
 duplicate-call reuse. It is deliberately absent from autonomous initiative,
-Job work, automatic continuation, and goal-directed attention so historical
-cognition-authored prose cannot become Job outcome evidence. Retrieval creates
+Job work, automatic continuation, and goal-directed attention. With the separate
+opt-in [shared-read policy](job-shared-reads.md), eligible Job work instead gets
+`shared_inspect_job_run(selection, selector)` with explicit exact-Run versus
+latest-completed semantics. Its historical content is excluded from current
+Job-progress evidence; it does not change the operator tool's availability. Retrieval creates
 no JobRun, memory, readiness, progress, artifact, delivery, or acknowledgement.
 
-Workspace inspection has two separate authority paths. In operator dialogue, exact
+Workspace inspection has operator and Job-owned authority paths, plus the
+independent opt-in source-selecting shared-read path. In operator dialogue, exact
 `JOB<n>` or exact case-sensitive Job-name selectors resolve the Job itself, so a
 Workspace remains inspectable when the Job has never had a run. `workspace_list`
 and `workspace_read` share the ordinary two-acquisition operator budget and are

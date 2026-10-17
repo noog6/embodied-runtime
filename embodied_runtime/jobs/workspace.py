@@ -105,6 +105,7 @@ class WorkspaceRead:
     size_bytes: int
     truncated: bool
     content_version: str
+    modified_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,7 +389,7 @@ class FilesystemJobWorkspaceStore:
         try:
             parent = self._walk(job_fd, parts[:-1])
             try:
-                data, _ = self._read_file(parent, parts[-1])
+                data, info = self._read_file(parent, parts[-1])
             finally:
                 os.close(parent)
         finally:
@@ -404,7 +405,8 @@ class FilesystemJobWorkspaceStore:
         content = text[offset_chars:offset_chars + max_chars]
         next_offset = offset_chars + len(content)
         return WorkspaceRead(path, content, offset_chars, next_offset, len(text), len(data),
-                             next_offset < len(text), hashlib.sha256(data).hexdigest())
+                             next_offset < len(text), hashlib.sha256(data).hexdigest(),
+                             datetime.fromtimestamp(info.st_mtime, UTC))
 
     def list_entries(self, job_id: int, directory: str = "", cursor: str | None = None) -> WorkspaceListing:
         parts = _components(directory, directory=True)

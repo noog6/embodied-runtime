@@ -308,6 +308,7 @@ def parse_launch_arguments(
     args.jobs_max_auto_steps = effective.jobs_max_auto_steps
     args.jobs_max_concurrent_work = effective.jobs_max_concurrent_work
     args.jobs_scheduler_poll_seconds = effective.jobs_scheduler_poll_seconds
+    args.shared_reads_enabled = effective.shared_reads_enabled
     args.findings_context_selection_enabled = effective.findings_context_selection_enabled
     args.power_interval_seconds = effective.power_interval_seconds
     args.power_attention_voltage_v = effective.power_attention_voltage_v
@@ -646,6 +647,7 @@ async def _run_application(
                                                   jobs_max_auto_steps=args.jobs_max_auto_steps,
                                                   jobs_max_concurrent_work=args.jobs_max_concurrent_work,
                                                   jobs_scheduler_poll_seconds=args.jobs_scheduler_poll_seconds,
+                                                  shared_reads_enabled=args.shared_reads_enabled,
                                                   findings_context_selection_enabled=args.findings_context_selection_enabled,
                                                   voice_enabled=args.voice_enabled,
                                                   voice_wake_word_enabled=args.voice_wake_word_enabled,

@@ -141,7 +141,12 @@ Bounded Job work has a separate authority path. Its provider-facing
 harness derives the owner only from the exact current running
 Job/JobRun/Task/ActiveGoal binding and revalidates that binding before every
 operation. Extra owner arguments fail strict validation, so one Job-work episode
-cannot name another Job's Workspace.
+cannot name another Job's Workspace through these owner-derived tools.
+An independent opt-in [shared-read policy](job-shared-reads.md) offers distinct
+`shared_workspace_list(source_job, directory, cursor)` and
+`shared_workspace_read(source_job, path, offset_chars)` acquisitions. It never adds
+a source selector to writes or transfers execution authority. Each read captures
+its own version; multiple reads are not an atomic cross-file snapshot.
 
 Job-work list/read calls consume the same two acquisition attempts as all other
 acquisitions. One `workspace_write` consumes an existing semantic-effect
