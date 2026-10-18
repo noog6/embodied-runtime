@@ -141,3 +141,115 @@ camera acquisition -> future perception -> future semantic observation
 
 Raw images remain transient resources rather than `EventBus` events or
 authoritative `RuntimeState`.
+
+## Sensor coverage and routine capture
+
+JPEG output size and sensor readout size are independent. A 640 x 480 readout
+can be a central crop even with a wide-angle lens; scaling that readout cannot
+restore missing edges. The adapter keeps the 640 x 480 JPEG and chooses coverage
+from the connected camera's `sensor_modes`, without model names or resolution
+tables in the runtime.
+
+The API behavior was checked against the official
+[Picamera2 guide, sections 4.2.2 and 4.2.2.3](https://datasheets.raspberrypi.com/camera/picamera2-manual.pdf),
+and Picamera2 source at
+[0.3.37](https://github.com/raspberrypi/picamera2/blob/v0.3.37/picamera2/picamera2.py)
+(the previously recorded Mira installation) and
+[0.3.31](https://github.com/raspberrypi/picamera2/blob/v0.3.31/picamera2/picamera2.py).
+Picamera2 remains OS-provided and unpinned. These sources establish:
+
+- `sensor_modes` enumerates readout `size`, `bit_depth`, and `crop_limits` in
+  full-sensor coordinates. Enumeration temporarily reconfigures the camera and
+  therefore happens before final configuration and startup.
+- `create_still_configuration(main={"size": ...}, sensor={"output_size": ...,
+  "bit_depth": ...})` requests a sensor mode independently of JPEG dimensions.
+  Sensor parameters take precedence over raw-stream defaults. Existing raw
+  stream and still buffer defaults are retained; no full-resolution JPEG is made.
+- `camera_configuration()` reports the effective sensor parameters after
+  libcamera validation. `camera_controls["ScalerCrop"]` gives minimum, maximum,
+  and default crop rectangles. `capture_file(..., format="jpeg")` returns the
+  captured frame's metadata, including `ScalerCrop` where supported.
+
+Selection compares the largest centred rectangle of the output aspect ratio
+within each reported crop. It prefers the widest usable coverage, then the
+smallest adequate readout by pixel count; equal-size choices prefer higher bit
+depth. Coverage equivalence requires at least 98% overlap on **each** axis with
+the widest rectangle. This allows small alignment/subsampling edge margins,
+without accepting a central crop. It also keeps an already economical automatic
+mode when its coverage is equivalent. All readout candidates must be at least
+as large as the output on both axes.
+
+Representative driver metadata used in the tests is shown below. It is not a
+measurement from the replacement Freenove module. The mode definitions are also
+consistent with the official Raspberry Pi Linux drivers for
+[IMX219](https://github.com/raspberrypi/linux/blob/rpi-6.12.y/drivers/media/i2c/imx219.c)
+and [OV5647](https://github.com/raspberrypi/linux/blob/rpi-6.12.y/drivers/media/i2c/ov5647.c).
+Actual startup metadata remains authoritative.
+
+| Sensor | Readout | Reported crop `(x, y, width, height)` | Expected routine behavior |
+| --- | --- | --- | --- |
+| IMX219 | 640 x 480 | `(1000, 752, 1280, 960)` | Reject central crop |
+| IMX219 | 1640 x 1232 | `(0, 0, 3280, 2464)` | Request economical full-view binned mode |
+| IMX219 | 3280 x 2464 | `(0, 0, 3280, 2464)` | Same coverage, unnecessary readout cost |
+| OV5647 | 640 x 480 | `(16, 0, 2560, 1920)` | Keep automatic VGA; near-full coverage |
+| OV5647 | 1296 x 972 | `(0, 0, 2592, 1944)` | Full coverage, marginal edge gain over VGA |
+
+For the IMX219 this reads about 2 MP instead of 0.3 MP, but avoids the roughly
+8 MP full-resolution alternative. Sensor/ISP work and raw buffer memory may
+increase relative to cropped VGA. Mode enumeration and checking the automatic
+configuration also add startup work. JPEG size remains scene-dependent; output
+dimensions, capture timestamp semantics, one-shot acquisition, camera resource
+leases, and shutdown behavior remain unchanged. Latency and memory need physical
+measurement on the Pi Zero 2 W.
+
+Missing, incomplete, or unsupported mode metadata or sensor configuration keeps
+the original automatic configuration call. If a successful explicit configuration
+cannot be verified, the adapter restores automatic configuration and reports
+`automatic_fallback=True`. Camera-open, enumeration I/O, configure, start, and
+capture errors are not retried as compatibility fallbacks. No new configuration
+option, OS change, or package installation is required.
+
+The startup `[CAMERA]` diagnostic includes effective/requested sensor parameters,
+output size, reported coverage, effective crop limits/default, and the fallback
+flag/reason. The first normal capture logs the actual `ScalerCrop` and reports
+`coverage=ok`, `reduced`, or `unknown`; reduced coverage emits a warning. This
+uses metadata from that same JPEG capture and makes no extra exposure. `ok`
+compares against the effective mode's coverage, subject to output aspect ratio;
+inspect the startup fallback flag as well. It is not a measurement of lens angle.
+
+## Physical verification after changing cameras
+
+These checks remain **unverified for this sensor-selection change**. Earlier
+OV5647 acquisition results above do not bench-verify the new selection logic.
+
+1. With Mira stopped and powered off, attach the IMX219. Keep the camera and a
+   fixed scene stationary, with identifiable markers near all four image edges.
+   Record OS, Picamera2/libcamera versions and `rpicam-hello --list-cameras` output.
+   Start Mira normally and inspect the startup diagnostic. Expect effective
+   1640 x 1232 readout with full `(0, 0, 3280, 2464)` coverage if the module reports
+   the representative metadata above, and output `(640, 480)` with no fallback.
+2. Capture the fixed scene using the previous revision and this revision, keeping
+   the same camera position. Compare visible edges: the IMX219 should recover
+   the edges absent from the central VGA crop, allowing for the small 4:3 output
+   aspect crop. Inspect the first capture's crop diagnostic as well. If a fallback
+   or reduced/unknown coverage is logged, retain the logs and investigate before
+   claiming full coverage.
+3. Run the focused diagnostic with the normal project Python:
+   `python main.py --camera picamera2 --diagnostics --camera-test /tmp/mira-imx219.jpg`.
+   Check `file /tmp/mira-imx219.jpg` for a 640 x 480 JPEG and clean shutdown.
+   In normal configured Mira operation, request vision interpretation and phone
+   image delivery; confirm both succeed with the captured fixed scene.
+4. Compare several one-shot captures on each revision under the same lighting.
+   Record startup time separately from capture latency, and memory both idle
+   and during capture (for example `ps -o pid,rss,vsz,cmd -p <PID>` and
+   `/proc/<PID>/status`; `/usr/bin/time -v` if already available). Check for
+   allocation errors, swapping, excessive latency, and memory pressure with
+   Mira's other normal services running. Record actual values before accepting
+   the Pi Zero 2 W trade-off.
+5. Stop Mira, power off, and swap back to OV5647 **without editing code or
+   configuration**. Repeat startup, fixed-scene comparison, diagnostic capture
+   (using `/tmp/mira-ov5647.jpg`), vision, delivery, latency, memory, and shutdown
+   checks. For the representative metadata above, expect automatic 640 x 480
+   readout, crop `(16, 0, 2560, 1920)`, `automatic_coverage_sufficient`, and
+   `automatic_fallback=False`. Visible edges should match the previous OV5647
+   behavior; no new mandatory setting should be needed.

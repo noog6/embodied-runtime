@@ -1,4 +1,5 @@
 import builtins
+from copy import deepcopy
 from dataclasses import fields
 from pathlib import Path
 import subprocess
@@ -28,6 +29,31 @@ from embodied_runtime.state import LifecycleState
 from tests.test_platform import snapshot
 
 JPEG = b"\xff\xd8test-jpeg\xff\xd9"
+CAMERA_LOGGER = "embodied_runtime.sensing.camera.picamera2"
+
+
+def sensor_modes(entries, depths=(10,)):
+    # Picamera2 crop_limits use full sensor coordinates, not readout coordinates.
+    return [
+        {"size": size, "bit_depth": depth, "crop_limits": crop,
+         "format": f"SBGGR{depth}_CSI2P", "unpacked": f"SBGGR{depth}",
+         "fps": fps, "exposure_limits": (100, 1000000, None)}
+        for depth in depths for size, crop, fps in entries
+    ]
+
+
+IMX219_MODES = sensor_modes([
+    ((640, 480), (1000, 752, 1280, 960), 103.33),
+    ((1640, 1232), (0, 0, 3280, 2464), 41.85),
+    ((1920, 1080), (680, 692, 1920, 1080), 47.57),
+    ((3280, 2464), (0, 0, 3280, 2464), 21.19),
+], depths=(8, 10))
+OV5647_MODES = sensor_modes([
+    ((640, 480), (16, 0, 2560, 1920), 58.92),
+    ((1296, 972), (0, 0, 2592, 1944), 43.25),
+    ((1920, 1080), (348, 434, 1928, 1080), 30.62),
+    ((2592, 1944), (0, 0, 2592, 1944), 15.63),
+])
 
 
 class FakePicamera:
@@ -56,6 +82,51 @@ class FakePicamera:
 
     def close(self):
         self.operations.append(("close",))
+
+
+class ModePicamera(FakePicamera):
+    def __init__(self, modes=IMX219_MODES, *, automatic_size=(640, 480), **kwargs):
+        super().__init__(**kwargs)
+        self.sensor_modes = deepcopy(modes)
+        self.automatic_size = automatic_size
+        self.effective = {}
+        self.camera_controls = {}
+        self.ignore_sensor = False
+        self.crop_override = None
+        self.capture_crop = None
+        self.capture_error = None
+        self.configure_error = None
+
+    def create_still_configuration(self, *, main, sensor=None):
+        kwargs = {"main": main}
+        if sensor is not None:
+            kwargs["sensor"] = sensor
+        self.operations.append(("create", deepcopy(kwargs)))
+        return kwargs
+
+    def configure(self, configuration):
+        super().configure(deepcopy(configuration))
+        if self.configure_error:
+            raise self.configure_error
+        sensor = configuration.get("sensor") if not self.ignore_sensor else None
+        sensor = sensor or {"output_size": self.automatic_size, "bit_depth": 10}
+        self.effective = {"main": configuration["main"], "sensor": sensor}
+        modes = self.sensor_modes if isinstance(self.sensor_modes, list) else []
+        mode = next((m for m in modes if isinstance(m, dict)
+                     and m.get("size") == sensor["output_size"]
+                     and m.get("bit_depth") == sensor["bit_depth"]), None)
+        if mode and mode.get("crop_limits"):
+            crop = self.crop_override or mode["crop_limits"]
+            self.camera_controls = {"ScalerCrop": ((0, 0, 1, 1), crop, crop)}
+
+    def camera_configuration(self):
+        return deepcopy(self.effective)
+
+    def capture_file(self, output, *, format):
+        if self.capture_error:
+            raise self.capture_error
+        super().capture_file(output, format=format)
+        return {"ScalerCrop": self.capture_crop or self.camera_controls["ScalerCrop"][2]}
 
 
 class Picamera2BackendTests(unittest.TestCase):
@@ -136,6 +207,221 @@ assert "picamera2" not in sys.modules
             [field.name for field in fields(CameraFrame)],
             ["data", "media_type", "width", "height", "captured_at_ns"],
         )
+
+    def test_imx219_uses_binned_full_view_instead_of_cropped_vga_or_full_resolution(self):
+        camera = ModePicamera()
+        backend = Picamera2CameraBackend(lambda: camera, clock_ns=lambda: 123)
+        with self.assertLogs(CAMERA_LOGGER, level="INFO") as logs:
+            backend.start()
+        self.assertEqual(camera.effective["sensor"], {
+            "output_size": (1640, 1232), "bit_depth": 10,
+        })
+        self.assertEqual(camera.effective["main"], {"size": (640, 480)})
+        self.assertIn("automatic_fallback=False", logs.output[0])
+        self.assertIn("crop_limits=(0, 0, 3280, 2464)", logs.output[0])
+        self.assertEqual(backend.capture_frame(), CameraFrame(JPEG, "image/jpeg", 640, 480, 123))
+        backend.start()  # Already running: no more probing/configuration.
+        self.assertEqual(sum(op[0] == "start" for op in camera.operations), 1)
+        self.assertEqual(sum(op[0] == "capture" for op in camera.operations), 1)
+        backend.stop()
+        self.assertEqual(camera.operations[-2:], [("stop",), ("close",)])
+
+    def test_ov5647_keeps_economical_automatic_vga_with_near_full_coverage(self):
+        camera = ModePicamera(OV5647_MODES)
+        with self.assertLogs(CAMERA_LOGGER, level="INFO") as logs:
+            Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(camera.effective["sensor"]["output_size"], (640, 480))
+        self.assertEqual([op for op in camera.operations if op[0] == "create"], [
+            ("create", {"main": {"size": (640, 480)}}),
+        ])
+        self.assertIn("automatic_coverage_sufficient", logs.output[0])
+        self.assertIn("automatic_fallback=False", logs.output[0])
+
+    def test_full_resolution_automatic_mode_is_replaced_with_cheaper_equivalent(self):
+        camera = ModePicamera(automatic_size=(3280, 2464))
+        Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(camera.effective["sensor"]["output_size"], (1640, 1232))
+
+    def test_selection_does_not_depend_on_reported_mode_order(self):
+        camera = ModePicamera(list(reversed(IMX219_MODES)))
+        Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(camera.effective["sensor"]["output_size"], (1640, 1232))
+
+    def test_output_aspect_ratio_is_used_when_comparing_coverage(self):
+        # For a wide output, a wide crop can be as useful as the full sensor.
+        camera = ModePicamera(sensor_modes([
+            ((1920, 1080), (0, 309, 3280, 1845), 40),
+            ((3280, 2464), (0, 0, 3280, 2464), 20),
+        ]), automatic_size=(3280, 2464))
+        Picamera2CameraBackend(lambda: camera, size=(640, 360)).start()
+        self.assertEqual(camera.effective["sensor"]["output_size"], (1920, 1080))
+        self.assertEqual(camera.effective["main"]["size"], (640, 360))
+
+    def test_unavailable_or_incomplete_metadata_retains_automatic_configuration(self):
+        incomplete = deepcopy(IMX219_MODES)
+        incomplete[0].pop("crop_limits")
+        for modes in (None, [], [{"format": "MJPEG"}], incomplete,
+                      [{"size": (1640, 1232), "bit_depth": 10, "crop_limits": (0, 0, 0, 2464)}]):
+            with self.subTest(modes=modes):
+                camera = ModePicamera(modes)
+                with self.assertLogs(CAMERA_LOGGER, level="INFO") as logs:
+                    Picamera2CameraBackend(lambda: camera).start()
+                self.assertEqual(sum(op[0] == "configure" for op in camera.operations), 1)
+                self.assertIn("automatic_fallback=True", logs.output[0])
+
+    def test_absent_api_uses_original_configuration_call(self):
+        camera = FakePicamera()
+        with self.assertLogs(CAMERA_LOGGER, level="INFO") as logs:
+            Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(camera.operations[:2], [
+            ("create", {"main": {"size": (640, 480)}}),
+            ("configure", "still-config"),
+        ])
+        self.assertIn("automatic_fallback=True", logs.output[0])
+
+    def test_unsupported_mode_enumeration_falls_back_but_io_failures_propagate(self):
+        for error, fallback in ((NotImplementedError("old API"), True),
+                                (KeyError("ScalerCrop"), True),
+                                (RuntimeError("device disconnected"), False)):
+            with self.subTest(error=error):
+                class ProbeCamera(FakePicamera):
+                    @property
+                    def sensor_modes(self):
+                        raise error
+
+                camera = ProbeCamera()
+                backend = Picamera2CameraBackend(lambda: camera)
+                if fallback:
+                    backend.start()
+                    self.assertTrue(backend.is_running)
+                else:
+                    with self.assertRaisesRegex(Picamera2DeviceUnavailableError, "disconnected"):
+                        backend.start()
+                    self.assertEqual(camera.operations, [("close",)])
+
+    def test_legacy_configuration_without_sensor_field_keeps_automatic(self):
+        class LegacyCamera(ModePicamera):
+            def camera_configuration(self):
+                return {"main": self.effective["main"]}
+
+        camera = LegacyCamera()
+        with self.assertLogs(CAMERA_LOGGER, level="INFO") as logs:
+            Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(sum(op[0] == "configure" for op in camera.operations), 1)
+        self.assertIn("sensor_configuration_unsupported", logs.output[0])
+
+    def test_incomplete_effective_sensor_metadata_keeps_automatic(self):
+        camera = ModePicamera()
+        with patch.object(camera, "camera_configuration", return_value={
+            "main": {"size": (640, 480)}, "sensor": {"output_size": (640, 480)},
+        }):
+            Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(sum(op[0] == "configure" for op in camera.operations), 1)
+
+    def test_camera_swap_after_stop_reprobes_modes(self):
+        imx219, ov5647 = ModePicamera(), ModePicamera(OV5647_MODES)
+        cameras = iter((imx219, ov5647))
+        backend = Picamera2CameraBackend(lambda: next(cameras))
+        backend.start()
+        backend.stop()
+        backend.start()
+        self.assertEqual(imx219.effective["sensor"]["output_size"], (1640, 1232))
+        self.assertEqual(ov5647.effective["sensor"]["output_size"], (640, 480))
+        backend.capture_frame()
+        backend.stop()
+
+    def test_effective_output_size_change_fails_and_closes_camera(self):
+        class AdjustedCamera(ModePicamera):
+            def camera_configuration(self):
+                configuration = super().camera_configuration()
+                configuration["main"] = {"size": (320, 240)}
+                return configuration
+
+        camera = AdjustedCamera()
+        with self.assertRaisesRegex(Picamera2DeviceUnavailableError, "output size"):
+            Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(camera.operations[-1], ("close",))
+
+    def test_selected_configuration_failure_does_not_trigger_automatic_retry(self):
+        class RejectingCamera(ModePicamera):
+            def configure(self, configuration):
+                if "sensor" in configuration:
+                    self.configure_error = RuntimeError("sensor configure failed")
+                super().configure(configuration)
+
+        camera = RejectingCamera()
+        with self.assertRaisesRegex(Picamera2DeviceUnavailableError, "sensor configure failed"):
+            Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(sum(op[0] == "configure" for op in camera.operations), 2)
+        self.assertEqual(camera.operations[-1], ("close",))
+
+    def test_stop_failure_still_closes_camera(self):
+        camera = ModePicamera()
+        backend = Picamera2CameraBackend(lambda: camera)
+        backend.start()
+        with patch.object(camera, "stop", side_effect=RuntimeError("stop failed")):
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                backend.stop()
+        self.assertEqual(camera.operations[-1], ("close",))
+        self.assertFalse(backend.is_running)
+
+    def test_driver_ignoring_requested_mode_restores_automatic_and_logs_fallback(self):
+        camera = ModePicamera()
+        camera.ignore_sensor = True
+        with self.assertLogs(CAMERA_LOGGER, level="INFO") as logs:
+            Picamera2CameraBackend(lambda: camera).start()
+        self.assertEqual(camera.effective["sensor"]["output_size"], (640, 480))
+        self.assertEqual(sum(op[0] == "configure" for op in camera.operations), 3)
+        self.assertIn("effective_mode_unverified", logs.output[0])
+        self.assertIn("automatic_fallback=True", logs.output[0])
+
+    def test_effective_crop_can_disprove_requested_coverage(self):
+        camera = ModePicamera()
+        camera.crop_override = (1000, 752, 1280, 960)
+        with self.assertLogs(CAMERA_LOGGER, level="INFO") as logs:
+            Picamera2CameraBackend(lambda: camera).start()
+        self.assertIn("effective_mode_unverified", logs.output[0])
+
+    def test_first_capture_reports_actual_crop_without_extra_capture(self):
+        camera = ModePicamera()
+        backend = Picamera2CameraBackend(lambda: camera)
+        backend.start()
+        camera.capture_crop = (0, 2, 3280, 2460)  # Normal 4:3 aspect crop.
+        with self.assertLogs(CAMERA_LOGGER, level="INFO") as logs:
+            backend.capture_frame()
+            backend.capture_frame()
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("coverage=ok", logs.output[0])
+        self.assertEqual(sum(op[0] == "capture" for op in camera.operations), 2)
+
+    def test_first_capture_warns_if_actual_crop_reduces_coverage(self):
+        camera = ModePicamera()
+        backend = Picamera2CameraBackend(lambda: camera)
+        backend.start()
+        camera.capture_crop = (1000, 752, 1280, 960)
+        with self.assertLogs(CAMERA_LOGGER, level="WARNING") as logs:
+            backend.capture_frame()
+        self.assertIn("coverage=reduced", logs.output[0])
+
+    def test_configuration_failure_is_not_retried_as_compatibility_fallback(self):
+        camera = ModePicamera()
+        camera.configure_error = RuntimeError("allocation failed")
+        backend = Picamera2CameraBackend(lambda: camera)
+        with self.assertRaisesRegex(Picamera2DeviceUnavailableError, "allocation failed"):
+            backend.start()
+        self.assertEqual(sum(op[0] == "configure" for op in camera.operations), 1)
+        self.assertEqual(camera.operations[-1], ("close",))
+        self.assertFalse(backend.is_running)
+
+    def test_capture_failure_propagates_and_stop_still_cleans_up(self):
+        camera = ModePicamera()
+        backend = Picamera2CameraBackend(lambda: camera)
+        backend.start()
+        camera.capture_error = RuntimeError("capture failed")
+        with self.assertRaisesRegex(RuntimeError, "capture failed"):
+            backend.capture_frame()
+        backend.stop()
+        self.assertEqual(camera.operations[-2:], [("stop",), ("close",)])
 
 
 class PlatformProvider:
