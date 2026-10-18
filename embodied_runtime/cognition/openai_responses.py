@@ -19,6 +19,7 @@ from embodied_runtime.cognition.base import (
 )
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.attachments import ImageAttachment
+from embodied_runtime.images import ImageLimits, JOINT_IMAGE_INSTRUCTIONS
 from embodied_runtime.cognition.provider_diagnostics import endpoint_identity, failure_category
 
 DEFAULT_MODEL = "gpt-5.6-luna"
@@ -34,7 +35,8 @@ class OpenAIResponsesBackend(TextCognitionBackend):
     supports_image_input = True
 
     def __init__(self, *, model: str | None = None, client: Any = None,
-                 observability: RunObservability | None = None) -> None:
+                 observability: RunObservability | None = None, image_limits: ImageLimits = ImageLimits()) -> None:
+        self.image_limits = image_limits
         self.model = model or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
         self.endpoint = endpoint_identity(os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
         self._client = client
@@ -209,14 +211,17 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         refreshed_instructions: InstructionsProvider | None = None,
         image_attachments: Sequence[ImageAttachment] = (),
     ) -> str:
-        if len(image_attachments) > 1:
-            raise CognitionError("OpenAI Responses permits at most one image attachment")
+        self.image_limits.validate(image_attachments, decode=True)
         request_input: Any = message
         if image_attachments:
             content: list[dict[str, str]] = []
             if message:
                 content.append({"type": "input_text", "text": message})
-            for attachment in image_attachments:
+            if len(image_attachments) > 1:
+                content.append({"type": "input_text", "text": JOINT_IMAGE_INSTRUCTIONS})
+            for index, attachment in enumerate(image_attachments, 1):
+                if attachment.reference or attachment.label:
+                    content.append({"type": "input_text", "text": f"Image {index}: {attachment.reference or index}; label={attachment.label or index}; source={attachment.source}; received_at={attachment.received_at}; capture time unknown"})
                 encoded = base64.b64encode(attachment.data).decode("ascii")
                 content.append({
                     "type": "input_image",

@@ -174,7 +174,7 @@ class ImageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["content_version"], hashlib.sha256(self.a).hexdigest())
         self.assertEqual(app.observability.snapshot()["metrics"]["vision_fallbacks"], 1)
         self.assertEqual(self.store.load_image(self.job.id, "photos/frame").data, self.b)
-        self.assertNotIn("interpret_image", script.requests[0])
+        self.assertIn("interpret_image", script.requests[0])
         self.assertIn("interpret_image", script.requests[1])
         self.assertNotIn("interpret_image", script.requests[2])  # both acquisition slots consumed
 

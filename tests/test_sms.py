@@ -26,6 +26,7 @@ from embodied_runtime.sms import (
     MediaDownloadError, SmsConfigurationError, TWILIO_HTTP_LOGGER, TwilioMediaDownloader,
     TwilioMediaReference, TwilioSmsGateway, TwilioSmsService, TwilioSmsSettings,
 )
+from tests.test_workspace_images import raster
 from embodied_runtime.attachments import ImageAttachment, MAX_INTERACTION_IMAGE_BYTES
 
 
@@ -86,7 +87,7 @@ def media_form(**changes):
 
 class FakeMediaDownloader:
     def __init__(self, image=None):
-        self.image = image or ImageAttachment("image/jpeg", b"\xff\xd8\xffdata")
+        self.image = image or ImageAttachment("image/jpeg", raster())
         self.calls = []
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -330,7 +331,8 @@ class SmsStateMachineTests(unittest.IsolatedAsyncioTestCase):
         downloader.release.set()
         await service._inbox.join()
         self.assertEqual(calls[0][0], "")
-        self.assertEqual(calls[0][2], (downloader.image,))
+        self.assertEqual(calls[0][2][0].data, downloader.image.data)
+        self.assertEqual(calls[0][2][0].source_message_id, "SM1")
         self.assertEqual(calls[0][1].channel, InteractionChannel.REMOTE_TEXT)
         await service.stop()
 
@@ -443,8 +445,7 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_download_streams_with_authorization_header_and_no_redirect_or_retry(self):
         class Content:
             async def iter_chunked(self, size):
-                yield b"\xff\xd8"
-                yield b"\xffphoto"
+                yield raster()
 
         response = types.SimpleNamespace(
             status=200, content_length=None,
@@ -476,7 +477,7 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
         reference = TwilioMediaReference(media_form()["MediaUrl0"], "image/jpeg")
         with mock.patch.dict(sys.modules, {"aiohttp": fake_aiohttp(session)}):
             image = await self.downloader.download(reference)
-        self.assertEqual(image, ImageAttachment("image/jpeg", b"\xff\xd8\xffphoto"))
+        self.assertEqual(image, ImageAttachment("image/jpeg", raster()))
         self.assertEqual(len(session.calls), 1)
         url, arguments = session.calls[0]
         self.assertEqual(url, reference.url)
@@ -491,7 +492,7 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_valid_redirect_is_one_hop_without_credentials_and_validates_final_body(self):
         class Content:
             async def iter_chunked(self, size):
-                yield b"\xff\xd8\xffphoto"
+                yield raster()
 
         responses = [
             types.SimpleNamespace(
@@ -534,7 +535,7 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(sys.modules, {"aiohttp": fake_aiohttp(session)}):
             image = await self.downloader.download(reference)
 
-        self.assertEqual(image, ImageAttachment("image/jpeg", b"\xff\xd8\xffphoto"))
+        self.assertEqual(image, ImageAttachment("image/jpeg", raster()))
         self.assertEqual(len(session.calls), 2)
         first_url, first_arguments = session.calls[0]
         cdn_url, cdn_arguments = session.calls[1]
@@ -964,8 +965,36 @@ class SmsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.gateway.sent, [])
         downloader.release.set()
         await self.service._inbox.join()
-        self.assertEqual(calls, [("hello", (downloader.image,))])
+        self.assertEqual(calls[0][0], "hello")
+        self.assertEqual(calls[0][1][0].data, downloader.image.data)
         self.assertEqual(self.gateway.sent[-1]["body"], "image answer")
+
+    async def test_signed_multiple_attachments_keep_all_indices_and_validate_every_field(self):
+        downloader = FakeMediaDownloader()
+        calls = []
+
+        async def cognition(message, *, interaction, image_attachments):
+            calls.append(image_attachments)
+            return "compared"
+
+        self.service._media_downloader = downloader
+        self.service._request_cognition = cognition
+        payload = media_form(NumMedia="2", MediaUrl1=media_form()["MediaUrl0"].replace("ME1", "ME2"),
+                             MediaContentType1="image/jpeg")
+        response = await self.post(payload)
+        self.assertEqual(response.status, 200)
+        downloader.release.set()
+        await asyncio.wait_for(self.service._inbox.join(), 1)
+        self.assertEqual([image.attachment_index for image in calls[0]], [0, 1])
+        self.assertEqual(len(downloader.calls), 2)
+        repeated = MultiDict(list(payload.items()))
+        repeated['MessageSid'] = 'SM2'
+        repeated.add('MediaUrl1', 'https://invalid.example/ambiguous')
+        response = await self.post(repeated)
+        self.assertEqual(response.status, 400)
+        self.assertNotIn('SM2', self.service._accepted)
+        response = await self.post(media_form(MessageSid='SM3', NumMedia='5'))
+        self.assertEqual(response.status, 413)
 
     async def test_repeated_media_projection_is_rejected_without_dedupe(self):
         for field in ("MediaUrl0", "MediaContentType0"):

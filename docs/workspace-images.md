@@ -3,8 +3,9 @@
 A Job Workspace can hold text and single-frame JPEG/PNG artifacts. Capturing,
 saving, interpreting, and sending remain distinct operations. Saving and sending
 make no vision request. There is no automatic retention, generated caption,
-image editing, comparison, semantic search, inbound-MMS persistence, memory
-admission, or change to nightly Jobs.
+image editing, visual semantic search, memory admission, or change to nightly Jobs.
+[Joint analysis and conversation-media retention](conversation-images.md) are
+separate capabilities and grant no Job workspace write permission.
 
 ## Tool grammar and budgets
 
@@ -18,7 +19,7 @@ paths, or arbitrary file/URL access.
 | --- | --- | --- | --- |
 | `capture_camera_image` | `{}` | `{}` | acquisition |
 | `workspace_load_image` | `job, path` | `path` | acquisition |
-| `interpret_image` | `image_ref, focus` | `image_ref, focus` | acquisition |
+| `interpret_image` | `image_ref` or ordered `image_refs`, plus `focus` | same, restricted to Job references | acquisition |
 | `workspace_save_image` | `job, path, mode, image_ref` | `path, mode, image_ref` | effect |
 | `deliver_image` | `image_ref, destination, caption` | unavailable | effect |
 
@@ -38,9 +39,9 @@ needs one acquisition and one effect. Capture → save → interpret → send ex
 one episode's grammar and must be split across explicit episodes.
 
 Capture requires a running camera and uses its existing fail-fast resource lease.
-Load requires Jobs and Workspace persistence. Interpret is offered after acquiring
-an image reference and requires configured vision, independently of camera
-availability. Operator save is offered only when a retained image can be used and the current
+Load requires Jobs and Workspace persistence. Operator interpretation requires
+configured vision, independently of camera availability, and can resolve a bounded
+mixed selection in one acquisition; Job interpretation uses its acquired references. Operator save is offered only when a retained image can be used and the current
 operator request grants an exact durable-write authorization. Delivery requires
 an available existing operator destination and the current operator's explicit
 request/authorization. Operator image durable writes require the explicit request grammar below and

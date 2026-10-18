@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from embodied_runtime.attachments import ImageAttachment
+from embodied_runtime.images import ImageLimits, JOINT_IMAGE_INSTRUCTIONS
 from embodied_runtime.config import OpenAICompatibleConfig, validate_compatible_config
 from embodied_runtime.observability import RunObservability
 from .base import (
@@ -232,18 +233,21 @@ class OpenAICompatibleBackend(TextCognitionBackend):
                       image_attachments: Sequence[ImageAttachment] = ()) -> str:
         if image_attachments and not self.supports_image_input:
             raise CognitionError("Configured compatible model does not support image input", category="unsupported_capability")
-        if len(image_attachments) > 1:
-            raise CognitionError("Compatible cognition permits at most one image attachment", category="unsupported_capability")
+        getattr(self, "image_limits", ImageLimits()).validate(image_attachments, decode=True)
         if tools and (tool_executor is None or refreshed_instructions is None):
             raise CognitionError("Cognition tools require runtime execution and grounding")
         content: Any = message
         if image_attachments:
             content = [{"type": "text", "text": message}] if message else []
-            attachment = image_attachments[0]
-            encoded = base64.b64encode(attachment.data).decode("ascii")
-            content.append({"type": "image_url", "image_url": {
-                "url": f"data:{attachment.media_type};base64,{encoded}", "detail": "auto",
-            }})
+            if len(image_attachments) > 1:
+                content.append({"type": "text", "text": JOINT_IMAGE_INSTRUCTIONS})
+            for index, attachment in enumerate(image_attachments, 1):
+                if attachment.reference or attachment.label:
+                    content.append({"type": "text", "text": f"Image {index}: {attachment.reference or index}; label={attachment.label or index}; source={attachment.source}; received_at={attachment.received_at}; capture time unknown"})
+                encoded = base64.b64encode(attachment.data).decode("ascii")
+                content.append({"type": "image_url", "image_url": {
+                    "url": f"data:{attachment.media_type};base64,{encoded}", "detail": "auto",
+                }})
         original = {"role": "user", "content": content}
         messages = ([{"role": "system", "content": instructions}] if instructions is not None else []) + [original]
         provider_tools = [{"type": "function", "function": {

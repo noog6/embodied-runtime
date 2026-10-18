@@ -1,6 +1,7 @@
 """Offline portability checks against the adapter and the production Job harness."""
 
 import asyncio
+import base64
 from contextlib import redirect_stderr
 from copy import deepcopy
 from dataclasses import replace
@@ -16,6 +17,7 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from tests.test_workspace_images import raster
 from embodied_runtime.attachments import ImageAttachment
 from embodied_runtime.benchmarks import run_trial
 from embodied_runtime.benchmarks.__main__ import _arguments, build_benchmark_backend
@@ -439,7 +441,7 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake.requests), 1)
 
     async def test_images_require_explicit_capability_and_survive_continuation(self):
-        image = ImageAttachment("image/jpeg", b"image")
+        image = ImageAttachment("image/jpeg", raster())
         backend, fake, _ = self.make(response())
         with self.assertRaisesRegex(CognitionError, "does not support image"):
             await backend.respond("caption", image_attachments=(image,))
@@ -448,10 +450,10 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
                                   config=replace(CONFIG, image_input=True))
         await self.tool_request(backend, image_attachments=(image,))
         user = fake.requests[0]["messages"][1]
-        self.assertEqual(user["content"][1]["image_url"]["url"], "data:image/jpeg;base64,aW1hZ2U=")
+        self.assertEqual(user["content"][1]["image_url"]["url"], "data:image/jpeg;base64," + base64.b64encode(image.data).decode())
         self.assertEqual(fake.requests[1]["messages"][1], user)
-        with self.assertRaisesRegex(CognitionError, "at most one"):
-            await backend.respond("caption", image_attachments=(image, image))
+        with self.assertRaisesRegex(ValueError, "configured maximum"):
+            await backend.respond("caption", image_attachments=(image,) * 5)
         self.assertEqual(len(fake.requests), 2)
 
     async def test_missing_partial_and_invalid_usage_stays_unavailable(self):

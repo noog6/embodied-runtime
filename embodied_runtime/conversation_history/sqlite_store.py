@@ -15,7 +15,7 @@ from .model import (
     bounded_text,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_RETAINED_RECORDS = 2000
 MAX_QUERY_CHARS = 200
 MAX_SEARCH_RESULTS = 5
@@ -43,7 +43,7 @@ class SQLiteConversationHistoryStore:
         tables = self._connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
-        if version not in (0, 1, 2, SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, SCHEMA_VERSION):
             raise ValueError(f"unsupported conversation schema version {version}")
         if version == 0 and tables:
             raise ValueError("unversioned non-empty conversation database")
@@ -110,6 +110,9 @@ class SQLiteConversationHistoryStore:
                 VALUES ('delete', old.id, old.operator_text, old.assistant_text); END""")
             if version < 2:
                 self._connection.execute("INSERT INTO conversation_search(conversation_search) VALUES ('rebuild')")
+            columns = {row[1] for row in self._connection.execute("PRAGMA table_info(conversation_turns)")}
+            if 'image_refs' not in columns:
+                self._connection.execute("ALTER TABLE conversation_turns ADD COLUMN image_refs TEXT NOT NULL DEFAULT '[]'")
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _cleanup(self) -> None:
@@ -124,21 +127,23 @@ class SQLiteConversationHistoryStore:
             raise ValueError("invalid conversation channel")
         if not isinstance(turn.session_id, str) or not 1 <= len(turn.session_id) <= 128:
             raise ValueError("session_id must be a non-empty string")
+        if (len(turn.image_refs) > 16 or not all(isinstance(ref, str) and re.fullmatch(r"MEDIA[0-9a-f]{32}", ref) for ref in turn.image_refs)):
+            raise ValueError("invalid conversation image references")
         completed_at = _aware_utc(turn.completed_at)
         operator = bounded_text(turn.operator_text, MAX_OPERATOR_TEXT_CHARS)
         assistant = bounded_text(turn.assistant_text, MAX_ASSISTANT_TEXT_CHARS)
         with self._connection:
             cursor = self._connection.execute(
                 "INSERT INTO conversation_turns "
-                "(session_id, completed_at, channel, operator_text, assistant_text, request_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(session_id, completed_at, channel, operator_text, assistant_text, request_id, image_refs) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (turn.session_id, completed_at.isoformat(), turn.channel.value,
-                 operator, assistant, turn.request_id),
+                 operator, assistant, turn.request_id, json.dumps(turn.image_refs)),
             )
             self._cleanup()
         return ConversationTurnRecord(
             int(cursor.lastrowid), turn.session_id, completed_at, turn.channel,
-            operator, assistant, turn.request_id,
+            operator, assistant, turn.request_id, turn.image_refs,
         )
 
     def select_prior_session(
@@ -333,7 +338,7 @@ class SQLiteConversationHistoryStore:
         ids = tuple(exclude_ids) or (-1,)
         requests = tuple(exclude_requests) or ('',)
         rows = self._connection.execute(
-            "SELECT t.id, t.request_id, t.session_id, t.completed_at, t.channel, "
+            "SELECT t.id, t.request_id, t.session_id, t.completed_at, t.channel, t.image_refs, "
             "snippet(conversation_search, 0, '', '', ' … ', 40) AS operator, "
             "snippet(conversation_search, 1, '', '', ' … ', 40) AS assistant "
             "FROM conversation_search JOIN conversation_turns t ON t.id=conversation_search.rowid "
@@ -343,6 +348,7 @@ class SQLiteConversationHistoryStore:
         result = []
         for row in rows:
             item = dict(row)
+            item['image_refs'] = json.loads(item['image_refs'])
             item['record_ref'] = f"CONV{item.pop('id')}"
             item['operator'] = bounded_text(item['operator'], MAX_EXCERPT_CHARS)
             item['assistant'] = bounded_text(item['assistant'], MAX_EXCERPT_CHARS)
@@ -372,7 +378,7 @@ def _record(row: sqlite3.Row) -> ConversationTurnRecord:
         raise ValueError("invalid stored conversation record") from error
     return ConversationTurnRecord(
         row["id"], row["session_id"], completed_at, channel,
-        row["operator_text"], row["assistant_text"], row["request_id"],
+        row["operator_text"], row["assistant_text"], row["request_id"], tuple(json.loads(row["image_refs"])),
     )
 
 
@@ -381,7 +387,7 @@ def _dialogue_projection(row: sqlite3.Row) -> dict:
         "record_ref": f"CONV{row['id']}", "request_id": row['request_id'],
         "session_id": row['session_id'], "completed_at": row['completed_at'],
         "channel": row['channel'], "operator": row['operator_text'],
-        "assistant": row['assistant_text'],
+        "assistant": row['assistant_text'], "image_refs": json.loads(row['image_refs']),
         "content_authority": "historical_authored_non_authoritative",
     }
 

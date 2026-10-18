@@ -22,6 +22,7 @@ class NewConversationTurn:
     operator_text: str
     assistant_text: str
     request_id: str | None = None
+    image_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,7 @@ class ConversationTurnRecord:
     operator_text: str
     assistant_text: str
     request_id: str | None = None
+    image_refs: tuple[str, ...] = ()
 
 
 def bounded_text(value: str, limit: int) -> str:
@@ -63,6 +65,7 @@ def render_conversation_history(records: tuple[ConversationTurnRecord, ...]) -> 
             f"  channel: {record.channel.value}",
             f"  request_id: {record.request_id or 'unavailable (legacy)'}",
             f"  session_id: {record.session_id}",
+            f"  image_refs: {json.dumps(record.image_refs)}",
             f"  operator: {json.dumps(record.operator_text, ensure_ascii=False)}",
             f"  assistant: {json.dumps(record.assistant_text, ensure_ascii=False)}",
         ))

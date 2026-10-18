@@ -23,6 +23,7 @@ from embodied_runtime.cognition.factory import (
     add_compatible_arguments, create_cognition_backend, validate_cognition_configuration,
 )
 from embodied_runtime.conversation_history import SQLiteConversationHistoryStore
+from embodied_runtime.conversation_media import ConversationMediaStore, MediaRetentionConfiguration
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.config import (
     ConfigurationError, LaunchConfiguration, load_runtime_config,
@@ -272,6 +273,7 @@ def parse_launch_arguments(
     args.cognition_openai_compatible = effective.cognition_openai_compatible
     args.vision = effective.vision
     args.vision_configuration = effective.vision_configuration
+    args.conversation_media = effective.conversation_media
     args.timezone = effective.timezone
     args.interaction_environment = effective.interaction_environment
     args.console = effective.mode == "console"
@@ -393,10 +395,14 @@ def _stop_unowned_camera(camera: CameraBackend) -> None:
 
 def build_cognition_backend(args: argparse.Namespace) -> TextCognitionBackend | None:
     from embodied_runtime.config import OpenAICompatibleConfig
-    return create_cognition_backend(
+    backend = create_cognition_backend(
         args.cognition, model=args.cognition_model,
         compatible=getattr(args, "cognition_openai_compatible", OpenAICompatibleConfig()),
     )
+    if backend is not None:
+        from embodied_runtime.config import VisionConfiguration
+        backend.image_limits = getattr(args, "vision_configuration", VisionConfiguration()).image_limits
+    return backend
 
 
 def build_visual_perception_backend(
@@ -593,6 +599,14 @@ async def _run_application(
         cognition = build_cognition_backend(args)
         vision = build_visual_perception_backend(args)
         application: RobotApplication | None = None
+        media_store = None
+        media_config = getattr(args, "conversation_media", MediaRetentionConfiguration())
+        if media_config.enabled:
+            try:
+                media_store = ConversationMediaStore(media_config)
+                composition_cleanup.callback(media_store.close)
+            except Exception as error:
+                LOGGER.warning("[MEDIA] persistence status=unavailable error=%s", type(error).__name__)
         sms_service = None
         if args.sms_enabled:
             settings = TwilioSmsSettings.from_environment(
@@ -604,7 +618,8 @@ async def _run_application(
                 assert application is not None
                 return await application.request_cognition(message, **kwargs)
 
-            sms_service = TwilioSmsService(settings, request_sms_cognition)
+            sms_service = TwilioSmsService(settings, request_sms_cognition,
+                image_limits=args.vision_configuration.image_limits, media_store=media_store)
         message_channel = ConsoleOperatorMessageChannel() if args.console else None
         routes: list[OperatorDeliveryRoute] = []
         if message_channel is not None:
@@ -685,6 +700,8 @@ async def _run_application(
             timezone_name=args.timezone,
             persistent_memory_store=persistent_memory,
             conversation_history_store=conversation_history,
+            conversation_media_store=media_store,
+            image_limits=args.vision_configuration.image_limits,
             conversation_session_id=(
                 history_evidence.current_run_id
                 if history_evidence is not None else None

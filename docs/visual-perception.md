@@ -1,10 +1,14 @@
 # Active visual perception
 
+For joint selections and persistent operator image recall, see
+[conversation images](conversation-images.md). `observe_scene` below retains its
+single live-frame behavior.
+
 Operator-supplied MMS images are direct current-interaction input, not visual scene
 acquisitions. They are never synthetic `CameraFrame` values and do not acquire the
-camera resource or increment camera-capture or vision-acquisition accounting. Only
-the scene-inspection path represents a runtime-controlled observation through the
-robot's physical camera.
+camera resource or increment camera-capture accounting. Explicit `interpret_image`
+analysis uses vision-acquisition accounting; it can combine attachments with retained
+images and a single fresh camera capture.
 
 Phase 14 adds the read-only cognition capability `observe_scene(focus)`. `focus`
 is a trimmed, non-empty string of at most 300 characters without control
@@ -37,9 +41,10 @@ may be incomplete, uncertain, or wrong. Its `observed_at` is sampled immediately
 after capture, before interpretation, so model latency does not become scene time.
 `RuntimeState` remains the authority for runtime facts. A bounded textual projection
 may enter a completed operator turn's volatile working memory; it is never copied
-into runtime state and is not an initiative effect. Image bytes are discarded after
-the request; they are not written,
-logged, published, cached, or retained as history.
+into runtime state and is not an initiative effect. Transient scene bytes are discarded after the request unless explicitly saved
+through an authorized workspace operation. Inbound operator images instead follow
+the separate conversation-media retention policy. Pixels are never logged or
+published to EventBus.
 
 The canonical exclusive resource for frame acquisition is `camera`, the first
 physical capability integrated with `ResourceArbiter`. Every normal

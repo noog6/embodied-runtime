@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import logging
 import os
 import re
@@ -15,6 +16,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from embodied_runtime.conversation_history.continuity import delivery_attempt
+from embodied_runtime.images import ImageLimits
 from embodied_runtime.attachments import (
     ImageAttachment, MAX_INTERACTION_IMAGE_BYTES,
     SUPPORTED_INTERACTION_IMAGE_TYPES,
@@ -125,6 +127,8 @@ class SmsInboundMessage:
     sender: str
     body: str
     media: TwilioMediaReference | None = None
+    media_items: tuple[TwilioMediaReference, ...] = ()
+    received_at: datetime | None = None
 
 
 class MediaDownloadError(RuntimeError):
@@ -241,7 +245,12 @@ class TwilioMediaDownloader:
             raise MediaDownloadError("media_download_failed") from error
         if not _matches_magic(declared, data):
             raise MediaDownloadError("media_type_mismatch")
-        return ImageAttachment(declared, data)
+        try:
+            image = ImageAttachment(declared, data)
+            image.raster_metadata()
+        except Exception as error:
+            raise MediaDownloadError("invalid_raster_image") from error
+        return image
 
 
 def _normalized_media_type(value: str) -> str:
@@ -397,7 +406,9 @@ class TwilioSmsService(OperatorMessageSink):
         inbox_size: int = SMS_INBOX_SIZE, dedupe_size: int = SMS_DEDUPE_SIZE,
         outbound_media: OutboundMediaStore | None = None,
         media_reap_interval_seconds: float = OUTBOUND_MEDIA_REAP_INTERVAL_SECONDS,
+        image_limits: ImageLimits = ImageLimits(), media_store=None,
     ) -> None:
+        self.image_limits, self.media_store = image_limits, media_store
         self.settings = settings
         self._request_cognition = request_cognition
         self._gateway = gateway
@@ -645,8 +656,11 @@ class TwilioSmsService(OperatorMessageSink):
         if form["From"] != self.settings.operator_number:
             LOGGER.info("[SMS] inbound status=ignored reason=external_participant")
             return self._twiml(web)
-        if media_count == 1:
-            for key in ("MediaUrl0", "MediaContentType0"):
+        if media_count > self.image_limits.max_images:
+            return web.Response(status=413, text="Image count exceeds configured maximum")
+        if media_count:
+            for key in (name for index in range(media_count)
+                        for name in (f"MediaUrl{index}", f"MediaContentType{index}")):
                 values = form_data.getall(key, [])
                 if not values:
                     LOGGER.info("[SMS] inbound status=rejected reason=missing_fields")
@@ -680,21 +694,28 @@ class TwilioSmsService(OperatorMessageSink):
         if form["From"] != self.settings.operator_number:
             LOGGER.info("[SMS] inbound status=ignored reason=external_participant")
             return _Acceptance(200, "external_participant")
-        if media_count > 1:
-            LOGGER.info("[SMS] inbound status=ignored reason=multiple_media_unsupported")
-            return _Acceptance(200, "media_unsupported")
-        if media_count == 1 and any(
-            not form.get(name) for name in ("MediaUrl0", "MediaContentType0")
-        ):
+        if media_count > self.image_limits.max_images:
+            return _Acceptance(413, "image_count_exceeds_limit")
+        if any(not form.get(name) for index in range(media_count)
+               for name in (f"MediaUrl{index}", f"MediaContentType{index}")):
             return _Acceptance(400, "missing_fields")
+        if any(_normalized_media_type(form[f"MediaContentType{index}"]) not in SUPPORTED_INTERACTION_IMAGE_TYPES
+               for index in range(media_count)):
+            return _Acceptance(415, "unsupported_media_type")
         sid = form["MessageSid"]
-        if sid in self._accepted:
+        persisted = False
+        if self.media_store is not None:
+            try:
+                persisted = self.media_store.has_message(InteractionChannel.REMOTE_TEXT.value, sid)
+            except Exception:
+                LOGGER.warning("[SMS] durable_dedupe status=unavailable")
+        if sid in self._accepted or persisted:
             LOGGER.info("[SMS] inbound message_sid=%s status=duplicate", sid)
             return _Acceptance(200, "duplicate")
-        media = None if media_count == 0 else TwilioMediaReference(
-            form["MediaUrl0"], form["MediaContentType0"]
-        )
-        message = SmsInboundMessage(sid, form["From"], form["Body"], media)
+        media_items = tuple(TwilioMediaReference(form[f"MediaUrl{index}"], form[f"MediaContentType{index}"])
+                            for index in range(media_count))
+        message = SmsInboundMessage(sid, form["From"], form["Body"],
+            media_items[0] if media_items else None, media_items, datetime.now(UTC))
         # Recheck at the commit boundary: request parsing/signature validation may
         # have yielded while stop() closed acceptance.
         if not self._accepting:
@@ -735,25 +756,32 @@ class TwilioSmsService(OperatorMessageSink):
                     initiator=InteractionInitiator.OPERATOR,
                     response_expected=True,
                 )
-                attachments = ()
-                if message.media is not None:
-                    try:
-                        image = await self._media_downloader.download(message.media)
-                    except asyncio.CancelledError:
-                        raise
-                    except MediaDownloadError as error:
-                        LOGGER.info("[SMS] media message_sid=%s status=failed reason=%s",
-                                    message.message_sid, error.reason)
-                        await self._send_reply(message, MEDIA_FAILURE_REPLY)
-                        continue
-                    except Exception:
-                        LOGGER.info("[SMS] media message_sid=%s status=failed "
-                                    "reason=media_download_failed", message.message_sid)
-                        await self._send_reply(message, MEDIA_FAILURE_REPLY)
-                        continue
-                    attachments = (image,)
-                    LOGGER.info("[SMS] media message_sid=%s type=%s bytes=%s status=loaded",
-                                message.message_sid, image.media_type, len(image.data))
+                attachments = []
+                media_items = message.media_items or ((message.media,) if message.media is not None else ())
+                try:
+                    for index, reference in enumerate(media_items):
+                        image = await self._media_downloader.download(reference)
+                        image = image.with_context(source="sms", source_message_id=message.message_sid,
+                                        attachment_index=index, received_at=message.received_at or datetime.now(UTC),
+                                        label=f"attachment {index + 1}")
+                        self.image_limits.validate((*attachments, image), decode=True)
+                        attachments.append(image)
+                        LOGGER.info("[SMS] media message_sid=%s attachment=%s type=%s bytes=%s status=loaded",
+                                    message.message_sid, index, image.media_type, len(image.data))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Valid earlier attachments survive a later download failure when storage is available.
+                    if self.media_store is not None and attachments:
+                        try:
+                            self.media_store.retain(attachments, channel=self.channel.value,
+                                message_identity=message.message_sid, message_text=message.body, limits=self.image_limits)
+                        except Exception:
+                            LOGGER.warning("[SMS] retention status=failed_not_saved")
+                    LOGGER.info("[SMS] media message_sid=%s status=failed reason=invalid_or_oversized_media", message.message_sid)
+                    await self._send_reply(message, MEDIA_FAILURE_REPLY)
+                    continue
+                attachments = tuple(attachments)
                 try:
                     arguments = {"interaction": interaction}
                     if attachments:

@@ -88,3 +88,7 @@ The current autonomy budgets and episode grammar are summarized in
 [architecture](docs/architecture.md#current-bounded-autonomy-episode-grammar).
 A due temporal commitment waits in one goal-bound slot when cognition is busy;
 it does not interrupt cognition or reserve an action.
+
+Joint image analysis and durable operator image recall are documented in
+[conversation images](docs/conversation-images.md), including retention defaults,
+resource limits, deletion and physical acceptance checks.

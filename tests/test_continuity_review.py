@@ -217,5 +217,5 @@ class ContinuityReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retained['delivery'][0]['status'], 'terminal_written')
         self.assertIsNone(retained['delivery'][0]['report_source'])
         self.assertEqual(retained['request']['id'], request_id)
-        self.assertEqual(self.history._connection.execute('PRAGMA user_version').fetchone()[0], 3)
+        self.assertEqual(self.history._connection.execute('PRAGMA user_version').fetchone()[0], 4)
         self.assertEqual(len(self.history.search('hello')['matches']), 1)

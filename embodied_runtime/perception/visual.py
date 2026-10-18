@@ -1,11 +1,11 @@
-"""Bounded interpretation of one transient camera frame, with ordered fallback."""
+"""Bounded interpretation of ordered images, with immutable fallback inputs."""
 
 from abc import ABC, abstractmethod
 import asyncio
 import base64
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import logging
 from json import JSONDecodeError
@@ -26,6 +26,7 @@ from embodied_runtime.config import (
 )
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.sensing.camera import CameraFrame
+from embodied_runtime.images import ImageCollection, ImageLimits, JOINT_IMAGE_INSTRUCTIONS
 
 LOGGER = logging.getLogger(__name__)
 MAX_CAMERA_FRAME_BYTES = 4 * 1024 * 1024
@@ -38,7 +39,7 @@ VISUAL_PROVIDER_INSTRUCTIONS = (
 )
 FALLBACK_CATEGORIES = frozenset({
     "timeout", "connection", "rate_limit", "provider_unavailable", "unavailable",
-    "missing_credentials", "payment_required", "model_unavailable", "empty_response",
+    "missing_credentials", "payment_required", "model_unavailable", "empty_response", "unsupported_capability",
     "malformed_response", "truncated",
 })
 
@@ -64,11 +65,15 @@ class VisualPerceptionError(CognitionError):
 class ImageSnapshot:
     """Historical encoded image; unknown capture time is explicitly None."""
 
-    data: bytes
+    data: bytes = field(repr=False)
     media_type: str
     width: int
     height: int
     captured_at: datetime | None
+    reference: str | None = None
+    label: str | None = None
+    source: str | None = None
+    received_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,9 +94,10 @@ class VisualPerceptionResult:
 class VisualPerceptionBackend(ABC):
     identifier: str
     request_timeout_seconds: float = 30.0
+    supports_multi_image = False
 
     @abstractmethod
-    async def interpret(self, frame: CameraFrame | ImageSnapshot, focus: str) -> VisualPerceptionResult: ...
+    async def interpret(self, frame: CameraFrame | ImageSnapshot | ImageCollection, focus: str) -> VisualPerceptionResult: ...
 
 
 @dataclass(frozen=True)
@@ -109,7 +115,17 @@ def _field(owner: Any, name: str, default: Any = None) -> Any:
     return owner.get(name, default) if isinstance(owner, Mapping) else getattr(owner, name, default)
 
 
-def _validate_input(frame: CameraFrame | ImageSnapshot, focus: str) -> None:
+def _validate_input(frame: CameraFrame | ImageSnapshot | ImageCollection, focus: str) -> None:
+    if isinstance(frame, ImageCollection):
+        try:
+            ImageLimits(max_images=16, max_total_bytes=64 * 1024 * 1024,
+                        max_total_pixels=64 * 1024 * 1024).validate(frame.images)
+            for image in frame.images:
+                _validate_input(ImageSnapshot(image.data, image.media_type, image.width,
+                                              image.height, image.captured_at), focus)
+        except ValueError:
+            raise VisualPerceptionError("invalid_frame") from None
+        return
     if (not isinstance(frame, (CameraFrame, ImageSnapshot)) or type(frame.data) is not bytes
             or not 0 < len(frame.data) <= MAX_CAMERA_FRAME_BYTES
             or frame.media_type not in ("image/jpeg", "image/png", "image/webp")
@@ -167,6 +183,8 @@ class _RemoteVisualBackend(VisualPerceptionBackend):
     """Isolated client and attempt accounting shared by the two visual adapters."""
 
     protocol: str
+    supports_multi_image = True
+    image_limits = ImageLimits()
 
     def __init__(self, config: VisionBackendConfig, *, client: Any = None,
                  observability: RunObservability | None = None) -> None:
@@ -197,10 +215,28 @@ class _RemoteVisualBackend(VisualPerceptionBackend):
                 raise VisualPerceptionError(failure_category(error), http_status=provider_http_status(error)) from None
         return self._client
 
-    async def interpret(self, frame: CameraFrame | ImageSnapshot, focus: str) -> VisualPerceptionResult:
+    async def interpret(self, frame: CameraFrame | ImageSnapshot | ImageCollection, focus: str) -> VisualPerceptionResult:
         _validate_input(frame, focus)
-        image_url = f"data:{frame.media_type};base64,{base64.b64encode(frame.data).decode('ascii')}"
-        arguments = self._arguments(image_url, focus)
+        images = frame.images if isinstance(frame, ImageCollection) else (frame,)
+        self.image_limits.validate(images)
+        urls = [f"data:{image.media_type};base64,{base64.b64encode(image.data).decode('ascii')}"
+                for image in images]
+        arguments = self._arguments(urls[0], focus)
+        if isinstance(frame, ImageCollection):
+            content = [{"type": "input_text" if self.protocol == "responses" else "text", "text": focus}]
+            for image, url in zip(images, urls):
+                content.append({"type": "input_text" if self.protocol == "responses" else "text",
+                                "text": image.description()})
+                content.append({"type": "input_image", "image_url": url, "detail": "auto"} if self.protocol == "responses"
+                               else {"type": "image_url", "image_url": {"url": url}})
+            if self.protocol == "responses":
+                arguments["input"][0]["content"] = content
+                arguments["instructions"] = JOINT_IMAGE_INSTRUCTIONS
+            else:
+                arguments["messages"][1]["content"] = content
+                arguments["messages"][0]["content"] = JOINT_IMAGE_INSTRUCTIONS
+        LOGGER.info("[VISION] image_count=%s source_ids=%s", len(images),
+                    [image.reference for image in images] if isinstance(frame, ImageCollection) else [getattr(frame, "reference", None)])
         if isinstance(frame, ImageSnapshot):
             instructions = (
                 "Analyze exactly this one historical saved image. It is not a current "
@@ -209,6 +245,11 @@ class _RemoteVisualBackend(VisualPerceptionBackend):
                 ". Answer the supplied visual focus using visible evidence only. "
                 "State uncertainty; do not infer hidden objects, events, or current-world state. Be concise."
             )
+            if frame.reference:
+                import json
+                instructions += " Image metadata: " + json.dumps({"image_ref": frame.reference,
+                    "label": frame.label, "source": frame.source,
+                    "received_at": frame.received_at.isoformat() if frame.received_at else None})
             if self.protocol == "responses":
                 arguments["instructions"] = instructions
             else:
@@ -289,7 +330,7 @@ class OpenAIResponsesVisualPerceptionBackend(_RemoteVisualBackend):
                 "stream": False, "max_output_tokens": MAX_VISUAL_OUTPUT_TOKENS,
                 "input": [{"role": "user", "content": [
                     {"type": "input_text", "text": focus},
-                    {"type": "input_image", "image_url": image_url},
+                    {"type": "input_image", "image_url": image_url, "detail": "auto"},
                 ]}]}
 
     @staticmethod
@@ -376,6 +417,8 @@ class OrderedVisualPerceptionBackend(VisualPerceptionBackend):
     """One frame, a finite sequential chain, and a single total wall deadline."""
 
     identifier = "ordered-vision"
+    supports_multi_image = True
+    image_limits = ImageLimits()
 
     def __init__(self, backends: Sequence[VisualPerceptionBackend], *, request_timeout_seconds: float = 30.0,
                  observability: RunObservability | None = None) -> None:
@@ -411,8 +454,9 @@ class OrderedVisualPerceptionBackend(VisualPerceptionBackend):
                     "requested_model": getattr(backend, "model", None),
                 })
 
-    async def interpret(self, frame: CameraFrame | ImageSnapshot, focus: str) -> VisualPerceptionResult:
+    async def interpret(self, frame: CameraFrame | ImageSnapshot | ImageCollection, focus: str) -> VisualPerceptionResult:
         _validate_input(frame, focus)
+        self.image_limits.validate(frame.images if isinstance(frame, ImageCollection) else (frame,))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.request_timeout_seconds
         failures = []
@@ -428,6 +472,9 @@ class OrderedVisualPerceptionBackend(VisualPerceptionBackend):
             token = _ATTEMPT.set(_Attempt(order, scope))
             try:
                 async with scope:
+                    if (isinstance(frame, ImageCollection) and len(frame.images) > 1
+                            and not backend.supports_multi_image):
+                        raise VisualPerceptionError("unsupported_capability")
                     result = await backend.interpret(frame, focus)
                 if loop.time() >= scope.when():
                     raise VisualPerceptionError("timeout")
