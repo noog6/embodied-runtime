@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from embodied_runtime.app import RobotApplication
 from embodied_runtime.attachments import ImageAttachment
@@ -39,7 +39,7 @@ class Downloader:
         self.calls.append(reference)
         if index == self.fail_at:
             raise MediaDownloadError('media_download_failed')
-        return ImageAttachment('image/jpeg', raster(color=('red', 'blue', 'green', 'yellow')[index]))
+        return ImageAttachment('image/jpeg', raster(color=('red', 'blue', 'green', 'yellow')[int(reference.url.rsplit('/', 1)[1])]))
 
 
 class MultiImageSmsTests(unittest.IsolatedAsyncioTestCase):
@@ -70,6 +70,13 @@ class MultiImageSmsTests(unittest.IsolatedAsyncioTestCase):
         await self.app.stop()
         self.media.close()
         self.temp.cleanup()
+
+    async def restart_service(self):
+        await self.service.stop()
+        self.media.close()
+        self.media = ConversationMediaStore(self.media_config)
+        self.app.conversation_media = self.media
+        self.service = self.make_service()
 
     async def drain(self):
         await asyncio.wait_for(self.service._inbox.join(), 2)
@@ -111,6 +118,9 @@ class MultiImageSmsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.media.list_images()['images']), 2)
         self.assertEqual(self.media._db.execute('SELECT count(*) FROM request_media').fetchone()[0], 2)
         self.assertEqual(self.gateway.send.call_count, 0)
+        await self.restart_service()
+        self.assertEqual(self.service._accept_validated_form(form(2, body='')).reason, 'duplicate')
+        self.assertEqual(len(self.script.requests), 1)
 
     async def test_partial_download_failure_keeps_valid_earlier_media(self):
         self.downloader.fail_at = 1
@@ -119,6 +129,111 @@ class MultiImageSmsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.media.list_images()['images']), 1)
         self.assertEqual(self.script.requests, [])
         self.gateway.send.assert_called_once()
+
+    async def test_partial_retry_after_restart_recovers_only_missing_attachment_and_analyzes_once(self):
+        payload = form(2)
+        self.downloader.fail_at = 1
+        self.service._accept_validated_form(payload)
+        await self.drain()
+        original = self.media.list_images()['images'][0]
+        self.assertEqual(len(self.script.requests), 0)
+        await self.service.stop()
+        self.media.close()
+        self.media = ConversationMediaStore(self.media_config)
+        self.app.conversation_media = self.media
+        self.service = self.make_service()
+        self.downloader.fail_at = None
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'accepted')
+        await self.drain()
+        self.assertEqual(len(self.script.requests), 1)
+        photos = self.script.requests[0][2]['image_attachments']
+        self.assertEqual([photo.data for photo in photos], [raster(color='red'), raster(color='blue')])
+        records = self.media.list_images()['images']
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]['image_ref'], original['image_ref'])
+        self.assertEqual(records[0]['received_at'], original['received_at'])
+        self.assertEqual([reference.url.rsplit('/', 1)[1] for reference in self.downloader.calls], ['0', '1', '1'])
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'duplicate')
+        await self.service.stop()
+        self.media.close()
+        self.media = ConversationMediaStore(self.media_config)
+        self.app.conversation_media = self.media
+        self.service = self.make_service()
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'duplicate')
+        self.assertEqual(len(self.script.requests), 1)
+
+    async def test_partial_retry_in_same_process_is_allowed_and_preserves_receipt_order(self):
+        self.downloader.fail_at = 1
+        payload = form(2)
+        self.service._accept_validated_form(payload)
+        await self.drain()
+        self.assertEqual(self.media.ingestion_state('remote_text', 'SM1')['status'], 'partial')
+        self.assertNotIn('SM1', self.service._accepted)
+        self.downloader.fail_at = None
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'accepted')
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'duplicate')
+        await self.drain()
+        self.assertEqual(self.media.ingestion_state('remote_text', 'SM1')['status'], 'completed')
+        records = self.media.list_images()['images']
+        self.assertEqual([record['attachment_index'] for record in records], [0, 1])
+        self.assertEqual(records[0]['received_at'], records[1]['received_at'])
+        self.assertEqual(len(self.script.requests), 1)
+        self.assertEqual(len(self.downloader.calls), 3)
+
+    async def test_complete_downloads_before_analysis_claim_remain_recoverable(self):
+        payload = form(2)
+        self.media.begin_ingestion('remote_text', 'SM1', 2, datetime.now(UTC))
+        photos = tuple(ImageAttachment('image/jpeg', raster(color=color), source='sms',
+            source_message_id='SM1', attachment_index=index) for index, color in enumerate(('red', 'blue')))
+        self.media.retain(photos, channel='remote_text', message_identity='SM1')
+        await self.restart_service()
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'accepted')
+        await self.drain()
+        self.assertEqual(self.downloader.calls, [])
+        self.assertEqual(len(self.script.requests), 1)
+        self.assertEqual(self.media.ingestion_state('remote_text', 'SM1')['status'], 'completed')
+
+    async def test_indeterminate_analysis_is_not_repeated_after_restart(self):
+        entered = asyncio.Event()
+
+        async def uncertain(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        self.service._request_cognition = uncertain
+        payload = form(2)
+        self.service._accept_validated_form(payload)
+        await asyncio.wait_for(entered.wait(), 2)
+        self.assertEqual(self.media.ingestion_state('remote_text', 'SM1')['status'], 'processing')
+        await self.restart_service()
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'duplicate')
+        self.assertEqual(self.script.requests, [])
+
+    async def test_deleted_partial_attachment_is_not_downloaded_or_resurrected(self):
+        self.downloader.fail_at = 1
+        payload = form(2)
+        self.service._accept_validated_form(payload)
+        await self.drain()
+        reference = self.media.list_images()['images'][0]['image_ref']
+        self.media.delete([reference])
+        await self.restart_service()
+        self.downloader.fail_at = None
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'accepted')
+        await self.drain()
+        self.assertEqual(len(self.downloader.calls), 2)
+        self.assertEqual(self.script.requests, [])
+        self.assertEqual(self.media.list_images()['images'], [])
+
+    async def test_retention_failure_still_analyzes_current_message_once(self):
+        payload = form(2)
+        with patch.object(self.media, 'retain', side_effect=OSError('disk full')):
+            self.service._accept_validated_form(payload)
+            await self.drain()
+        self.assertEqual(len(self.script.requests), 1)
+        self.assertIn('not saved', self.gateway.send.call_args.kwargs['body'])
+        self.assertEqual(self.media.list_images()['images'], [])
+        await self.restart_service()
+        self.assertEqual(self.service._accept_validated_form(payload).reason, 'duplicate')
 
     async def test_count_limit_and_missing_fields_reject_before_queue(self):
         self.assertEqual(self.service._accept_validated_form(form(5)).status, 413)

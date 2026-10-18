@@ -178,6 +178,55 @@ class ConversationMediaTests(unittest.TestCase):
         self.assertEqual(self.store.cleanup(limit=1), 1)
         self.assertEqual(self.store._db.execute('SELECT count(*) FROM pixels').fetchone()[0], 1)
 
+    def test_ingestion_claim_is_atomic_scoped_and_terminal_outcome_does_not_regress(self):
+        self.store.begin_ingestion('remote_text', 'SM1', 2, NOW)
+        other = ConversationMediaStore(replace(self.config, operator_scope='other'), clock=lambda: NOW)
+        peer = ConversationMediaStore(self.config, clock=lambda: NOW)
+        try:
+            self.assertIsNone(other.ingestion_state('remote_text', 'SM1'))
+            self.assertFalse(other.claim_ingestion('remote_text', 'SM1'))
+            other.finish_ingestion('remote_text', 'SM1', 'completed')
+            self.assertEqual(self.store.ingestion_state('remote_text', 'SM1')['status'], 'partial')
+            self.assertTrue(peer.claim_ingestion('remote_text', 'SM1'))
+            self.assertFalse(self.store.claim_ingestion('remote_text', 'SM1'))
+            peer.finish_ingestion('remote_text', 'SM1', 'completed')
+            self.store.finish_ingestion('remote_text', 'SM1', 'failed')
+            self.assertEqual(self.store.ingestion_state('remote_text', 'SM1')['status'], 'completed')
+        finally:
+            other.close()
+            peer.close()
+
+    def test_ingestion_migration_preserves_partial_records_and_prior_analysis_claims(self):
+        records = self.retain()
+        self.store.link_request([record['image_ref'] for record in records], 'REQ'+'1'*32)
+        partial = replace(self.images[0], source_message_id='SM2')
+        partial_record, = self.store.retain((partial,), channel='remote_text', message_identity='SM2')
+        with self.store._db:
+            self.store._db.execute('DROP TABLE media_ingestions')
+            self.store._db.execute('PRAGMA user_version=1')
+        self.store.close()
+        self.store = ConversationMediaStore(self.config, clock=lambda: self.now)
+        self.assertEqual(self.store._db.execute('PRAGMA user_version').fetchone()[0], 2)
+        self.assertEqual(self.store.ingestion_state('remote_text', 'SM1')['status'], 'processing')
+        self.assertIsNone(self.store.ingestion_state('remote_text', 'SM2'))
+        state = self.store.begin_ingestion('remote_text', 'SM2', 2, NOW+timedelta(hours=1))
+        self.assertEqual(state['status'], 'partial')
+        self.assertEqual(state['received_at'], NOW.isoformat())
+        image = self.store.load_message_attachment('remote_text', 'SM2', 0)
+        self.assertEqual(image.reference, partial_record['image_ref'])
+        self.assertEqual(image.data, partial.data)
+        self.assertIsNone(self.store.load_message_attachment('remote_text', 'SM2', 1))
+
+    def test_ingestion_count_changes_fail_and_cleanup_remains_bounded(self):
+        self.store.begin_ingestion('remote_text', 'SM1', 2, NOW)
+        with self.assertRaisesRegex(ValueError, 'count changed'):
+            self.store.begin_ingestion('remote_text', 'SM1', 3, NOW)
+        for index in range(32):
+            self.store.begin_ingestion('remote_text', f'SM-other-{index}', 1, NOW)
+        self.now += timedelta(days=8)
+        self.store.cleanup(limit=1)
+        self.assertEqual(self.store._db.execute('SELECT count(*) FROM media_ingestions').fetchone()[0], 32)
+
     def test_invalid_configuration(self):
         for values in ({'max_items': 0}, {'max_age_days': True}, {'max_storage_bytes': -1},
                        {'operator_scope': '../operator'}, {'enabled': 'yes'}):

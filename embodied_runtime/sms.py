@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from embodied_runtime.conversation_history.continuity import delivery_attempt
 from embodied_runtime.images import ImageLimits
+from embodied_runtime.conversation_media import MediaUnavailableError
 from embodied_runtime.attachments import (
     ImageAttachment, MAX_INTERACTION_IMAGE_BYTES,
     SUPPORTED_INTERACTION_IMAGE_TYPES,
@@ -706,7 +707,8 @@ class TwilioSmsService(OperatorMessageSink):
         persisted = False
         if self.media_store is not None:
             try:
-                persisted = self.media_store.has_message(InteractionChannel.REMOTE_TEXT.value, sid)
+                ingestion = self.media_store.ingestion_state(InteractionChannel.REMOTE_TEXT.value, sid)
+                persisted = ingestion is not None and ingestion['status'] != 'partial'
             except Exception:
                 LOGGER.warning("[SMS] durable_dedupe status=unavailable")
         if sid in self._accepted or persisted:
@@ -743,6 +745,17 @@ class TwilioSmsService(OperatorMessageSink):
         while len(self._accepted_fifo) > self._dedupe_size:
             self._accepted.discard(self._accepted_fifo.popleft())
 
+    def _forget(self, sid):
+        """Release a failed partial intake so a webhook retry can recover it."""
+        self._accepted.discard(sid)
+        self._accepted_fifo = deque(item for item in self._accepted_fifo if item != sid)
+
+    def _finish_media_ingestion(self, message, status):
+        try:
+            self.media_store.finish_ingestion(self.channel.value, message.message_sid, status)
+        except Exception:
+            LOGGER.warning("[SMS] ingestion_outcome status=unavailable")
+
     async def _run_worker(self) -> None:
         while True:
             message = await self._inbox.get()
@@ -758,30 +771,66 @@ class TwilioSmsService(OperatorMessageSink):
                 )
                 attachments = []
                 media_items = message.media_items or ((message.media,) if message.media is not None else ())
+                tracking = False
+                received_at = message.received_at or datetime.now(UTC)
+                if media_items and self.media_store is not None:
+                    try:
+                        ingestion = self.media_store.begin_ingestion(self.channel.value,
+                            message.message_sid, len(media_items), received_at)
+                        if ingestion['status'] != 'partial':
+                            continue
+                        received_at = datetime.fromisoformat(ingestion['received_at'])
+                        tracking = True
+                    except ValueError:
+                        self._forget(message.message_sid)
+                        await self._send_reply(message, MEDIA_FAILURE_REPLY)
+                        continue
+                    except Exception:
+                        LOGGER.warning("[SMS] ingestion_state status=unavailable")
                 try:
                     for index, reference in enumerate(media_items):
-                        image = await self._media_downloader.download(reference)
-                        image = image.with_context(source="sms", source_message_id=message.message_sid,
-                                        attachment_index=index, received_at=message.received_at or datetime.now(UTC),
-                                        label=f"attachment {index + 1}")
+                        image = None
+                        if self.media_store is not None:
+                            try:
+                                image = self.media_store.load_message_attachment(self.channel.value,
+                                    message.message_sid, index, limits=self.image_limits)
+                            except MediaUnavailableError:
+                                raise MediaDownloadError("retained_media_unavailable") from None
+                            except Exception:
+                                LOGGER.warning("[SMS] retained_attachment status=unavailable")
+                        if image is None:
+                            image = await self._media_downloader.download(reference)
+                            image = image.with_context(source="sms", source_message_id=message.message_sid,
+                                attachment_index=index, received_at=received_at, label=f"attachment {index + 1}")
+                        if image.media_type != _normalized_media_type(reference.declared_media_type):
+                            raise MediaDownloadError("media_type_mismatch")
                         self.image_limits.validate((*attachments, image), decode=True)
                         attachments.append(image)
+                        if self.media_store is not None:
+                            try:
+                                # Commit each accepted attachment before attempting the next download.
+                                self.media_store.retain((image,), channel=self.channel.value,
+                                    message_identity=message.message_sid, message_text=message.body,
+                                    limits=self.image_limits)
+                            except Exception:
+                                LOGGER.warning("[SMS] retention status=failed_not_saved")
                         LOGGER.info("[SMS] media message_sid=%s attachment=%s type=%s bytes=%s status=loaded",
                                     message.message_sid, index, image.media_type, len(image.data))
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    # Valid earlier attachments survive a later download failure when storage is available.
-                    if self.media_store is not None and attachments:
-                        try:
-                            self.media_store.retain(attachments, channel=self.channel.value,
-                                message_identity=message.message_sid, message_text=message.body, limits=self.image_limits)
-                        except Exception:
-                            LOGGER.warning("[SMS] retention status=failed_not_saved")
-                    LOGGER.info("[SMS] media message_sid=%s status=failed reason=invalid_or_oversized_media", message.message_sid)
+                    self._forget(message.message_sid)
+                    LOGGER.info("[SMS] media message_sid=%s status=partial reason=invalid_or_oversized_media", message.message_sid)
                     await self._send_reply(message, MEDIA_FAILURE_REPLY)
                     continue
                 attachments = tuple(attachments)
+                if tracking:
+                    try:
+                        if not self.media_store.claim_ingestion(self.channel.value, message.message_sid):
+                            continue
+                    except Exception:
+                        LOGGER.warning("[SMS] ingestion_claim status=unavailable")
+                        tracking = False
                 try:
                     arguments = {"interaction": interaction}
                     if attachments:
@@ -790,8 +839,12 @@ class TwilioSmsService(OperatorMessageSink):
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    if tracking:
+                        self._finish_media_ingestion(message, 'failed')
                     LOGGER.error("[SMS] cognition status=failed")
                     continue
+                if tracking:
+                    self._finish_media_ingestion(message, 'completed')
                 body = response.strip()
                 if not body:
                     delivery_attempt(response, channel=self.channel).finish(

@@ -71,9 +71,11 @@ The service owns one aiohttp listener and one sequential worker. It acknowledges
 accepted webhooks immediately with empty TwiML. Its FIFO holds 16 accepted messages;
 a full queue returns 503 without deduplicating the rejected message. A bounded
 256-entry FIFO cache suppresses accepted `MessageSid` duplicates. The
-queue state is volatile. Durable conversation-media identities additionally suppress
-retained-image retries after restart while their bounded identity records remain;
-a crash before downloading/retaining queued work can still lose that work.
+queue state is volatile. Durable conversation-media ingestion state separately
+tracks partial intake and claimed/completed analysis. Partial retries reuse saved
+attachments and recover missing indices, including after restart; completed or
+indeterminate analyses are not replayed while their bounded state records remain.
+A crash before the worker starts can still lose queued work.
 
 Plain SMS behavior is unchanged. MMS accepts up to four JPEG, PNG or WebP images
 by default, with or without a caption, preserving attachment index order. Count

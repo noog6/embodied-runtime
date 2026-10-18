@@ -85,7 +85,10 @@ automatically replayed in dialogue context.
 
 Age is enforced at lookup even before physical cleanup. Cleanup runs at startup,
 inbound retention and listing, deleting at most 32 expired payloads and up to 32
-old tombstones per call. Idle processes do not run a cleanup timer. New images
+old tombstones per call. Ingestion-state cleanup is also bounded: at most 32
+expired and 32 excess message-state records per call, scoped to the same operator
+and conversation. These metadata records are capped at four times max_items
+while bounded pruning catches up. Idle processes do not run a cleanup timer. New images
 fail persistence when the live item/byte quota is full; live media is not silently
 evicted. Deleted/expired metadata keeps retry identity tombstones, bounded to four
 times max_items per scope plus a bounded cleanup backlog while pruning catches up. SQLite
@@ -94,13 +97,30 @@ journal overhead, not exactly the live-byte quota. Secure deletion overwrites
 freed SQLite content; backups, storage-controller copies and dialogue text have
 separate lifetimes.
 
-The existing volatile Twilio dedupe cache still handles queued/current requests.
-Retained source-message identities suppress image webhook retries after restart,
-including after analysis failure, expiry or deletion while their tombstones remain.
-A duplicate identity with different bytes is rejected. If persistence is disabled
-or fails, restart dedupe cannot be guaranteed. The webhook queue is still volatile:
-a crash after HTTP acknowledgement but before downloading/retaining a queued
-image can lose it. Media retention does not claim to be a durable webhook inbox.
+The existing volatile Twilio dedupe cache handles queued/current requests. Media
+schema 2 adds separate scoped message-ingestion state with the expected attachment
+count and first receipt time. Each valid attachment is committed before attempting
+the next download. A failed partial intake releases its volatile duplicate entry,
+so a retry in the same process or after restart reuses retained attachments and
+downloads only missing indices. Stable image IDs, receipt times and original
+attachment order are preserved. Deleted, expired or corrupt retained bytes produce
+an unavailable result instead of being downloaded again.
+
+Once the complete ordered set is available, the worker durably claims the message
+before cognition and records its completed or failed outcome. Completed analyses
+are not repeated by webhook retries. A crash after that claim is indeterminate:
+the processing claim suppresses replay, since cognition may already have performed
+an effect. A fresh operator recall request can still reanalyze selected retained
+images. Fully retained but unclaimed messages remain retryable after restart.
+Migration from media schema 1 treats existing request-linked media as an
+indeterminate prior claim; unlinked partial records remain recoverable. Duplicate
+identities with different bytes or attachment counts are rejected.
+
+Message-state records use a bounded retention window (the configured age and at
+most four times max_items per scope, with bounded pruning). If persistence is
+disabled or fails, durable dedupe cannot be guaranteed. The webhook queue is still
+volatile: a crash after HTTP acknowledgement but before the worker begins can lose
+queued work. Media retention does not claim to be a durable webhook inbox.
 
 On disabled/unavailable persistence, disk failure, or quota exhaustion, current
 images can still be analyzed. Runtime instructions identify retention status and
@@ -127,13 +147,19 @@ IDs, current `attachment:1` references, episode `img_…` references,
 must be non-null. The camera is captured once per operation; repeated `camera`
 selectors and all fallback attempts reuse those bytes. Its lease is released
 before any provider request. Workspace resolution goes through the existing Job
-selector and contained workspace loader. Autonomous Job work remains restricted
-to its own acquired references and current Job camera authority; conversation
-media is operator-only.
+selector and contained workspace loader. Autonomous Job work can use ordered
+`workspace:JOB<n>:logical-path` selectors only for its exact current Job ID,
+its own acquired references, and current Job camera authority. Each bulk load
+uses the existing Job-scoped workspace loader, and the running binding is checked
+again before provider analysis. Conversation media remains operator-only.
 
 Listing then mixed resolution/analysis consumes the existing two acquisitions.
 Bulk resolution of up to the configured image count is one bounded acquisition;
-no general autonomy budget is increased. The result includes every selected
+no general autonomy budget is increased. A Job can list its workspace, then
+resolve and jointly analyze four own-workspace images, then perform its permitted
+effect within the existing two-acquisition grammar. `interpret_image` is offered
+from the first Job decision when workspace access and vision are available;
+individual image loads are not a prerequisite. The result includes every selected
 reference, label, source and known timestamp alongside the bounded interpretation.
 Missing, expired, deleted, foreign-scope, corrupt or legacy-unretained selections
 fail explicitly; the runtime never replaces them with a camera capture.

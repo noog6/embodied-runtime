@@ -781,7 +781,9 @@ INTERPRET_IMAGE_TOOL = CognitionToolDefinition(
     name="interpret_image",
     description=("Jointly analyze an ordered selection in one vision request. Use image_refs "
                  "containing exact MEDIA IDs, episode image_refs, attachment:1 etc., camera (capture once), "
-                 "or workspace:JOB1:logical-path. Preserve user order; never silently replace images. "
+                 "or workspace:JOB1:logical-path. Autonomous Jobs may select only their own JOB ID. "
+                 "Workspace resolution and joint analysis together consume one acquisition. "
+                 "Preserve user order; never silently replace images. "
                  "Legacy image_ref selects one image. Use focus for the question."),
     parameters={"type": "object", "properties": {
         "image_ref": {"type": ["string", "null"], "maxLength": 300},
@@ -5307,6 +5309,9 @@ class RobotApplication:
                    for tool in tools) else "")
         image_guidance = (
             "\n\nImage capture, load and interpretation each consume one ordinary acquisition. "
+            "interpret_image can resolve up to the configured image limit from ordered "
+            "workspace:JOB<n>:logical-path selectors and analyze them together in one acquisition. "
+            "Use only the current Job ID; no prior individual loads are required. "
             "Save consumes one ordinary effect and never needs vision. Saved images and "
             "interpretations are historical, fallible and non-authoritative; unknown capture "
             "time means unknown age. Do not replace it with retrieval or interpretation time. "
@@ -5636,7 +5641,9 @@ class RobotApplication:
                 self.options.startup_prompt, working_memory,
                 expected_goal if self._goal_is_live(expected_goal) else None,
             ), *self._notification_sections(tools, notification_interaction),
-            "Image tools use exact episode-owned references. Capture, load and interpretation each "
+            "Image tools use exact episode-owned references or workspace:JOB<n>:logical-path selectors "
+            "restricted to the current Job. interpret_image resolves and jointly analyzes a bounded "
+            "workspace selection in one acquisition without prior individual loads. Capture, load and interpretation each "
             "consume one ordinary acquisition; save consumes one ordinary effect. The runtime supplies "
             "the current Job owner. Saved images and interpretations are historical and fallible; "
             "unknown capture time means unknown age. Storage confirms neither visual truth nor current "
@@ -6239,7 +6246,7 @@ class RobotApplication:
             images = (JOB_WORKSPACE_LOAD_IMAGE_TOOL,)
             if self._camera_capture_available():
                 images = (*images, CAPTURE_CAMERA_IMAGE_TOOL)
-            if image_references and self._saved_image_vision_available():
+            if self._saved_image_vision_available():
                 images = (*images, INTERPRET_IMAGE_TOOL)
             return (*tools, *JOB_WORKSPACE_ACQUISITION_TOOLS, *images)
         return tools
@@ -6696,11 +6703,18 @@ class RobotApplication:
                     selector = payload['image_ref']
                     camera_reference = selector
                 elif selector.startswith("workspace:"):
-                    if job_binding is not None:
-                        raise ValueError("autonomous workspace selection requires an episode image_ref")
                     _, job, path = selector.split(":", 2)
-                    result = self._execute_workspace_image(CognitionToolCall("workspace_load_image",
-                        json.dumps({"job": job, "path": path})), references, episode_id)
+                    if job_binding is not None:
+                        # Keep bulk reads behind the same exact running Job authority as single loads.
+                        self._current_job_workspace_authority(job_binding, expected_goal)
+                        if job != f"JOB{job_id}":
+                            raise ValueError("foreign_workspace_selector")
+                        result = self._execute_workspace_image(CognitionToolCall("workspace_load_image",
+                            json.dumps({"path": path})), references, episode_id,
+                            job_binding=job_binding, expected_goal=expected_goal, job_work=True)
+                    else:
+                        result = self._execute_workspace_image(CognitionToolCall("workspace_load_image",
+                            json.dumps({"job": job, "path": path})), references, episode_id)
                     payload = json.loads(result.output)
                     if payload['status'] != 'ok':
                         raise ValueError(payload.get('reason', 'workspace_image_unavailable'))
@@ -6734,6 +6748,8 @@ class RobotApplication:
                 raise ValueError("select exactly one of image_ref or image_refs")
             selection = await self._resolve_analysis_images(multiple if multiple is not None else [single],
                 references, episode_id, job_binding=job_binding, expected_goal=expected_goal)
+            if job_binding is not None:
+                self._current_job_workspace_authority(job_binding, expected_goal)
             backend = self._visual_perception_backend
             if len(selection.images) > 1 and not backend.supports_multi_image:
                 raise VisualPerceptionError("unsupported_capability")
