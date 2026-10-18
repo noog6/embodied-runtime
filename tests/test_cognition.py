@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import json
 import sys
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import embodied_runtime.app as app_module
 from embodied_runtime.app import REMEMBER_TOOL, ApplicationOptions, RobotApplication
+from tests.test_workspace_images import raster
 from embodied_runtime.attachments import ImageAttachment
 from embodied_runtime.body.virtual import VirtualBodyBackend
 from embodied_runtime.cognition import (
@@ -181,12 +183,12 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         camera = FakeCamera()
         app = self.make_application(backend, camera=camera)
         await app.start()
-        image = ImageAttachment("image/jpeg", b"\xff\xd8\xffprivate")
+        image = ImageAttachment("image/jpeg", raster())
         self.assertEqual(await app.request_cognition(
             "", image_attachments=(image,)
-        ), "image answer")
+        ), "image answer\n\nImage retention is unavailable; these images were not saved for later recall.")
         request = backend.requests[0]
-        self.assertEqual(request[-1], (image,))
+        self.assertEqual(request[-1][0].data, image.data)
         self.assertIn("supplied by the operator", request[1])
         self.assertIn("not a camera frame", request[1])
         self.assertEqual(camera.captures, 0)
@@ -204,7 +206,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         await app.start()
         with self.assertRaisesRegex(RuntimeError, "does not support image"):
             await app.request_cognition(
-                "caption", image_attachments=(ImageAttachment("image/jpeg", b"x"),)
+                "caption", image_attachments=(ImageAttachment("image/jpeg", raster()),)
             )
         self.assertEqual(backend.requests, [])
         await app.stop()
@@ -322,7 +324,7 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(app.runtime_state, state)
         self.assertEqual(published, [])
-        self.assertEqual([tool.name for tool in tools], ["set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime"])
+        self.assertEqual([tool.name for tool in tools], ["set_goal", "inspect_self", "inspect_runtime_health", "inspect_events", "inspect_effective_config", "inspect_job_runtime", "list_conversation_images"])
         self.assertIsNotNone(executor)
         self.assertIsNotNone(refresh)
         await app.stop()
@@ -605,25 +607,25 @@ class FakeResponses:
 
 
 class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
-    async def test_multiple_images_fail_before_provider_request(self):
+    async def test_excess_images_fail_before_provider_request(self):
         responses = FakeResponses()
         backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
-        image = ImageAttachment("image/jpeg", b"x")
-        with self.assertRaisesRegex(CognitionError, "at most one image"):
-            await backend.respond("look", image_attachments=(image, image))
+        image = ImageAttachment("image/jpeg", raster())
+        with self.assertRaisesRegex(ValueError, "configured maximum"):
+            await backend.respond("look", image_attachments=(image,) * 5)
         self.assertEqual(responses.calls, [])
 
     async def test_multimodal_mapping_and_blank_caption(self):
         responses = FakeResponses()
         backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))
-        image = ImageAttachment("image/jpeg", b"\xff\xd8\xffphoto")
+        image = ImageAttachment("image/jpeg", raster())
         await backend.respond("What is this?", image_attachments=(image,))
         content = responses.calls[0]["input"][0]["content"]
         self.assertEqual(content[0], {"type": "input_text", "text": "What is this?"})
         self.assertEqual(content[1]["type"], "input_image")
         self.assertEqual(content[1]["detail"], "auto")
         self.assertEqual(content[1]["image_url"],
-                         "data:image/jpeg;base64,/9j/cGhvdG8=")
+                         "data:image/jpeg;base64," + base64.b64encode(image.data).decode())
         await backend.respond("", image_attachments=(image,))
         self.assertEqual([item["type"] for item in
                           responses.calls[1]["input"][0]["content"]], ["input_image"])
@@ -644,7 +646,7 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
             "look", tools=(tool,),
             tool_executor=AsyncMock(return_value=CognitionToolResult('{"status":"ok"}')),
             refreshed_instructions=lambda: "refreshed",
-            image_attachments=(ImageAttachment("image/png", b"png"),),
+            image_attachments=(ImageAttachment("image/png", raster("PNG")),),
         )
         self.assertEqual(result, "final")
         self.assertIn("data:image/png;base64", repr(responses.calls[0]))

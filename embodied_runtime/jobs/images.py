@@ -26,7 +26,7 @@ def is_image(data: bytes) -> bool:
     return data.startswith((b"\xff\xd8", b"\x89PNG"))
 
 
-def validate_image(data: bytes) -> ImageMetadata:
+def validate_image(data: bytes, *, allow_webp: bool = False) -> ImageMetadata:
     # Import here to keep the storage error vocabulary in one place.
     from .workspace import WorkspaceQuotaError, WorkspaceValidationError
 
@@ -34,10 +34,11 @@ def validate_image(data: bytes) -> ImageMetadata:
         raise WorkspaceValidationError("invalid image")
     if len(data) > MAX_IMAGE_BYTES:
         raise WorkspaceQuotaError("image encoded bytes exceed limit")
+    formats = ("JPEG", "PNG", "WEBP") if allow_webp else ("JPEG", "PNG")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data), formats=("JPEG", "PNG")) as image:
+            with Image.open(io.BytesIO(data), formats=formats) as image:
                 width, height = image.size
                 if (not 0 < width <= MAX_IMAGE_DIMENSION
                         or not 0 < height <= MAX_IMAGE_DIMENSION
@@ -45,9 +46,9 @@ def validate_image(data: bytes) -> ImageMetadata:
                     raise WorkspaceQuotaError("image dimensions exceed limit")
                 if getattr(image, "n_frames", 1) != 1:
                     raise WorkspaceValidationError("animated images are unsupported")
-                media_type = {"JPEG": "image/jpeg", "PNG": "image/png"}[image.format]
+                media_type = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}[image.format]
                 image.verify()
-            with Image.open(io.BytesIO(data), formats=("JPEG", "PNG")) as image:
+            with Image.open(io.BytesIO(data), formats=formats) as image:
                 image.load()
     except (Image.DecompressionBombWarning, Image.DecompressionBombError) as error:
         raise WorkspaceQuotaError("image dimensions exceed limit") from error

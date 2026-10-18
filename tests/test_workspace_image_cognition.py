@@ -21,6 +21,7 @@ from embodied_runtime.interaction import (
     OperatorDeliveryRouteCatalog,
 )
 from embodied_runtime.jobs import FilesystemJobWorkspaceStore, SQLiteJobStore, WorkspaceDurabilityError
+from embodied_runtime.images import ImageLimits
 from embodied_runtime.outbound_images import RetainedImage
 from embodied_runtime.profile import RobotProfile
 from embodied_runtime.perception.factory import create_visual_perception_backend
@@ -174,7 +175,7 @@ class ImageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["content_version"], hashlib.sha256(self.a).hexdigest())
         self.assertEqual(app.observability.snapshot()["metrics"]["vision_fallbacks"], 1)
         self.assertEqual(self.store.load_image(self.job.id, "photos/frame").data, self.b)
-        self.assertNotIn("interpret_image", script.requests[0])
+        self.assertIn("interpret_image", script.requests[0])
         self.assertIn("interpret_image", script.requests[1])
         self.assertNotIn("interpret_image", script.requests[2])  # both acquisition slots consumed
 
@@ -254,6 +255,78 @@ class ImageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("workspace_load_image", script.requests[2])
         self.assertNotIn("interpret_image", script.requests[2])
         self.assertEqual(self.store.read(self.job.id, "description.txt").content, "Separate authored description")
+
+    async def test_job_lists_then_jointly_analyzes_four_workspace_images_within_budget(self):
+        images = [raster(color=color) for color in ("red", "blue", "green", "yellow")]
+        selectors = [f"workspace:JOB{self.job.id}:photos/frame-{index}" for index in range(4)]
+        for index, data in enumerate(images):
+            self.store.save_image(self.job.id, f"photos/frame-{index}", "create", data, provenance(self.job.id))
+        self.vision.supports_multi_image = True
+        script = Script([
+            ("workspace_list", {"directory": "photos", "cursor": None}),
+            ("interpret_image", {"image_refs": selectors, "focus": "Compare these four ordered photos."}),
+            ("workspace_write", {"path": "comparison.txt", "mode": "create", "content": "Joint comparison"}),
+        ])
+        app = await self.start(script, job_work=True)
+        app.start_job_run(self.job.id)
+        await app.work_current_job_once()
+        self.assertEqual([item["status"] for item in script.results], ["ok", "applied", "applied"])
+        self.assertEqual(len(self.vision.frames), 1)
+        self.assertEqual([image.data for image in self.vision.frames[0].images], images)
+        self.assertEqual([image.label for image in self.vision.frames[0].images], selectors)
+        self.assertEqual(script.results[1]["image_count"], 4)
+        self.assertIn("interpret_image", script.requests[0])
+        self.assertNotIn("interpret_image", script.requests[2])
+        self.assertNotIn("workspace_load_image", script.requests[2])
+        self.assertEqual(self.store.read(self.job.id, "comparison.txt").content, "Joint comparison")
+
+    async def test_job_bulk_analysis_rejects_foreign_workspace_before_loading(self):
+        other = self.jobs.create_job("Other")
+        self.store.save_image(other.id, "frame", "create", self.b, provenance(other.id))
+        script = Script([("interpret_image", {"image_refs": [f"workspace:JOB{other.id}:frame"], "focus": "compare"})])
+        app = await self.start(script, job_work=True)
+        app.start_job_run(self.job.id)
+        with patch.object(self.store, "load_image", wraps=self.store.load_image) as load:
+            await app.work_current_job_once()
+        self.assertEqual(script.results[0]["reason"], "foreign_workspace_selector")
+        load.assert_not_called()
+        self.assertEqual(self.vision.frames, [])
+
+    async def test_job_bulk_analysis_rejects_count_and_aggregate_limits_without_vision(self):
+        self.saved()
+        script = Script([])
+        app = await self.start(script, job_work=True)
+        binding = app.start_job_run(self.job.id)
+        bound = (binding, app._current_task_binding, app.active_goal)
+        for limits, count in ((ImageLimits(max_images=3), 4),
+                              (ImageLimits(max_total_bytes=len(self.a)+10), 2),
+                              (ImageLimits(max_total_pixels=60), 2)):
+            with self.subTest(limits=limits):
+                app.image_limits = limits
+                result = await app._execute_job_image_acquisition(CognitionToolCall("interpret_image", json.dumps({
+                    "image_refs": [f"workspace:JOB{self.job.id}:photos/frame"] * count,
+                    "focus": "Compare the ordered images."})), {}, 1, bound, app.active_goal)
+                self.assertEqual(json.loads(result.output)["status"], "rejected")
+        self.assertEqual(self.vision.frames, [])
+
+    async def test_job_bulk_analysis_checks_binding_after_last_load_before_vision(self):
+        self.saved()
+        app = await self.start(Script([]), job_work=True)
+        binding = app.start_job_run(self.job.id)
+        goal = app.active_goal
+        bound = (binding, app._current_task_binding, goal)
+        load = self.store.load_image
+
+        def pause_after_load(*args):
+            artifact = load(*args)
+            app.pause_task()
+            return artifact
+
+        with patch.object(self.store, "load_image", side_effect=pause_after_load):
+            result = await app._execute_job_image_acquisition(CognitionToolCall("interpret_image", json.dumps({
+                "image_refs": [f"workspace:JOB{self.job.id}:photos/frame"], "focus": "Describe"})), {}, 1, bound, goal)
+        self.assertEqual(json.loads(result.output)["status"], "rejected")
+        self.assertEqual(self.vision.frames, [])
 
     async def test_cross_job_selector_foreign_snapshot_and_stale_binding_fail_closed(self):
         self.saved()

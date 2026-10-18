@@ -3,8 +3,9 @@
 A Job Workspace can hold text and single-frame JPEG/PNG artifacts. Capturing,
 saving, interpreting, and sending remain distinct operations. Saving and sending
 make no vision request. There is no automatic retention, generated caption,
-image editing, comparison, semantic search, inbound-MMS persistence, memory
-admission, or change to nightly Jobs.
+image editing, visual semantic search, memory admission, or change to nightly Jobs.
+[Joint analysis and conversation-media retention](conversation-images.md) are
+separate capabilities and grant no Job workspace write permission.
 
 ## Tool grammar and budgets
 
@@ -18,7 +19,7 @@ paths, or arbitrary file/URL access.
 | --- | --- | --- | --- |
 | `capture_camera_image` | `{}` | `{}` | acquisition |
 | `workspace_load_image` | `job, path` | `path` | acquisition |
-| `interpret_image` | `image_ref, focus` | `image_ref, focus` | acquisition |
+| `interpret_image` | `image_ref` or ordered `image_refs`, plus `focus` | same, restricted to Job references or own `workspace:JOB<n>:path` selectors | acquisition |
 | `workspace_save_image` | `job, path, mode, image_ref` | `path, mode, image_ref` | effect |
 | `deliver_image` | `image_ref, destination, caption` | unavailable | effect |
 
@@ -33,14 +34,20 @@ automatically.
 The existing two-acquisition ceiling and effect grammar are unchanged. Operator
 work permits one effect; Job work uses its existing effect and continuation
 opportunities. There is no image-specific loop. Capture → save needs one
-acquisition and one effect. Load → interpret needs two acquisitions. Load → send
+acquisition and one effect. Individual load → interpret needs two acquisitions.
+`interpret_image` can instead resolve and jointly analyze a bounded ordered set of
+own-workspace selectors in one acquisition. Thus list → compare four → write
+fits the existing two-acquisition and ordinary-effect grammar. Load → send
 needs one acquisition and one effect. Capture → save → interpret → send exceeds
 one episode's grammar and must be split across explicit episodes.
 
 Capture requires a running camera and uses its existing fail-fast resource lease.
-Load requires Jobs and Workspace persistence. Interpret is offered after acquiring
-an image reference and requires configured vision, independently of camera
-availability. Operator save is offered only when a retained image can be used and the current
+Load requires Jobs and Workspace persistence. Operator interpretation requires
+configured vision, independently of camera availability, and can resolve a bounded
+mixed selection in one acquisition. Job interpretation can use acquired references
+or bounded selectors from the exact current Job workspace; it is available without
+prior individual loads. Foreign Job selectors fail through the existing authority
+boundary. Operator save is offered only when a retained image can be used and the current
 operator request grants an exact durable-write authorization. Delivery requires
 an available existing operator destination and the current operator's explicit
 request/authorization. Operator image durable writes require the explicit request grammar below and

@@ -70,25 +70,29 @@ environment. ngrok is development/acceptance exposure, not production architectu
 The service owns one aiohttp listener and one sequential worker. It acknowledges
 accepted webhooks immediately with empty TwiML. Its FIFO holds 16 accepted messages;
 a full queue returns 503 without deduplicating the rejected message. A bounded
-256-entry FIFO cache suppresses accepted `MessageSid` duplicates. Both queue and
-deduplication state are volatile: a restart forgets deduplication, and a crash after
-acknowledgment can lose queued work.
+256-entry FIFO cache suppresses accepted `MessageSid` duplicates. The
+queue state is volatile. Durable conversation-media ingestion state separately
+tracks partial intake and claimed/completed analysis. Partial retries reuse saved
+attachments and recover missing indices, including after restart; completed or
+indeterminate analyses are not replayed while their bounded state records remain.
+A crash before the worker starts can still lose queued work.
 
-Plain SMS behavior is unchanged. P2 also accepts exactly one JPEG, PNG, or WebP
-image, with or without a caption. The signed webhook queues only its Twilio media
-reference and returns immediately. The sequential worker authenticates to a
-narrowly validated `https://api.twilio.com` Message Media resource using the
-configured Account SID and Auth Token; redirects are disabled. Declared and
-streamed sizes are independently bounded to 4 MiB, and the signed type, HTTP type,
-and JPEG/PNG/WebP magic bytes must agree. Other or multiple media do not enter
-cognition.
+Plain SMS behavior is unchanged. MMS accepts up to four JPEG, PNG or WebP images
+by default, with or without a caption, preserving attachment index order. Count
+is configurable through `[vision] max_images`; oversized counts return HTTP 413.
+The signed webhook queues only Twilio media references and returns immediately.
+The sequential worker authenticates only to validated Twilio Message Media URLs;
+the existing restricted CDN redirect handling is unchanged. Declared and streamed
+sizes are independently bounded to 4 MiB per image, with aggregate byte/pixel
+limits and raster validation. Unsupported MIME types return HTTP 415.
 
-Inbound image bytes exist only for the current request and are never written to WorkingMemory,
-persistent memory, Job Workspaces, or run-history content. The attachment is
-operator-supplied interaction input, not a camera observation, and consumes no
-scene acquisition. Mira replies to inbound MMS by ordinary text SMS. Separately,
-an explicitly requested fresh camera image can be sent through the bounded outbound
-MMS flow described above.
+Accepted image bytes are automatically retained under the configurable
+[conversation-media policy](conversation-images.md), separately from Job workspaces.
+Dialogue stores lightweight references, and selected pixels can be reanalyzed after
+restart. Receipt times never claim capture times. Retention grants no workspace
+save or image-delivery authority. Failed/disabled persistence is reported and
+current-turn analysis can continue. The attachment remains operator-supplied input,
+not evidence of a camera observation. Mira replies by ordinary text SMS.
 
 Replies longer than 1,600
 characters are not truncated or split; the runtime makes at most one send using a

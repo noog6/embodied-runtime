@@ -9,6 +9,9 @@ import tomllib
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from embodied_runtime.images import ImageLimits
+from embodied_runtime.conversation_media import MediaRetentionConfiguration
+
 
 class ConfigurationError(ValueError):
     """Raised for an operator-facing runtime configuration error."""
@@ -99,6 +102,7 @@ class VisionBackendConfig:
 class VisionConfiguration:
     request_timeout_seconds: float = 30.0
     backends: tuple[VisionBackendConfig, ...] = ()
+    image_limits: ImageLimits = ImageLimits()
 
 
 def validate_vision_backend_config(config: VisionBackendConfig) -> None:
@@ -114,6 +118,8 @@ def validate_vision_backend_config(config: VisionBackendConfig) -> None:
 
 
 def validate_vision_configuration(config: VisionConfiguration) -> None:
+    if not isinstance(config.image_limits, ImageLimits):
+        raise ConfigurationError("vision image_limits must be ImageLimits")
     timeout = config.request_timeout_seconds
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ConfigurationError("vision.request_timeout_seconds must be finite and positive")
@@ -215,6 +221,7 @@ class RuntimeFileConfiguration:
     sms: SmsFileConfig = SmsFileConfig()
     power: PowerFileConfig = PowerFileConfig()
     vision: VisionConfiguration = VisionConfiguration()
+    conversation_media: MediaRetentionConfiguration = MediaRetentionConfiguration()
 
 
 @dataclass(frozen=True)
@@ -273,6 +280,7 @@ class LaunchConfiguration:
     power_recovery_voltage_v: float
     cognition_openai_compatible: OpenAICompatibleConfig = OpenAICompatibleConfig()
     vision_configuration: VisionConfiguration = VisionConfiguration()
+    conversation_media: MediaRetentionConfiguration = MediaRetentionConfiguration()
 
 
 DEFAULT_COGNITION_MODEL = "gpt-5.6-luna"
@@ -361,7 +369,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid configuration {path}: expected a TOML table")
-    _reject_unknown(data, {"runtime", "cognition", "vision", "initiative", "voice", "earcons", "memory", "conversation_history", "jobs", "interaction", "sms", "power"})
+    _reject_unknown(data, {"runtime", "cognition", "vision", "initiative", "voice", "earcons", "memory", "conversation_history", "conversation_media", "jobs", "interaction", "sms", "power"})
     runtime = _table(data, "runtime")
     cognition = _table(data, "cognition")
     initiative = _table(data, "initiative")
@@ -380,7 +388,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
     compatible = OpenAICompatibleConfig(**compatible_values)
     validate_compatible_config(compatible, complete=False)
     vision_values = _table(data, "vision")
-    _reject_unknown(vision_values, {"request_timeout_seconds", "backends"}, "vision")
+    _reject_unknown(vision_values, {"request_timeout_seconds", "backends", "max_images", "max_total_bytes", "max_total_pixels"}, "vision")
     entries = vision_values.get("backends", [])
     if not isinstance(entries, list) or ("backends" in vision_values and not entries):
         raise ConfigurationError("vision.backends must be a non-empty array of tables")
@@ -392,7 +400,20 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         if not {"backend", "model", "api_key_env"} <= entry.keys():
             raise ConfigurationError("each vision backend requires backend, model, and api_key_env")
         vision_backends.append(VisionBackendConfig(**entry))
-    vision = VisionConfiguration(vision_values.get("request_timeout_seconds", 30.0), tuple(vision_backends))
+    try:
+        limits = ImageLimits(**{key: vision_values[key] for key in ("max_images", "max_total_bytes", "max_total_pixels") if key in vision_values})
+        media_values = dict(_table(data, "conversation_media"))
+        _reject_unknown(media_values, set(MediaRetentionConfiguration.__dataclass_fields__), "conversation_media")
+        if "database_path" in media_values:
+            if not isinstance(media_values["database_path"], str) or not media_values["database_path"].strip():
+                raise ValueError("conversation_media.database_path must be a nonempty string")
+            media_values["database_path"] = Path(media_values["database_path"]).expanduser()
+            if not media_values["database_path"].is_absolute():
+                media_values["database_path"] = path.parent / media_values["database_path"]
+        media_config = MediaRetentionConfiguration(**media_values)
+    except (ValueError, TypeError) as error:
+        raise ConfigurationError(str(error)) from error
+    vision = VisionConfiguration(vision_values.get("request_timeout_seconds", 30.0), tuple(vision_backends), limits)
     validate_vision_configuration(vision)
     _reject_unknown(initiative, _INITIATIVE_KEYS, "initiative")
     _reject_unknown(voice, _VOICE_KEYS, "voice")
@@ -637,6 +658,7 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
         SmsFileConfig(sms.get("enabled", False), backend, bind_host, bind_port, webhook_path),
         PowerFileConfig(**power_values),
         vision,
+        media_config,
     )
 
 
@@ -701,6 +723,7 @@ def resolve_launch_configuration(
         cognition_openai_compatible=compatible,
         vision=vision,
         vision_configuration=file_config.vision,
+        conversation_media=file_config.conversation_media,
         mode=mode,
         timezone=runtime.timezone or HISTORICAL_DEFAULTS.timezone,
         interaction_environment=(interaction.environment

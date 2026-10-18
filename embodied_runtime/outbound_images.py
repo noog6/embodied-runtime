@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 from typing import Protocol
@@ -20,7 +20,7 @@ class RetainedImage:
 
     reference: str
     episode_id: int
-    data: bytes
+    data: bytes = field(repr=False)
     media_type: str
     width: int
     height: int
@@ -29,6 +29,8 @@ class RetainedImage:
     source_identity: str | None = None
     job_id: int | None = None
     job_run_id: int | None = None
+    received_at: datetime | None = None
+    label: str | None = None
 
     @property
     def content_version(self) -> str:
@@ -39,7 +41,7 @@ class RetainedImage:
 class OutboundImage:
     """Exact retained image passed across a provider-neutral delivery boundary."""
 
-    data: bytes
+    data: bytes = field(repr=False)
     media_type: str
     caption: str
 
