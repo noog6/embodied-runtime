@@ -206,8 +206,8 @@ Missing, incomplete, or unsupported mode metadata or sensor configuration keeps
 the original automatic configuration call. If a successful explicit configuration
 cannot be verified, the adapter restores automatic configuration and reports
 `automatic_fallback=True`. Camera-open, enumeration I/O, configure, start, and
-capture errors are not retried as compatibility fallbacks. No new configuration
-option, OS change, or package installation is required.
+capture errors are not retried as compatibility fallbacks. Sensor-mode selection
+itself requires no new Mira configuration option, OS change, or package installation.
 
 The startup `[CAMERA]` diagnostic includes effective/requested sensor parameters,
 output size, reported coverage, effective crop limits/default, and the fallback
@@ -246,10 +246,14 @@ OV5647 acquisition results above do not bench-verify the new selection logic.
    allocation errors, swapping, excessive latency, and memory pressure with
    Mira's other normal services running. Record actual values before accepting
    the Pi Zero 2 W trade-off.
-5. Stop Mira, power off, and swap back to OV5647 **without editing code or
-   configuration**. Repeat startup, fixed-scene comparison, diagnostic capture
-   (using `/tmp/mira-ov5647.jpg`), vision, delivery, latency, memory, and shutdown
+5. Stop Mira, power off, and swap back to OV5647 **without editing code or Mira
+   configuration**. If boot configuration explicitly specifies
+   `dtoverlay=imx219`, swapping back may require manually restoring
+   `dtoverlay=ov5647` before startup. This is OS camera provisioning; the runtime
+   does not manage boot overlays. Repeat startup, fixed-scene comparison,
+   diagnostic capture (using `/tmp/mira-ov5647.jpg`), vision, delivery, latency,
+   memory, and shutdown
    checks. For the representative metadata above, expect automatic 640 x 480
    readout, crop `(16, 0, 2560, 1920)`, `automatic_coverage_sufficient`, and
    `automatic_fallback=False`. Visible edges should match the previous OV5647
-   behavior; no new mandatory setting should be needed.
+   behavior; no new mandatory Mira setting should be needed.
