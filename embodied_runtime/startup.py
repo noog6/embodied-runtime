@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import getpass
+import json
 import os
 from pathlib import Path
 import pwd
@@ -19,6 +20,7 @@ from urllib.parse import urlsplit
 
 from embodied_runtime.cli import parse_launch_arguments, validate_launch_dependencies
 from embodied_runtime.config import ConfigurationError, LaunchConfiguration
+from embodied_runtime.ngrok_policy import build_traffic_policy, validate_policy_settings
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
 
 
@@ -67,6 +69,8 @@ class Deployment:
     ngrok: Path | None = None
     ngrok_domain: str | None = None
     ngrok_version: str | None = None
+    ngrok_twilio_vault: str | None = None
+    ngrok_twilio_secret: str | None = None
 
     @property
     def unit_name(self) -> str:
@@ -243,14 +247,20 @@ def discover_ngrok(
     path = Path(os.path.abspath(candidate))
     if not path.is_file() or not os.access(path, os.X_OK):
         raise StartupError(f"ngrok agent is missing or not executable: {path}")
-    result = runner([str(path), "version"])
+    try:
+        result = runner([str(path), "version"], check=False)
+    except (StartupError, OSError, subprocess.SubprocessError):
+        raise StartupError("cannot determine ngrok version; verify the agent executable") from None
+    if result.returncode != 0:
+        raise StartupError("cannot determine ngrok version; verify the agent executable")
     output = f"{result.stdout}\n{result.stderr}".strip()
-    match = re.search(r"(?:ngrok(?: version)?\s+)?v?(\d+)(?:\.\d+){1,2}", output, re.I)
+    match = re.search(r"(?:ngrok(?: version)?\s+)?v?(\d+)\.(\d+)(?:\.(\d+))?", output, re.I)
     if not match:
         raise StartupError("could not determine ngrok agent version")
-    if int(match.group(1)) != 3:
-        raise StartupError(f"unsupported ngrok major version {match.group(1)}; ngrok v3 is required")
-    return path, output.splitlines()[0]
+    version = tuple(int(part or 0) for part in match.groups())
+    if version[0] != 3 or version < (3, 17, 0):
+        raise StartupError("managed Traffic Policy requires ngrok >=3.17.0 and <4; upgrade the agent")
+    return path, "ngrok version " + ".".join(map(str, version))
 
 
 def build_deployment(
@@ -262,6 +272,7 @@ def build_deployment(
     paths: SystemPaths = SystemPaths(),
     with_ngrok: bool = False, ngrok: Path | None = None,
     ngrok_domain: str | None = None, runner: CommandRunner = run_command,
+    ngrok_twilio_vault: str | None = None, ngrok_twilio_secret: str | None = None,
 ) -> Deployment:
     repo = repo.resolve()
     if not repo.is_dir() or not (repo / "main.py").is_file():
@@ -292,12 +303,16 @@ def build_deployment(
         if not ngrok_domain:
             raise StartupError("--with-ngrok requires --ngrok-domain HOST")
         domain = validate_ngrok_domain(ngrok_domain)
+        try:
+            validate_policy_settings(launch.sms_webhook_path, ngrok_twilio_vault, ngrok_twilio_secret)
+        except ValueError as error:
+            raise StartupError(str(error)) from None
         ngrok_path, ngrok_version = discover_ngrok(ngrok, runner=runner)
         local_sms_upstream(launch.sms_bind_host, launch.sms_bind_port)
     return Deployment(
         repo, python_path, config_path, profile, launch, selected_name,
         selected_user, with_sms, capture_env, paths, with_ngrok, ngrok_path,
-        domain, ngrok_version,
+        domain, ngrok_version, ngrok_twilio_vault, ngrok_twilio_secret,
     )
 
 
@@ -404,12 +419,28 @@ def render_ngrok_config(deployment: Deployment) -> str:
     if not deployment.with_ngrok or not deployment.ngrok_domain:
         raise StartupError("ngrok ingress is not configured")
     upstream = local_sms_upstream(deployment.launch.sms_bind_host, deployment.launch.sms_bind_port)
+    try:
+        policy = build_traffic_policy(
+            deployment.launch.sms_webhook_path,
+            deployment.ngrok_twilio_vault, deployment.ngrok_twilio_secret,
+        )
+    except ValueError as error:
+        raise StartupError(str(error)) from None
+    # JSON flow syntax is valid YAML; stdlib encoding safely quotes CEL without
+    # adding a YAML dependency or allowing operator-supplied policy fragments.
+    policy_yaml = "\n".join("      " + line for line in json.dumps(policy, indent=2).splitlines())
     return (
         "version: 3\n\nendpoints:\n"
         f"  - name: {deployment.service_name}-sms\n"
         f'    url: "https://{deployment.ngrok_domain}"\n'
         "    upstream:\n"
         f'      url: "{upstream}"\n'
+        "    traffic_policy:\n"
+        f"{policy_yaml}\n"
+        "\nagent:\n"
+        "  console_ui: false\n"
+        "  web_addr: false\n"
+        "  log_level: warn\n"
     )
 
 
@@ -476,14 +507,24 @@ def validate_ngrok_config(
     Authentication is supplied independently through the process environment;
     it is never rendered into the temporary YAML or added to argv.
     """
-    if not environ.get("NGROK_AUTHTOKEN"):
-        return "ngrok config validation skipped; NGROK_AUTHTOKEN is not loaded"
     if deployment.ngrok is None:
         raise StartupError("ngrok ingress is not configured")
     with tempfile.NamedTemporaryFile("w", suffix=".yml") as temporary:
         temporary.write(render_ngrok_config(deployment))
         temporary.flush()
-        runner([str(deployment.ngrok), "config", "check", "--config", temporary.name])
+        try:
+            result = runner([str(deployment.ngrok), "config", "check", "--config", temporary.name], check=False)
+        except (StartupError, OSError, subprocess.SubprocessError):
+            # Agent diagnostics can contain inherited credentials. Never relay
+            # stdout/stderr from this subprocess into deployment previews/errors.
+            raise StartupError("cannot run ngrok config check; verify the agent executable") from None
+        if result.returncode != 0:
+            raise StartupError(
+                "ngrok config check rejected the generated configuration; verify ngrok >=3.17.0, "
+                "the static sms.webhook_path and cloud vault/secret names. If authentication is "
+                "required, source the protected NGROK_AUTHTOKEN file and retry. "
+                "No ingress files were installed; see docs/ngrok-ingress.md"
+            )
     return None
 
 
@@ -652,6 +693,7 @@ def install(
     ngrok_config = render_ngrok_config(deployment) if deployment.with_ngrok else None
     if ngrok_unit:
         verify_unit(ngrok_unit, runner)
+        validate_ngrok_config(deployment, environ=environ, runner=runner)
     existing = deployment.unit_path.read_bytes() if deployment.unit_path.exists() else None
     encoded = unit.encode()
     unit_changed = existing != encoded
@@ -802,6 +844,8 @@ def build_wizard_parser() -> argparse.ArgumentParser:
         child.add_argument("--with-ngrok", action="store_true")
         child.add_argument("--ngrok", type=Path)
         child.add_argument("--ngrok-domain")
+        child.add_argument("--ngrok-twilio-vault", help="ngrok cloud vault name, never a credential")
+        child.add_argument("--ngrok-twilio-secret", help="ngrok cloud secret name containing the Twilio auth token")
         if command == "render":
             child.add_argument("--component", choices=("runtime", "ngrok", "all"), default="runtime")
         if command == "install":
@@ -827,6 +871,10 @@ def _print_summary(deployment: Deployment, environ: Mapping[str, str]) -> None:
         print(f"\nngrok domain\n  {deployment.ngrok_domain}")
         print(f"\nLocal SMS endpoint\n  {upstream}{deployment.launch.sms_webhook_path}")
         print(f"\nPublic SMS webhook\n  {deployment.public_webhook_url}")
+        print("\nEdge policy\n  required: Twilio verification, route/method allowlist, "
+              "SMS 30/min, media 60/min, declared body 64 KiB")
+        print("  Cloud vault/secret and account entitlement require live acceptance; "
+              "see docs/ngrok-ingress.md")
     print("\nRequired environment")
     for name, present in environment_presence(deployment, environ).items():
         state = ("derived" if deployment.with_ngrok and name == "TWILIO_WEBHOOK_URL"
@@ -847,7 +895,7 @@ def wizard_main(
         args = argparse.Namespace(
             command=None, python=None, config=None, service_name=None, user=None,
             with_sms=False, capture_env=False, with_ngrok=False, ngrok=None,
-            ngrok_domain=None,
+            ngrok_domain=None, ngrok_twilio_vault=None, ngrok_twilio_secret=None,
         )
     try:
         repo = discover_repository(script_path or Path(__file__))
@@ -858,6 +906,8 @@ def wizard_main(
                 with_sms=args.with_sms, capture_env=args.capture_env,
                 with_ngrok=args.with_ngrok, ngrok=args.ngrok,
                 ngrok_domain=args.ngrok_domain,
+                ngrok_twilio_vault=args.ngrok_twilio_vault,
+                ngrok_twilio_secret=args.ngrok_twilio_secret,
                 interactive=interactive, environ=environ,
             )
         except StartupError as error:
@@ -872,6 +922,8 @@ def wizard_main(
                 capture_env=args.capture_env, interactive=True, environ=environ,
                 with_ngrok=args.with_ngrok, ngrok=args.ngrok,
                 ngrok_domain=args.ngrok_domain,
+                ngrok_twilio_vault=args.ngrok_twilio_vault,
+                ngrok_twilio_secret=args.ngrok_twilio_secret,
             )
         if interactive:
             if (deployment.launch.sms_enabled and input(
@@ -886,11 +938,16 @@ def wizard_main(
                 if ngrok_path is None:
                     raise StartupError("ngrok executable path is required")
                 domain = input("Stable ngrok hostname: ").strip()
+                print("Create the Twilio auth token secret in ngrok's cloud vault first. "
+                      "Enter resource names only; see docs/ngrok-ingress.md.")
+                vault = input("ngrok Twilio vault name: ").strip()
+                secret = input("ngrok Twilio secret name (not its value): ").strip()
                 deployment = build_deployment(
                     repo=repo, python=args.python, config=deployment.config,
                     service_name=args.service_name, user=args.user,
                     with_sms=deployment.with_sms, capture_env=False,
                     with_ngrok=True, ngrok=ngrok_path, ngrok_domain=domain,
+                    ngrok_twilio_vault=vault, ngrok_twilio_secret=secret,
                     interactive=True, environ=environ,
                 )
             _print_summary(deployment, environ)
@@ -961,7 +1018,10 @@ def wizard_main(
             if (required_environment(deployment) and not deployment.capture_env
                     and deployment.uses_environment_file):
                 print(f"  service secrets              managed file {deployment.environment_path}")
-            print(f"\n{'WARNING: ' + warning if warning else 'Checks passed.'}")
+            print(f"\n{'WARNING: ' + warning if warning else 'Local checks passed.'}")
+            if deployment.with_ngrok:
+                print("Cloud policy compilation, plan entitlement, secret resolution and "
+                      "enforcement require the live acceptance in docs/ngrok-ingress.md.")
         elif args.command == "install":
             result = install(
                 deployment, environ=environ, force=args.force, start=args.start,

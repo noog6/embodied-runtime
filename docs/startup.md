@@ -124,7 +124,11 @@ credentials could provide later hardening, but Phase 2 does not add
 ### Stable ngrok SMS ingress
 
 `--with-ngrok --ngrok-domain <stable-hostname>` adds a sibling, profile-scoped
-service; it never launches ngrok from the runtime. For `mira`, the wizard owns:
+service; it never launches ngrok from the runtime. Managed ingress now requires
+`--ngrok-twilio-vault NAME --ngrok-twilio-secret NAME` and always attaches an
+enforced edge policy. Follow [ngrok ingress hardening](ngrok-ingress.md) for cloud
+secret setup, plan limits, deployment commands, rollback and live acceptance.
+For `mira`, the wizard owns:
 
 ```text
 /etc/systemd/system/mira.service
@@ -135,9 +139,10 @@ service; it never launches ngrok from the runtime. For `mira`, the wizard owns:
 /etc/embodied-runtime/mira-ngrok.state
 ```
 
-The operator must install a v3 ngrok agent and reserve a stable development or
-static domain first. The wizard neither installs ngrok nor changes its global
-configuration. It rejects URLs, ports, credentials, paths, queries, and
+The operator must install ngrok >=3.17.0 and <4 (current stable recommended),
+select their assigned development or reserved domain, and create the cloud
+Twilio verification secret first. The wizard neither installs ngrok nor changes
+its global configuration. It rejects URLs, ports, credentials, paths, queries, and
 fragments in `--ngrok-domain`. `--ngrok PATH` selects an executable explicitly.
 The effective SMS bind address must be local or wildcard; wildcard listeners
 are forwarded through loopback.
@@ -150,12 +155,14 @@ stale managed Twilio URL. Render the non-secret artifacts with
 `render --component ngrok` or all units/config with `render --component all`.
 The mode-0644 state file contains only the exact configured public webhook URL.
 It is compared independently from the YAML, so changing only `sms.webhook_path`
-still requires runtime environment capture, while changing only the local
-upstream does not. No provider credential is read to make this decision.
+still requires runtime environment capture and now changes the edge policy too,
+requiring an explicit ingress restart. Changing only the local upstream or cloud
+secret reference does not require runtime capture. No provider credential is read
+to make this decision.
 
 The interactive wizard offers stable ngrok ingress after SMS is enabled, asks
-for the executable and stable hostname, and displays the local and public SMS
-URLs before installation. Its capture confirmation names both separately
+for the executable, stable hostname and cloud vault/secret names, and displays
+the local and public SMS URLs before installation. Its capture confirmation names both separately
 scoped environment files. If explicitly asked to start an inactive deployment,
 it starts Mira and then ngrok.
 
@@ -166,18 +173,20 @@ ngrok start failure is reported without rolling back Mira. Changed active
 services are never restarted automatically; restart only the service reported
 by the wizard.
 
-During `check`, the wizard runs `ngrok config check --config <temporary-file>`
-when `NGROK_AUTHTOKEN` is loaded. This only parses the generated configuration;
-it does not start a tunnel. The temporary YAML contains only the endpoint,
-domain, and upstream configuration; authentication remains independently
+During both `check` and `install`, the wizard runs
+`ngrok config check --config <temporary-file>` before any installation writes.
+It attempts parsing even without a token loaded; if the agent requires one,
+source the protected token file and retry. Failures abort installation and raw
+subprocess diagnostics are withheld. This parses configuration without starting
+a tunnel; cloud policy compilation, entitlement and secret resolution still
+require live acceptance. The temporary YAML contains the endpoint, domain,
+upstream and secret-free policy; authentication remains independently
 available to ngrok through the current process environment. The installed
 `mira-ngrok.service` similarly loads `NGROK_AUTHTOKEN` exclusively from
 `EnvironmentFile=/etc/embodied-runtime/mira-ngrok.env`, while
 `mira-ngrok.yml` contains no authentication material. This environment-only
 authentication contract was verified with ngrok v3.39.11 on the target
-Raspberry Pi. When a secure managed token file is being reused
-without a token in the current shell, agent-level validation is skipped with a
-warning rather than reading the protected file.
+Raspberry Pi. The wizard never reads the protected token file to validate policy.
 
 Credential selection is deterministic. If the protected ngrok environment file
 does not exist, `NGROK_AUTHTOKEN` must be loaded and is installed. If it exists

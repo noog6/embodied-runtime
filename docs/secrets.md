@@ -243,9 +243,13 @@ An SMS deployment using Startup Wizard ngrok ingress requires
 install. The wizard reports only whether it is set and writes only that variable
 to `/etc/embodied-runtime/<name>-ngrok.env` at mode 0600. The ngrok unit does
 not receive OpenAI, ElevenLabs, or Twilio credentials, and the runtime unit does
-not receive the ngrok token. The generated v3 YAML contains only endpoint,
-domain, and upstream configuration—no token value or environment-variable
-reference. `mira-ngrok.service` loads the dedicated file with
+not receive the ngrok token. The generated v3 YAML contains endpoint,
+domain, upstream and Traffic Policy with cloud vault/secret names, never token
+values or local secret-variable substitutions. Edge Twilio verification requires
+a separate cloud-stored copy of the Twilio auth token in ngrok's encrypted vault;
+this expands the credential trust boundary. See [ngrok ingress](ngrok-ingress.md)
+for safe file-based cloud setup, plan/version requirements and rotation.
+`mira-ngrok.service` loads the dedicated file with
 `EnvironmentFile=/etc/embodied-runtime/mira-ngrok.env`, making the token
 available only in the ngrok process environment. This contract was verified
 with ngrok v3.39.11 on the target Raspberry Pi.

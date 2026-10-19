@@ -394,6 +394,11 @@ The strict optional `[sms]` table accepts `enabled`, `backend` (`twilio` only),
 checked-in configuration. Provider identifiers, telephone numbers, credentials,
 and the public URL are environment settings, never TOML or CLI values. See
 [`sms.md`](sms.md).
+Managed ngrok ingress derives its exact POST allowlist from `sms.webhook_path`;
+its wizard flags select cloud vault/secret **names**, with enforced verification
+and fixed conservative edge limits. See [ngrok ingress](ngrok-ingress.md) for the
+supported static path syntax and cloud setup. Credentials remain outside TOML.
+
 ## Power monitor
 
 The runtime-owned monitor defaults to a 30-second cadence, attention at or below
