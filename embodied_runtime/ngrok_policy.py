@@ -49,9 +49,12 @@ def build_traffic_policy(webhook_path: str, vault: str | None, secret: str | Non
     return {"on_http_request": [
         {"expressions": [f"!(({sms}) || ({media}))"],
          "actions": [{"type": "custom-response", "config": {"status_code": 403}}]},
-        # Content-Length is optional for streaming requests. This is a declared
-        # size check, not a claim of a streamed-body or concurrency ceiling.
-        {"expressions": [f"has(req.content_length) && req.content_length > {MAX_DECLARED_BODY_BYTES}"],
+        # ngrok declares dotted variables, not a parent `req` object. Calling
+        # has(req.content_length) therefore fails cloud compilation (2200).
+        # req.headers is a documented lower-case-keyed map; test membership there
+        # before accessing the optional declared length. This is not a streamed
+        # body or concurrency ceiling.
+        {"expressions": [f"'content-length' in req.headers && req.content_length > {MAX_DECLARED_BODY_BYTES}"],
          "actions": [{"type": "custom-response", "config": {"status_code": 413}}]},
         {"expressions": [sms], "actions": [
             rate_limit("sms", SMS_REQUESTS_PER_MINUTE),

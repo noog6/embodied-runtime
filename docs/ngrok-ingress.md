@@ -40,7 +40,12 @@ It returns 429 with `Retry-After` when a bucket is exhausted. The supported mini
 rate window is 60 seconds, so no subsecond burst guarantee is claimed. See the
 [rate-limit reference](https://ngrok.com/docs/gateway/traffic-policy/actions/rate-limit).
 
-The body check uses documented `req.content_length`. 64 KiB allows generously
+The body check uses `'content-length' in req.headers` to guard the optional
+documented `req.content_length`. Header map keys are lower-case. Do not use
+`has(req.content_length)`: ngrok's cloud compiler rejects that expression with
+`ERR_NGROK_2200` because it resolves dotted variables without a parent `req`
+object. A generic CEL interpreter supplied with a nested `req` map can accept it,
+so that test setup does not establish ngrok compatibility. 64 KiB allows generously
 encoded SMS text and MMS metadata; inbound MMS carries media references, not
 image bytes. This also permits future optional Twilio fields. A streamed request
 without a declared length is not fully bounded by this rule. There is no documented
@@ -213,6 +218,17 @@ removes managed ingress artifacts and preserves secrets unless `--purge-env` is
 explicit; it does not delete the cloud vault, secret, domain or account.
 
 ## Verification and live acceptance
+
+If upgrading from the initial policy and ngrok fails with `ERR_NGROK_2200`
+pointing to `has(req.content_length)`, deploy the corrected generator and rerun
+the wizard's `render`, `check` and `install --force` with the same hostname and
+vault/secret names. Reuse the existing environment files without `--capture-env`
+when the hostname/path has not changed. Then run
+`sudo systemctl reset-failed mira-ngrok.service` followed by
+`sudo systemctl restart mira-ngrok.service` (substitute your service name).
+The failed startup does not require recreating the vault or rotating credentials;
+repeat live acceptance once the endpoint starts. Local config parsing can pass
+even when cloud expression compilation fails.
 
 Local regression tests cover generated policy structure, exact custom paths,
 methods, token route shape, enforced verification, separate rate limits, resource
