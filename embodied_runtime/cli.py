@@ -143,6 +143,11 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
     parser.add_argument("--no-color", action="store_true",
                         help="disable ANSI colour in console and runtime logs")
     parser.add_argument(
+        "--ctrl-c-shutdown", choices=("auto", "enabled", "disabled"),
+        default=configurable_default("auto"),
+        help="Ctrl+C shutdown policy (auto: disabled in console, enabled otherwise)",
+    )
+    parser.add_argument(
         "--no-earcons", action="store_true",
         help="disable semantic earcon chimes without disabling voice or TTS",
     )
@@ -279,6 +284,8 @@ def parse_launch_arguments(
     args.console = effective.mode == "console"
     args.diagnostics = effective.mode == "diagnostics"
     args.mode = effective.mode
+    args.ctrl_c_shutdown = effective.ctrl_c_shutdown
+    args.ctrl_c_shutdown_enabled = effective.ctrl_c_shutdown_enabled
     args.initiative = effective.initiative
     args.initiative_platform_attention = effective.initiative_platform_attention
     args.initiative_actions = effective.initiative_actions
@@ -564,6 +571,7 @@ async def _run_console_application(
     application: RobotApplication, terminal: AsyncLineTerminal,
     message_channel: ConsoleOperatorMessageChannel | None,
     history_root: Path = DEFAULT_HISTORY_ROOT,
+    *, cleanup_started: asyncio.Event | None = None,
 ) -> int:
     """Own the console's interrupt and cleanup lifecycle in one boundary."""
     try:
@@ -580,6 +588,8 @@ async def _run_console_application(
         LOGGER.info("[APP] interrupted")
         raise
     finally:
+        if cleanup_started is not None:
+            cleanup_started.set()
         await application.stop()
     return 0
 
@@ -590,6 +600,8 @@ async def _run_application(
     history_evidence: RunHistoryEvidenceReader | None = None,
     observability: RunObservability | None = None,
     shutdown_requested: asyncio.Event | None = None,
+    terminal: AsyncLineTerminal | None = None,
+    cleanup_started: asyncio.Event | None = None,
 ) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
@@ -747,13 +759,16 @@ async def _run_application(
                     f"bytes={len(frame.data)} output={args.camera_test} status=ok"
                 )
         finally:
+            if cleanup_started is not None:
+                cleanup_started.set()
             await application.stop()
         return 0
 
     if args.console:
         return await _run_console_application(
-            application, AsyncLineTerminal(no_color=args.no_color), message_channel,
+            application, terminal or AsyncLineTerminal(no_color=args.no_color), message_channel,
             history_root,
+            cleanup_started=cleanup_started,
         )
 
     return await _run_headless_application(application, shutdown_requested)
@@ -769,61 +784,104 @@ async def _run_headless_application(
         return 0
     run_task = asyncio.create_task(application.run(), name="application-run")
     signal_task = asyncio.create_task(shutdown_requested.wait(), name="sigterm-wait")
-    done, _ = await asyncio.wait(
-        (run_task, signal_task), return_when=asyncio.FIRST_COMPLETED,
-    )
-    if signal_task in done and not run_task.done():
-        application.request_stop()
-        if application.state is not LifecycleState.RUNNING:
-            # Startup may be blocked in provider preparation. Cancellation is
-            # only the wake-up mechanism; RobotApplication.run() still owns
-            # partial-start cleanup in its finally block.
-            run_task.cancel()
-    signal_task.cancel()
-    await asyncio.gather(signal_task, return_exceptions=True)
     try:
-        await run_task
-    except asyncio.CancelledError:
-        if not shutdown_requested.is_set():
-            raise
-    return 0
+        done, _ = await asyncio.wait(
+            (run_task, signal_task), return_when=asyncio.FIRST_COMPLETED,
+        )
+        cancelled_for_shutdown = signal_task in done and not run_task.done()
+        if cancelled_for_shutdown:
+            application.request_stop()
+            if application.state in (LifecycleState.CREATED, LifecycleState.STARTING):
+                # Wake blocked startup; application.run still owns partial cleanup.
+                run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            if not cancelled_for_shutdown or asyncio.current_task().cancelling():
+                raise
+        return 0
+    finally:
+        for task in (run_task, signal_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(run_task, signal_task, return_exceptions=True)
 
 
 async def _run_process_application(
     args: argparse.Namespace, profile: RobotProfile, history_root: Path,
     history_evidence: RunHistoryEvidenceReader, observability: RunObservability,
 ) -> int:
-    """Own run-mode process signals while delegating cleanup to the lifecycle."""
-    if args.mode != "run":
-        return await _run_application(
-            args, profile, history_root, history_evidence, observability,
-        )
+    """Own SIGINT/SIGTERM through startup, execution, and lifecycle cleanup."""
     loop = asyncio.get_running_loop()
     shutdown_requested = asyncio.Event()
-    logged = False
+    cleanup_started = asyncio.Event()
+    enabled = getattr(args, "ctrl_c_shutdown_enabled", args.mode != "console")
+    terminal = None
 
-    def request_shutdown() -> None:
-        nonlocal logged
-        if logged:
+    def request_shutdown(signum: signal.Signals) -> None:
+        if shutdown_requested.is_set():
             return
-        logged = True
-        LOGGER.info("[PROCESS] signal=SIGTERM action=shutdown_requested")
+        LOGGER.info("[PROCESS] signal=%s action=shutdown_requested", signum.name)
         shutdown_requested.set()
 
-    installed = False
-    try:
-        loop.add_signal_handler(signal.SIGTERM, request_shutdown)
-        installed = True
-    except (NotImplementedError, RuntimeError):
-        pass
-    try:
-        return await _run_application(
-            args, profile, history_root, history_evidence, observability,
-            shutdown_requested,
+    def interrupt() -> None:
+        if enabled:
+            request_shutdown(signal.SIGINT)
+        elif terminal is not None:
+            terminal.cancel_input()
+
+    if args.mode == "console":
+        terminal = AsyncLineTerminal(
+            no_color=getattr(args, "no_color", False), on_interrupt=interrupt,
         )
+    previous = {}
+    work = waiter = None
+    try:
+        for signum, callback in ((signal.SIGINT, interrupt),
+                                 (signal.SIGTERM, lambda: request_shutdown(signal.SIGTERM))):
+            old = signal.getsignal(signum)
+            # asyncio has no public getter for registered loop callbacks. Keep
+            # the Unix selector Handle too, as prompt_toolkit does for SIGWINCH.
+            old_loop_handler = getattr(loop, "_signal_handlers", {}).get(signum)
+            loop.add_signal_handler(signum, callback)
+            previous[signum] = (old, old_loop_handler)
+        work = asyncio.create_task(_run_application(
+            args, profile, history_root, history_evidence, observability,
+            shutdown_requested, terminal, cleanup_started,
+        ), name="runtime-application")
+        waiter = asyncio.create_task(shutdown_requested.wait(), name="process-shutdown")
+        done, _ = await asyncio.wait((work, waiter), return_when=asyncio.FIRST_COMPLETED)
+        if work in done or args.mode == "run" or cleanup_started.is_set():
+            # Headless lifecycle requests stop itself, including partial start.
+            # Console/diagnostics mark cleanup before awaiting stop: a late
+            # signal must join that cleanup rather than cancel it. Caller task
+            # cancellation still propagates through the ordinary await.
+            return await work
+        # Console/diagnostics cancellation wakes blocked startup or commands;
+        # their existing finally blocks still own application.stop(). Only this
+        # explicit signal cancellation is consumed here, never caller cancellation.
+        work.cancel()
+        try:
+            return await work
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+            return 0
     finally:
-        if installed:
-            loop.remove_signal_handler(signal.SIGTERM)
+        tasks = [task for task in (work, waiter) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for signum, (old, old_loop_handler) in previous.items():
+                loop.remove_signal_handler(signum)
+                if old_loop_handler is not None:
+                    loop.add_signal_handler(signum, old_loop_handler._callback,
+                                            *old_loop_handler._args)
+                else:
+                    signal.signal(signum, old)
 
 
 def main(

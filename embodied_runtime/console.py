@@ -5,13 +5,11 @@ import json
 from collections.abc import Callable
 import math
 import logging
-import os
 from pathlib import Path
 import re
 import shlex
-import sys
 import time
-from typing import TextIO
+from contextlib import nullcontext
 
 from embodied_runtime.conversation_history.continuity import (
     AuthoredResponse, CURRENT_REQUEST, delivery_attempt, link_work,
@@ -29,16 +27,13 @@ from embodied_runtime.jobs import (
 from embodied_runtime.jobs.focus import JobFocusProposal
 from embodied_runtime.jobs.procedure import ProcedureProposal, CONTENT_LIMITS
 from embodied_runtime.memory import NewMemoryLink, NewMemoryPayload, StoredMemory
-from embodied_runtime.console_style import ConsoleStyle, colour_enabled
+from embodied_runtime.console_style import ConsoleStyle
+from embodied_runtime.terminal import AsyncLineTerminal, ConsoleTerminalError
 from embodied_runtime.run_history import (
     DEFAULT_HISTORY_ROOT, MAX_GREP_QUERY_LENGTH, RunDataUnavailable,
     RunMetadataError, UnsupportedRunSchema, canonical_run_id, discover_run_ids,
     grep_run_log, read_run_record,
 )
-
-
-class ConsoleTerminalError(RuntimeError):
-    """Raised when cancellable terminal input is unavailable."""
 
 
 def _catalog_id(value: str, prefix: str) -> int | None:
@@ -1508,124 +1503,74 @@ class RuntimeConsole:
         return f"{days}d {clock}" if days else clock
 
 
-class AsyncLineTerminal:
-    """Unix-selector line input without a blocked executor thread."""
-
-    def __init__(
-        self, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout, *,
-        no_color: bool = False,
-    ) -> None:
-        self._stdin = stdin
-        self._stdout = stdout
-        self._buffer = bytearray()
-        self._eof = False
-        self.style = ConsoleStyle(colour_enabled(stdout, disabled=no_color))
-
-    def write(self, text: str) -> None:
-        self._stdout.write(text)
-        self._stdout.flush()
-
-    async def read_line(self, prompt: str) -> str | None:
-        self.write(prompt)
-        buffered = self._take_line()
-        if buffered is not ...:
-            return buffered
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str | None] = loop.create_future()
-        try:
-            descriptor = self._stdin.fileno()
-            loop.add_reader(descriptor, self._read_ready, future)
-        except (AttributeError, OSError, NotImplementedError) as error:
-            raise ConsoleTerminalError(
-                "local console input requires asyncio selector-based stdin support"
-            ) from error
-        try:
-            return await future
-        finally:
-            loop.remove_reader(descriptor)
-
-    def _read_ready(self, future: asyncio.Future[str | None]) -> None:
-        if future.done():
-            return
-        try:
-            data = os.read(self._stdin.fileno(), 4096)
-        except OSError as error:
-            future.set_exception(ConsoleTerminalError(f"console input failed: {error}"))
-            return
-        if data:
-            self._buffer.extend(data)
-        else:
-            self._eof = True
-        line = self._take_line()
-        if line is not ...:
-            future.set_result(line)
-
-    def _take_line(self) -> str | None | type(Ellipsis):
-        newline = self._buffer.find(b"\n")
-        if newline >= 0:
-            data = bytes(self._buffer[:newline])
-            del self._buffer[: newline + 1]
-            return data.rstrip(b"\r").decode(self._stdin.encoding or "utf-8", "replace")
-        if self._eof:
-            if not self._buffer:
-                return None
-            data = bytes(self._buffer)
-            self._buffer.clear()
-            return data.decode(self._stdin.encoding or "utf-8", "replace")
-        return ...
-
-
 async def run_console_session(
     console: RuntimeConsole, terminal: AsyncLineTerminal,
     messages: ConsoleOperatorMessageChannel | None = None,
 ) -> None:
-    """Run a terminal session until quit, exit, or EOF."""
+    """Run until quit, exit, or EOF, keeping pending input across output."""
+    activate = getattr(terminal, "activate", nullcontext)
+    with activate():
+        await _console_session(console, terminal, messages)
+
+
+async def _console_session(
+    console: RuntimeConsole, terminal: AsyncLineTerminal,
+    messages: ConsoleOperatorMessageChannel | None,
+) -> None:
     style = getattr(terminal, "style", ConsoleStyle(False))
     terminal.write(f"\n{console.heading}\nType 'help' for commands.\n\n")
-    while True:
-        if messages is None:
-            line = await terminal.read_line(style.prompt(console.prompt))
-        else:
-            input_task = asyncio.create_task(terminal.read_line(style.prompt(console.prompt)))
-            message_task = asyncio.create_task(messages.receive())
-            done, pending = await asyncio.wait(
-                (input_task, message_task), return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            if message_task in done:
-                message = message_task.result()
-                rendered = style.operator_message(
-                    console.operator_message_prefix, message.text
+    input_task = message_task = None
+    try:
+        while True:
+            if input_task is None:
+                input_task = asyncio.create_task(terminal.read_line(style.prompt(console.prompt)))
+            if messages is None:
+                line = await input_task
+            else:
+                if message_task is None:
+                    message_task = asyncio.create_task(messages.receive())
+                done, _ = await asyncio.wait(
+                    (input_task, message_task), return_when=asyncio.FIRST_COMPLETED
                 )
+                if message_task in done:
+                    message = message_task.result()
+                    message_task = None
+                    rendered = style.operator_message(console.operator_message_prefix, message.text)
+                    try:
+                        display = getattr(terminal, "display", None)
+                        if display is None:
+                            terminal.write(f"\n{rendered}\n\n")
+                        else:
+                            await display(f"\n{rendered}\n\n")
+                    except BaseException:
+                        if message.delivery_attempt is not None:
+                            message.delivery_attempt.finish('submission_unconfirmed', failure='output_error')
+                        raise
+                    else:
+                        if message.delivery_attempt is not None:
+                            message.delivery_attempt.finish('terminal_written')
+                # Check the task itself: it may have completed during display.
+                # Both a command and EOF must survive simultaneous delivery.
+                if not input_task.done():
+                    continue
+                line = input_task.result()
+            input_task = None
+            if line is None:
+                return
+            report, should_exit = await console.execute_async(line)
+            if report:
+                attempt = delivery_attempt(report, channel=InteractionChannel.CONSOLE)
                 try:
-                    terminal.write(f"\n{rendered}\n\n")
+                    terminal.write(f"\n{style.report(report)}\n\n")
                 except BaseException:
-                    if message.delivery_attempt is not None:
-                        message.delivery_attempt.finish('submission_unconfirmed', failure='output_error')
+                    attempt.finish('submission_unconfirmed', failure='output_error')
                     raise
                 else:
-                    if message.delivery_attempt is not None:
-                        message.delivery_attempt.finish('terminal_written')
-                if input_task in done and input_task.result() is not None:
-                    # Input and delivery became ready together; process input next.
-                    line = input_task.result()
-                else:
-                    continue
-            else:
-                line = input_task.result()
-        if line is None:
-            return
-        report, should_exit = await console.execute_async(line)
-        if report:
-            attempt = delivery_attempt(report, channel=InteractionChannel.CONSOLE)
-            try:
-                terminal.write(f"\n{style.report(report)}\n\n")
-            except BaseException:
-                attempt.finish('submission_unconfirmed', failure='output_error')
-                raise
-            else:
-                attempt.finish('terminal_written')
-        if should_exit:
-            return
+                    attempt.finish('terminal_written')
+            if should_exit:
+                return
+    finally:
+        tasks = [task for task in (input_task, message_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
