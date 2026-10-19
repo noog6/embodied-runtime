@@ -7,11 +7,13 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import io
 import logging
 import os
 import re
 import secrets
 import time
+import warnings
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -157,6 +159,13 @@ class MediaDownloader(Protocol):
     async def download(self, reference: TwilioMediaReference) -> ImageAttachment: ...
 
 
+class _BoundedJpegBuffer(io.BytesIO):
+    def write(self, data: bytes) -> int:
+        if self.tell() + len(data) > MAX_INTERACTION_IMAGE_BYTES:
+            raise MediaDownloadError("media_too_large")
+        return super().write(data)
+
+
 class TwilioMediaDownloader:
     """Authenticated, bounded acquisition of only Twilio Message Media resources."""
 
@@ -218,6 +227,45 @@ class TwilioMediaDownloader:
             chunks.extend(chunk)
         return bytes(chunks)
 
+    @staticmethod
+    def _primary_jpeg(data: bytes, declared: str) -> bytes:
+        """Flatten only an MPO JPEG's primary still before shared validation.
+
+        Phone JPEGs may contain auxiliary pictures rather than animation. Other
+        formats and ordinary JPEGs retain their exact bytes. Never decode MPO
+        secondary pictures or enlarge the existing per-image budgets.
+        """
+        if declared != "image/jpeg":
+            return data
+        from PIL import Image, ImageOps
+        from embodied_runtime.jobs.images import MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS
+        from embodied_runtime.jobs.workspace import WorkspaceQuotaError
+
+        if len(data) > MAX_INTERACTION_IMAGE_BYTES:
+            raise MediaDownloadError("media_too_large")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(data), formats=("JPEG",)) as source:
+                    if source.format != "MPO":
+                        return data
+                    width, height = source.size
+                    if (not 0 < width <= MAX_IMAGE_DIMENSION
+                            or not 0 < height <= MAX_IMAGE_DIMENSION
+                            or width * height > MAX_IMAGE_PIXELS):
+                        raise WorkspaceQuotaError("image dimensions exceed limit")
+                    source.seek(0)
+                    ImageOps.exif_transpose(source, in_place=True)
+                    with source.convert("RGB") as primary:
+                        with _BoundedJpegBuffer() as output:
+                            primary.save(output, format="JPEG", quality=90)
+                            result = output.getvalue()
+                    LOGGER.info("[SMS] media source_format=MPO target_format=JPEG status=normalized bytes=%s",
+                                len(result))
+                    return result
+        except (Image.DecompressionBombWarning, Image.DecompressionBombError) as error:
+            raise WorkspaceQuotaError("image dimensions exceed limit") from error
+
     async def download(self, reference: TwilioMediaReference) -> ImageAttachment:
         declared = _normalized_media_type(reference.declared_media_type)
         if declared not in SUPPORTED_INTERACTION_IMAGE_TYPES:
@@ -261,8 +309,11 @@ class TwilioMediaDownloader:
             raise MediaDownloadError("media_type_mismatch")
         from embodied_runtime.jobs.workspace import WorkspaceQuotaError
         try:
+            data = self._primary_jpeg(data, declared)
             image = ImageAttachment(declared, data)
             image.raster_metadata()
+        except MediaDownloadError:
+            raise
         except WorkspaceQuotaError as error:
             # Encoded bytes are already bounded above. A raster quota failure
             # here identifies the existing per-image dimension/pixel ceiling.

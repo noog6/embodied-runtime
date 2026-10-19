@@ -99,6 +99,19 @@ These application limits are separate from ngrok's 64 KiB declared webhook-body
 limit: the signed MMS webhook contains media references, and the Pi downloads
 the actual images from Twilio afterwards.
 
+Some phone JPEGs are identified by Pillow as [Multi Picture Object (MPO)](https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html#mpo)
+files containing a primary still plus additional pictures. At SMS intake only,
+the downloader converts an MPO's primary picture into one standard RGB JPEG,
+applies its EXIF orientation, and omits auxiliary pictures and metadata. It
+never decodes secondary pictures. Original primary dimensions/pixels are checked
+before decoding, and both the source download and JPEG output are bounded to
+4 MiB. Oversized pictures are rejected rather than resized. The normalized JPEG
+is validated, passed to cognition and retained under the existing policy, so its
+content version describes those normalized bytes. The log records only
+`source_format=MPO target_format=JPEG status=normalized` and the output byte count.
+Ordinary JPEG/PNG/WebP bytes are unchanged; other multi-frame formats remain
+rejected, and shared workspace/raster validation remains strict.
+
 For diagnosis, `inbound ... media=1 ... status=accepted` followed by
 `media ... status=partial` means the webhook reached the application and failed
 during media handling. Fixed reason codes distinguish `media_too_large` (encoded
