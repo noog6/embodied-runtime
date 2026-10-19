@@ -159,7 +159,7 @@ rules remain unchanged; see [benchmark scenarios](cognition-benchmarks.md).
 
 ## Read failures and usage
 
-Benchmark format version 3 retains the existing trial, request, and tool-trace
+Benchmark format version 4 retains the existing trial, request, and tool-trace
 fields and adds `protocol`, secret-free endpoint origin, `returned_models`,
 `provider_calls`, `failure_category`, and `metrics.usage_available`. Each provider
 call records requested/returned model, stage, status, duration, normalized raw
@@ -176,12 +176,16 @@ fragments are rejected before client construction.
 
 Missing required token usage is `null`, with `usage_available=false`; partial
 per-call counts remain visible. A missing optional cached count is also `null`
-in per-call usage and benchmark metrics. Estimated cost is separate and remains
-`unavailable` unless the versioned catalog has applicable pricing and complete,
-consistent usage. The built-in catalog has no compatible-endpoint prices: even
-an OpenRouter model named like an OpenAI model receives no direct OpenAI rate.
-No dynamic price lookup is performed. Provider response model identity is
-diagnostic and does not trigger model routing or fallback.
+in per-call usage and benchmark metrics. Monetary availability is independent:
+verified OpenRouter responses supply `usage.cost`, preferred over a catalog estimate
+and usable for new models without catalog entries. Other compatible endpoints do
+not inherit these semantics or direct OpenAI rates from their model names.
+`cost_usd` and `cost_basis` distinguish reported, estimated, mixed, and unavailable
+benchmark totals; the legacy `estimated_cost_usd` remains catalog-only. No dynamic
+price lookup is performed. Provider response model identity remains diagnostic.
+See [response cost accounting](openrouter-cost-accounting.md) for USD sources,
+validation bounds, summary schema 6, benchmark format 4, BYOK limitations, and the
+manual validation procedure. This accounting has been verified offline only.
 
 Categories distinguish `authentication`, `payment_required`, `model_unavailable`,
 `rate_limit`, `connection`, `timeout`,

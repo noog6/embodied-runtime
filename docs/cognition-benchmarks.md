@@ -22,10 +22,15 @@ The runtime and CLI share backend construction for `openai-responses` and
 See [provider configuration and comparable commands](cognition-compatible.md).
 Startup/prewarm occurs before the observability baseline,
 so reported provider/token metrics are the scenario delta and exclude prewarm.
-Estimated cost follows that same boundary and excludes startup/prewarm cost. It is
-derived from Mira's versioned built-in public API pricing catalog using Standard
-processing rates; unsupported or unknown pricing is reported as unavailable. This
-is an estimate for comparison and audit, not the billing authority.
+Monetary cost follows that same boundary and excludes startup/prewarm. Valid
+OpenRouter `usage.cost` takes precedence over estimates and needs no catalog entry.
+Direct-provider estimates use the versioned built-in public API pricing catalog
+and retain Standard processing/context limits. Format 4 `cost_usd` and `cost_basis`
+distinguish reported, estimated, mixed, and unavailable totals; known subtotals
+remain separate. `estimated_cost_usd` is retained for complete catalog-only
+estimates. A missing prewarm charge does not invalidate known scenario costs.
+See [response cost accounting](openrouter-cost-accounting.md) for semantics,
+validation, schema details, BYOK limits, and offline/live validation boundaries.
 The recording decorator delegates cognition unchanged and wraps the real runtime
 `tool_executor`; it records the request, bounded arguments and results, but does
 not implement tool semantics.
@@ -210,18 +215,21 @@ python -m embodied_runtime.benchmarks \
 ```
 
 The terminal table highlights failed trials and their ordered tool traces, and shows
-per-trial and model estimated costs. JSON format version `3` contains top-level
+per-trial and model costs with their accounting basis. JSON format version `4`
+contains top-level
 `created_at`, `scenario_id`, `pricing_identity`, and `trials`.
 Each trial contains identity, pass/failure/error data, timing, final Job and
-continuation state, estimated cost and pricing identity, metrics, cognition request
+continuation state, monetary cost/basis/subtotals, legacy estimate and pricing
+identity, metrics, cognition request
 records, and ordered tool trace.
 Version 3 adds protocol, endpoint origin, returned model identities, bounded
 per-call metadata (status, duration, usage and failure category), and usage
 availability. Token totals are nullable when unavailable, replacing version 2's
 misleading zero for unreported usage. These changes do not change scenario semantics.
 Existing fields retain their names; consumers must accept `null` token counts and
-ignore additive fields. Unknown pricing remains unavailable, and compatible calls
-never inherit direct OpenAI prices merely from a model name.
+ignore additive fields. Unknown pricing without valid reported cost remains
+unavailable; compatible calls never inherit direct OpenAI prices merely from a
+model name.
 `provider_requests` counts all outbound attempts after prewarm, including failed
 or cancelled calls. Reported usage counts even when the response is rejected;
 an attempt with unknown usage makes token totals unavailable. Response acceptance

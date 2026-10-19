@@ -15,6 +15,7 @@ from embodied_runtime.attachments import ImageAttachment
 from embodied_runtime.images import ImageLimits, JOINT_IMAGE_INSTRUCTIONS
 from embodied_runtime.config import OpenAICompatibleConfig, validate_compatible_config
 from embodied_runtime.observability import RunObservability
+from embodied_runtime.monetary import openrouter_cost
 from .base import (
     CognitionError, CognitionToolCall, CognitionToolDefinition,
     CognitionToolExecutor, CognitionUnavailableError, InstructionsProvider,
@@ -155,6 +156,7 @@ class OpenAICompatibleBackend(TextCognitionBackend):
                     status=status, error=category, failure_category=category,
                     usage=counts if response is not None else None,
                     protocol=self.protocol, endpoint=self.endpoint, returned_model=returned,
+                    reported_cost_usd=openrouter_cost(response, base_url=self.config.base_url),
                 )
 
     @staticmethod

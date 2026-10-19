@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,10 +18,12 @@ from embodied_runtime.jobs import (
     FilesystemJobWorkspaceStore, JobContinuation, JobProgressUpdate, JobRunStatus,
     SQLiteJobStore,
 )
+from embodied_runtime.monetary import add_usd, usd_string
 from embodied_runtime.platform import PlatformSnapshot
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.pricing import BUILT_IN_PRICING
 from embodied_runtime.profile import RobotProfile
+
 from .models import BenchmarkReport, BenchmarkTrialResult, TrialMetrics
 from .recording import RecordingCognitionBackend
 from .scenario import ACQUISITION_TOOL_NAMES, SCENARIO_ID, get_scenario
@@ -93,19 +95,26 @@ def _latest_response(recorder: RecordingCognitionBackend) -> str:
     return ""
 
 
-def _cost_delta(before: object, after: object) -> str | None:
-    """Subtract already-priced snapshots, retaining observability's precision."""
-    old = before.get("cost", {})  # type: ignore[union-attr]
-    new = after.get("cost", {})  # type: ignore[union-attr]
-    if old.get("status") != "estimated" or new.get("status") != "estimated":
-        return None
-    try:
-        delta = Decimal(new["estimated_usd"]) - Decimal(old["estimated_usd"])
-    except (InvalidOperation, KeyError, TypeError):
-        return None
-    if delta < 0:
-        return None
-    return str(delta.quantize(Decimal("0.000001")))
+def _scenario_cost(before: object, after: object) -> dict[str, object]:
+    """Cognition-only deltas after prewarm, independent of earlier completeness.
+
+    Lifetime subtotals/counters preserve the scenario boundary even when prewarm
+    had no cost evidence, or diagnostic records have since been evicted.
+    """
+    old = before.get("cost", {}).get("components", {}).get("cognition", {})
+    new = after.get("cost", {}).get("components", {}).get("cognition", {})
+    if not old or not new:
+        return {"cost_usd": None, "cost_basis": "unavailable"}
+    reported = add_usd(Decimal(new["reported_usd"]), Decimal(old["reported_usd"]).copy_negate())
+    estimated = add_usd(Decimal(new["catalog_estimated_usd"]), Decimal(old["catalog_estimated_usd"]).copy_negate())
+    reported_calls, estimated_calls, unknown = (new[name] - old[name] for name in
+                     ("reported_calls", "estimated_calls", "unknown_calls"))
+    basis = ("unavailable" if unknown or reported_calls + estimated_calls == 0
+             else "mixed" if reported_calls and estimated_calls
+             else "reported" if reported_calls else "estimated")
+    return {"cost_usd": usd_string(add_usd(reported, estimated)) if basis != "unavailable" else None,
+            "cost_basis": basis, "reported_cost_usd": usd_string(reported),
+            "catalog_estimated_cost_usd": usd_string(estimated), "unknown_cost_calls": unknown}
 
 
 async def run_trial(
@@ -292,7 +301,8 @@ async def run_trial(
         acquisition_tool_calls=acquisitions, effect_tool_calls=effects,
         usage_available=usage_available,
     )
-    estimated_cost_usd = _cost_delta(before, after)
+    scenario_cost = _scenario_cost(before, after)
+    estimated_cost_usd = scenario_cost["cost_usd"] if scenario_cost["cost_basis"] == "estimated" else None
     return BenchmarkTrialResult(
         scenario_id, backend.identifier, model, repetition, not reasons,
         tuple(reasons), error_text, round(perf_counter() - started, 6),
@@ -302,7 +312,7 @@ async def run_trial(
         protocol=getattr(backend, "protocol", None), endpoint=getattr(backend, "endpoint", None),
         returned_models=tuple(dict.fromkeys(call["returned_model"] for call in calls
                                           if call.get("returned_model"))),
-        provider_calls=tuple(calls), failure_category=failure_category,
+        provider_calls=tuple(calls), failure_category=failure_category, **scenario_cost,
     )
 
 
@@ -328,12 +338,24 @@ async def run_benchmark(
     )
 
 
-def _estimated_total(trials: list[BenchmarkTrialResult]) -> str | None:
-    if not trials or any(trial.estimated_cost_usd is None for trial in trials):
-        return None
-    amounts = [Decimal(trial.estimated_cost_usd) for trial in trials
-               if trial.estimated_cost_usd is not None]
-    return str(sum(amounts, Decimal(0)).quantize(Decimal("0.000001")))
+def _cost_total(trials: list[BenchmarkTrialResult]) -> tuple[str | None, str]:
+    amounts = [trial.cost_usd if trial.cost_basis is not None else trial.estimated_cost_usd
+               for trial in trials]
+    if not trials or any(amount is None for amount in amounts):
+        return None, "unavailable"
+    bases = {trial.cost_basis or "estimated" for trial in trials}
+    basis = next(iter(bases)) if len(bases) == 1 else "mixed"
+    total = Decimal(0)
+    for amount in amounts:
+        total = add_usd(total, Decimal(amount))
+    return usd_string(total), basis
+
+
+def _total_label(kind: str, trials: list[BenchmarkTrialResult]) -> str:
+    total, basis = _cost_total(trials)
+    # Keep legacy wording for estimate-only reports.
+    label = f"estimated {kind} cost" if basis == "estimated" else f"{kind} cost ({basis})"
+    return label + ": " + (f"${total}" if total is not None else "unavailable")
 
 
 def render_report(report: BenchmarkReport) -> str:
@@ -343,26 +365,24 @@ def render_report(report: BenchmarkReport) -> str:
         passed = sum(trial.passed for trial in trials)
         lines.extend((f"model: {model}", f"PASS {passed}/{len(trials)}",
                       "trial result episodes provider_req acquisitions effects "
-                      "output_tokens est_cost_usd duration"))
+                      "output_tokens cost_usd basis duration"))
         for trial in trials:
             metric = trial.metrics
             lines.append(f"  backend: {trial.backend}; protocol: {trial.protocol or 'unknown'}; "
                          f"endpoint: {trial.endpoint or 'unknown'}; returned models: "
                          f"{', '.join(trial.returned_models) or 'unavailable'}")
+            amount = trial.cost_usd if trial.cost_basis is not None else trial.estimated_cost_usd
             output_tokens = str(metric.output_tokens) if metric.output_tokens is not None else "unavailable"
             lines.append(
                 f"{trial.repetition:<5} {'PASS' if trial.passed else 'FAIL':<6} "
                 f"{metric.job_work_episodes:<8} {metric.provider_requests:<12} "
                 f"{metric.acquisition_tool_calls:<12} {metric.effect_tool_calls:<7} "
                 f"{output_tokens:<13} "
-                f"{('$' + trial.estimated_cost_usd) if trial.estimated_cost_usd is not None else 'unavailable':<12} "
+                f"{('$' + amount) if amount is not None else 'unavailable':<12} "
+                f"{trial.cost_basis or 'estimated':<11} "
                 f"{trial.wall_duration_seconds:.1f}s"
             )
-        model_total = _estimated_total(trials)
-        lines.append(
-            "estimated model cost: "
-            + (f"${model_total}" if model_total is not None else "unavailable")
-        )
+        lines.append(_total_label("model", trials))
         failures = [trial for trial in trials if not trial.passed]
         if failures:
             lines.append("Failure reasons")
@@ -374,9 +394,5 @@ def render_report(report: BenchmarkReport) -> str:
                     for item in trial.tool_trace
                 ))
         lines.append("")
-    report_total = _estimated_total(list(report.trials))
-    lines.append(
-        "estimated report cost: "
-        + (f"${report_total}" if report_total is not None else "unavailable")
-    )
+    lines.append(_total_label("report", list(report.trials)))
     return "\n".join(lines).rstrip() + "\n"
