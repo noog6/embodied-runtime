@@ -49,6 +49,11 @@ responses only: SMS is not an autonomous notification or general delivery route.
 
 ## First-light setup
 
+For a managed Pi deployment, use the wizard's [hardened ngrok ingress](ngrok-ingress.md):
+cloud Twilio signature verification, an exact route/method allowlist, and separate
+webhook/media limits. The ad-hoc first-light tunnel below does not install that
+policy and should not be used as the unattended deployment workflow.
+
 1. Install optional dependencies: `python -m pip install -e '.[twilio]'`.
 2. Create, protect, and source `~/.config/embodied-runtime/twilio.env` exactly as
    described in [secrets](secrets.md).
@@ -63,7 +68,8 @@ responses only: SMS is not an autonomous notification or general delivery route.
 Signature validation always uses the exact configured `TWILIO_WEBHOOK_URL`, never
 the local aiohttp URL or forwarded headers. When an ngrok URL changes, update the
 Twilio Console, `TWILIO_WEBHOOK_URL` in the protected file, and the sourced shell
-environment. ngrok is development/acceptance exposure, not production architecture.
+environment. Managed deployment and edge acceptance are described in
+[startup](startup.md) and [ngrok ingress hardening](ngrok-ingress.md).
 
 ## Bounded behavior
 

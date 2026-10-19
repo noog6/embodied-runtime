@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import io
+import json
 import os
 import shutil
 import sys
@@ -14,6 +15,7 @@ from unittest.mock import patch
 from embodied_runtime.startup import (
     Deployment, InstallResult, StartupError, SystemPaths, TWILIO_ENVIRONMENT,
     build_deployment, check_deployment, discover_repository, environment_presence, install,
+    discover_ngrok,
     local_sms_upstream, render_ngrok_config, render_ngrok_unit, render_unit,
     render_ngrok_state, required_environment, select_config, serialize_environment,
     serialize_ngrok_environment, uninstall, validate_managed_environment_file,
@@ -118,6 +120,8 @@ webhook_path = "{webhook_path}"
         return self.deployment(
             config=config, with_ngrok=True, ngrok=binary,
             ngrok_domain=kwargs.pop("ngrok_domain", "mira-example.ngrok-free.app"),
+            ngrok_twilio_vault=kwargs.pop("ngrok_twilio_vault", "robot-webhooks"),
+            ngrok_twilio_secret=kwargs.pop("ngrok_twilio_secret", "twilio-auth-token"),
             runner=runner, **kwargs,
         )
 
@@ -184,9 +188,102 @@ webhook_path = "{webhook_path}"
         self.assertNotIn("opaque", commands[0])
         self.assertFalse(any("start" in command for command in commands))
         self.assertFalse(temporary_path.exists())
-        self.assertIn("skipped", validate_ngrok_config(
+        self.assertIsNone(validate_ngrok_config(
             deployment, environ={}, runner=runner,
         ))
+        self.assertEqual(len(commands), 2)  # local parsing is never skipped
+
+    def test_generated_yaml_embeds_the_required_policy_and_safe_agent_logging(self) -> None:
+        from embodied_runtime.ngrok_policy import build_traffic_policy
+        deployment = self.ngrok_deployment(config=self.config(sms=True, webhook_path="/hooks/sms"))
+        config = render_ngrok_config(deployment)
+        embedded = config.split("    traffic_policy:\n", 1)[1].split("\nagent:\n", 1)[0]
+        self.assertEqual(json.loads(embedded), build_traffic_policy(
+            "/hooks/sms", "robot-webhooks", "twilio-auth-token",
+        ))
+        self.assertIn("  console_ui: false\n  web_addr: false\n  log_level: warn\n", config)
+
+    def test_agent_version_gate_rejects_unsupported_versions_without_echo(self) -> None:
+        binary = self.ngrok_deployment().ngrok
+        for version in ("2.3.41", "3.14.0", "3.16.1", "4.0.0", "unknown"):
+            with self.subTest(version=version), self.assertRaises(StartupError) as caught:
+                discover_ngrok(binary, runner=lambda *a, **k: SimpleNamespace(
+                    returncode=0, stdout=f"ngrok version {version}\nprivate-token", stderr="",
+                ))
+            self.assertNotIn("private-token", str(caught.exception))
+        for version in ("3.17.0", "3.39.11"):
+            _, reported = discover_ngrok(binary, runner=lambda *a, **k: SimpleNamespace(
+                returncode=0, stdout=f"ngrok version {version}\nprivate-token", stderr="",
+            ))
+            self.assertEqual(reported, f"ngrok version {version}")
+
+    def test_cloud_reference_names_are_required_for_managed_ingress(self) -> None:
+        for setting in ("ngrok_twilio_vault", "ngrok_twilio_secret"):
+            with self.subTest(setting=setting), self.assertRaisesRegex(StartupError, "create the vault/secret"):
+                self.ngrok_deployment(**{setting: None})
+
+    @patch("embodied_runtime.startup.shutil.which", return_value=None)
+    def test_invalid_config_aborts_install_before_any_mutation_and_redacts_diagnostics(self, _which) -> None:
+        deployment = self.ngrok_deployment(capture_env=True)
+        environment = {name: "private-runtime-token" for name in TWILIO_ENVIRONMENT}
+        environment["NGROK_AUTHTOKEN"] = "private-ngrok-token"
+        calls = []
+
+        def reject(command, *, check=True):
+            calls.append(list(command))
+            return SimpleNamespace(returncode=1, stdout=environment["TWILIO_AUTH_TOKEN"],
+                                   stderr=environment["NGROK_AUTHTOKEN"])
+
+        with self.assertRaisesRegex(StartupError, "config check rejected") as caught:
+            install(deployment, environ=environment, runner=reject)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1:3], ["config", "check"])
+        self.assertNotIn("private-", str(caught.exception) + repr(calls))
+        self.assertFalse(self.system.exists())
+
+    @patch("embodied_runtime.startup.shutil.which", return_value=None)
+    def test_policy_update_requires_force_validates_and_requests_explicit_restart(self, _which) -> None:
+        environment = {name: "private-token" for name in TWILIO_ENVIRONMENT}
+        environment["NGROK_AUTHTOKEN"] = "private-ngrok-token"
+        original = self.ngrok_deployment(capture_env=True)
+        install(original, environ=environment, runner=FakeRunner())
+        changed = self.ngrok_deployment(ngrok_twilio_secret="rotated-secret")
+        before = original.ngrok_config_path.read_bytes()
+        with self.assertRaisesRegex(StartupError, "--force"):
+            install(changed, environ={}, runner=FakeRunner(active=True))
+        self.assertEqual(original.ngrok_config_path.read_bytes(), before)
+        runner = FakeRunner(active=True)
+        result = install(changed, environ={}, runner=runner, force=True)
+        self.assertFalse(result.restart_required)
+        self.assertTrue(result.ngrok_restart_required)
+        self.assertIn("rotated-secret", changed.ngrok_config_path.read_text())
+        validation_index = next(i for i, c in enumerate(runner.commands) if "check" in c)
+        mutation_index = next(i for i, c in enumerate(runner.commands) if "install" in c)
+        self.assertLess(validation_index, mutation_index)
+        self.assertFalse(any("restart" in c for c in runner.commands))
+
+    def test_ngrok_cli_render_wires_names_without_exposing_loaded_secrets(self) -> None:
+        deployment = self.ngrok_deployment()
+        output = io.StringIO()
+        environment = {"TWILIO_AUTH_TOKEN": "private-twilio", "NGROK_AUTHTOKEN": "private-ngrok"}
+        with patch("embodied_runtime.startup.build_deployment", return_value=deployment) as build:
+            with redirect_stdout(output):
+                result = wizard_main([
+                    "render", "--component", "ngrok", "--with-ngrok",
+                    "--ngrok-domain", "example.ngrok.app", "--ngrok-twilio-vault", "robot-webhooks",
+                    "--ngrok-twilio-secret", "twilio-auth-token",
+                ], script_path=self.root / "wizard.py", environ=environment)
+        self.assertEqual(result, 0)
+        self.assertEqual(build.call_args.kwargs["ngrok_twilio_vault"], "robot-webhooks")
+        self.assertEqual(build.call_args.kwargs["ngrok_twilio_secret"], "twilio-auth-token")
+        self.assertIn("verify-webhook", output.getvalue())
+        self.assertNotIn("private-", output.getvalue())
+        output = io.StringIO()
+        from embodied_runtime.startup import _print_summary
+        with redirect_stdout(output):
+            _print_summary(deployment, environment)
+        self.assertIn("Edge policy", output.getvalue())
+        self.assertNotIn("private-", output.getvalue())
 
     @patch("embodied_runtime.startup.shutil.which", return_value=None)
     def test_public_webhook_state_detects_domain_and_path_not_upstream(self, _which) -> None:
@@ -227,7 +324,7 @@ webhook_path = "{webhook_path}"
             euid=1000, force=True,
         )
         self.assertTrue(result.restart_required)
-        self.assertFalse(result.ngrok_restart_required)
+        self.assertTrue(result.ngrok_restart_required)  # path is now part of edge policy
         self.assertEqual(changed_path.ngrok_environment_path.read_bytes(),
                          existing_ngrok_environment)
         self.assertEqual(
@@ -317,7 +414,8 @@ webhook_path = "{webhook_path}"
         warning = check_deployment(
             captured, environ=runtime_environment, runner=FakeRunner(),
         )
-        self.assertIn("NGROK_AUTHTOKEN is not loaded", warning)
+        self.assertIn("systemd-analyze is unavailable", warning)
+        self.assertNotIn("skipped", warning)
         self.assertEqual(captured.ngrok_environment_path.read_text(),
                          'NGROK_AUTHTOKEN="managed-token"\n')
 
@@ -691,7 +789,7 @@ api_key_env="DIRECT_VISION_KEY"
             "embodied_runtime.startup.shutil.which", return_value=str(ingress.ngrok),
         ), patch(
             "builtins.input",
-            side_effect=["y", "", "mira-example.ngrok-free.app", "n"],
+            side_effect=["y", "", "mira-example.ngrok-free.app", "robot-webhooks", "twilio-auth-token", "n"],
         ), redirect_stdout(output):
             self.assertEqual(wizard_main([], script_path=self.root / "wizard.py"), 0)
         rendered = output.getvalue()
@@ -714,7 +812,7 @@ api_key_env="DIRECT_VISION_KEY"
             "embodied_runtime.startup.start_inactive_services",
         ) as start, patch(
             "builtins.input",
-            side_effect=["y", "", "mira-example.ngrok-free.app", "y", "y", "y"],
+            side_effect=["y", "", "mira-example.ngrok-free.app", "robot-webhooks", "twilio-auth-token", "y", "y", "y"],
         ), redirect_stdout(output):
             self.assertEqual(wizard_main([], script_path=self.root / "wizard.py"), 0)
         start.assert_called_once()
@@ -747,10 +845,10 @@ api_key_env="DIRECT_VISION_KEY"
             "embodied_runtime.startup.start_inactive_services",
         ) as start, patch(
             "builtins.input",
-            side_effect=["y", "", "mira-example.ngrok-free.app", "y", "y"],
+            side_effect=["y", "", "mira-example.ngrok-free.app", "robot-webhooks", "twilio-auth-token", "y", "y"],
         ) as prompt, redirect_stdout(output):
             self.assertEqual(wizard_main([], script_path=self.root / "wizard.py"), 0)
-        self.assertEqual(prompt.call_count, 5)
+        self.assertEqual(prompt.call_count, 7)
         self.assertIn("sudo systemctl restart mira.service", output.getvalue())
         self.assertIn("sudo systemctl restart mira-ngrok.service", output.getvalue())
         self.assertNotIn("Start Mira services now?", output.getvalue())
