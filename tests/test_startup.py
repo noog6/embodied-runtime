@@ -550,6 +550,36 @@ api_key_env="DIRECT_VISION_KEY"
         path.write_text(path.read_text().replace('vision = "configured"', 'vision = "none"'))
         self.assertEqual(required_environment(self.deployment(config=path)), ("OPENAI_API_KEY",))
 
+    def test_compatible_cognition_credentials_independent_of_vision(self) -> None:
+        path = self.config(cognition="openai-compatible", tts="elevenlabs")
+        path.write_text(path.read_text() + '''
+[cognition.openai_compatible]
+model="explicit/tool-model"
+base_url="https://openrouter.ai/api/v1"
+api_key_env="COGNITION_ROUTER_KEY"
+tool_calling=true
+''')
+        deployment = self.deployment(config=path, capture_env=True)
+        self.assertEqual(required_environment(deployment),
+                         ("COGNITION_ROUTER_KEY", "ELEVENLABS_API_KEY"))
+        values = {"COGNITION_ROUTER_KEY": "fake-router", "ELEVENLABS_API_KEY": "fake-voice",
+                  "OPENAI_API_KEY": "unrelated"}
+        self.assertEqual(environment_presence(deployment, values),
+                         {"COGNITION_ROUTER_KEY": True, "ELEVENLABS_API_KEY": True})
+        captured = serialize_environment(deployment, values).decode()
+        self.assertIn('COGNITION_ROUTER_KEY="fake-router"', captured)
+        self.assertNotIn("OPENAI_API_KEY", captured)
+        path.write_text(path.read_text().replace('vision = "none"', 'vision = "configured"') + '''
+[vision]
+[[vision.backends]]
+backend="openai-compatible"
+model="explicit/tool-model"
+base_url="https://openrouter.ai/api/v1"
+api_key_env="COGNITION_ROUTER_KEY"
+''')
+        self.assertEqual(required_environment(self.deployment(config=path)),
+                         ("COGNITION_ROUTER_KEY", "ELEVENLABS_API_KEY"))
+
     def test_sms_requires_complete_twilio_catalog(self) -> None:
         deployment = self.deployment(with_sms=True)
         self.assertEqual(required_environment(deployment), TWILIO_ENVIRONMENT)

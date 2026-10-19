@@ -27,6 +27,9 @@ python main.py --config config/mira-agentic.toml
 The strict, dependency-free TOML schema, historical defaults, and explicit CLI
 override rules are documented in [Runtime startup configuration](docs/configuration.md).
 Granular flags remain available for focused experiments and diagnostics.
+See [Mira deployment profiles](docs/mira-profiles.md) for explicit model
+alternatives, verification evidence, shared persistence, and the configurations
+under `config/experiments/`.
 
 Optional provider setup is documented in [OpenAI text cognition
 setup](docs/cognition-openai.md), including the linked [Secrets and API

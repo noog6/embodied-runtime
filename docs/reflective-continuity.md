@@ -7,7 +7,7 @@ There is no separate reflection engine, background loop, delegation, project
 manager, profile editing, or automatic semantic-memory admission.
 
 The complete, reviewable description is in
-[`config/reflective-continuity-job.toml`](../config/reflective-continuity-job.toml).
+[`config/experiments/reflective-continuity-job.toml`](../config/experiments/reflective-continuity-job.toml).
 That file is **a Job template**, not an application configuration or startup seed.
 Replace its `{sources}` field with two or three source plans selected by Nick.
 The template fits the existing 2,000-character description limit with ordinary
@@ -143,7 +143,7 @@ Do **not** use `job procedure experiment`: that dedicated Job remains restricted
 to `inspect_self`. This ordinary reflection Job leaves procedure policy disabled.
 
 Action and message permissions are currently **process-wide**, not per Job.
-The supplied [`config/reflection-experiment.toml`](../config/reflection-experiment.toml)
+The supplied [`config/experiments/reflection-experiment.toml`](../config/experiments/reflection-experiment.toml)
 sets actions/messages/continuation/goal closure off, uses virtual hardware with no
 camera/vision, and leaves voice, SMS, memory and conversation-history stores off.
 This provides runtime-enforced action/communication restrictions rather than
@@ -166,7 +166,7 @@ uses temporary stores and never starts this configuration on a deployed catalog.
 From the repository root, after shutting down the normal application with `exit`:
 
 ```sh
-python3.13 main.py --config config/reflection-experiment.toml
+python3.13 main.py --config config/experiments/reflection-experiment.toml
 ```
 
 Normal provider credentials are needed for this manual live trial. In its
@@ -195,7 +195,7 @@ third plan argument):
 python3.13 - JOB7:latest JOB9:notes/baseline.md <<'PY'
 from pathlib import Path
 import re, shlex, sys, tomllib
-job = tomllib.loads(Path('config/reflective-continuity-job.toml').read_text())
+job = tomllib.loads(Path('config/experiments/reflective-continuity-job.toml').read_text())
 plans = sys.argv[1:]
 assert 2 <= len(plans) <= 3, 'Select two or three Jobs'
 ids = [entry.split(':', 1)[0] for entry in plans]

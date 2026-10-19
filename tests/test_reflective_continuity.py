@@ -22,7 +22,7 @@ from embodied_runtime.profile import RobotProfile
 from tests.test_job_execution import Platform
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFINITION = tomllib.loads((ROOT / 'config/reflective-continuity-job.toml').read_text())
+DEFINITION = tomllib.loads((ROOT / 'config/experiments/reflective-continuity-job.toml').read_text())
 EXAMPLES = json.loads((ROOT / 'tests/fixtures/reflective_continuity.json').read_text())
 
 
@@ -358,7 +358,7 @@ class ReflectiveContinuityTests(unittest.IsolatedAsyncioTestCase):
 
 class ReflectionSetupTests(unittest.TestCase):
     def test_definition_and_configuration_fit_existing_contracts(self):
-        _, args, effective = parse_launch_arguments(['--config', str(ROOT / 'config/reflection-experiment.toml')])
+        _, args, effective = parse_launch_arguments(['--config', str(ROOT / 'config/experiments/reflection-experiment.toml')])
         self.assertTrue(args.shared_reads_enabled)
         self.assertFalse(effective.initiative_actions)
         self.assertFalse(effective.initiative_messages)
