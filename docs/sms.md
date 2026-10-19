@@ -92,6 +92,26 @@ the existing restricted CDN redirect handling is unchanged. Declared and streame
 sizes are independently bounded to 4 MiB per image, with aggregate byte/pixel
 limits and raster validation. Unsupported MIME types return HTTP 415.
 
+Each image also has existing decoded-raster ceilings: at most 4096 pixels on
+either side and 4,194,304 pixels in total. For example, a 4032×3024 phone photo
+exceeds the pixel limit even when its compressed JPEG is smaller than 4 MiB.
+These application limits are separate from ngrok's 64 KiB declared webhook-body
+limit: the signed MMS webhook contains media references, and the Pi downloads
+the actual images from Twilio afterwards.
+
+For diagnosis, `inbound ... media=1 ... status=accepted` followed by
+`media ... status=partial` means the webhook reached the application and failed
+during media handling. Fixed reason codes distinguish `media_too_large` (encoded
+bytes), `image_dimensions_exceed_limit` (per-image dimensions/pixels),
+`invalid_raster_image`, `media_type_mismatch`, `media_auth_failed`,
+`invalid_media_redirect`, `media_download_timeout` and other download failures.
+The zero-based `attachment` index and fixed `stage` identify the failing step;
+unexpected errors keep the generic `invalid_or_oversized_media` reason. Logs do
+not include raw exception messages, media URLs, headers or credentials. As a
+diagnostic, send one JPEG resized to 1024×1024 or smaller and under 4 MiB, then
+compare its result with the original photo; do not increase ingress limits based
+only on the generic failure message.
+
 Accepted image bytes are automatically retained under the configurable
 [conversation-media policy](conversation-images.md), separately from Job workspaces.
 Dialogue stores lightweight references, and selected pixels can be reanalyzed after
