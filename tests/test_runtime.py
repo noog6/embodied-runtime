@@ -436,6 +436,97 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
             loop.remove_signal_handler(signal.SIGINT)
             signal.signal(signal.SIGINT, old)
 
+    async def test_console_cleanup_preserves_caller_cancellation_and_errors(self):
+        loop = asyncio.get_running_loop()
+        for ending in ('cancel', 'error'):
+            for signal_first in (False, True):
+                with self.subTest(ending=ending, signal_first=signal_first):
+                    entered = asyncio.Event()
+                    release = asyncio.Event()
+                    cancelled = asyncio.Event()
+                    callbacks = {}
+                    async def stop():
+                        entered.set()
+                        try:
+                            await release.wait()
+                        except asyncio.CancelledError:
+                            cancelled.set()
+                            raise
+                        raise RuntimeError('cleanup failed')
+                    application = SimpleNamespace(start=AsyncMock(), stop=stop)
+                    terminal = SimpleNamespace(write=lambda text: None,
+                                               read_line=AsyncMock(return_value=None))
+                    console = SimpleNamespace(heading='Test', prompt='> ')
+                    async def composed(*args):
+                        return await _run_console_application(
+                            application, terminal, None, cleanup_started=args[7])
+                    with patch('embodied_runtime.cli._run_application', side_effect=composed), patch(
+                        'embodied_runtime.cli.RuntimeConsole', return_value=console,
+                    ), patch.object(loop, 'add_signal_handler', side_effect=lambda sig, cb: callbacks.update({sig: cb})), patch.object(
+                        loop, 'remove_signal_handler', return_value=True,
+                    ):
+                        task = asyncio.create_task(_run_process_application(
+                            SimpleNamespace(mode='console'), RobotProfile('test', 'Test'),
+                            None, None, None))
+                        await asyncio.wait_for(entered.wait(), 1)
+                        if signal_first:
+                            callbacks[signal.SIGTERM]()
+                            # Let the process observe the signal while stop is blocked.
+                            await asyncio.sleep(0)
+                            await asyncio.sleep(0)
+                        if ending == 'cancel':
+                            task.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await task
+                            self.assertTrue(cancelled.is_set())
+                        else:
+                            release.set()
+                            with self.assertRaisesRegex(RuntimeError, 'cleanup failed'):
+                                await task
+                            self.assertFalse(cancelled.is_set())
+
+    async def test_signal_still_wakes_blocked_console_startup(self):
+        loop = asyncio.get_running_loop()
+        callbacks = {}
+        application = self.ControlledApplication(block_startup=True)
+        async def composed(*args):
+            return await _run_console_application(
+                application, mock.Mock(), None, cleanup_started=args[7])
+        with patch('embodied_runtime.cli._run_application', side_effect=composed), patch.object(
+            loop, 'add_signal_handler', side_effect=lambda sig, cb: callbacks.update({sig: cb}),
+        ), patch.object(loop, 'remove_signal_handler', return_value=True):
+            task = asyncio.create_task(_run_process_application(
+                SimpleNamespace(mode='console'), RobotProfile('test', 'Test'), None, None, None))
+            await application.start_entered.wait()
+            callbacks[signal.SIGTERM]()
+            self.assertEqual(await asyncio.wait_for(task, 1), 0)
+        self.assertTrue(application.start_cancelled)
+        self.assertEqual(application.stop_calls, 1)
+
+    async def test_headless_signal_during_existing_stop_does_not_cancel_cleanup(self):
+        application = self.ControlledApplication(block_startup=False)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        finished = asyncio.Event()
+        async def stop():
+            application._set_lifecycle(LifecycleState.STOPPING)
+            entered.set()
+            await release.wait()
+            application._set_lifecycle(LifecycleState.STOPPED)
+            finished.set()
+        application.stop = stop
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(_run_headless_application(application, shutdown))
+        await application.start_entered.wait()
+        application.request_stop()
+        await entered.wait()
+        shutdown.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release.set()
+        self.assertEqual(await asyncio.wait_for(task, 1), 0)
+        self.assertTrue(finished.is_set())
+
     async def test_headless_sms_composition_has_no_console_infrastructure(self):
         _, args, _ = parse_launch_arguments(["--mode", "run", "--sms"])
         application = mock.Mock()

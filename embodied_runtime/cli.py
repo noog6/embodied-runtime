@@ -571,6 +571,7 @@ async def _run_console_application(
     application: RobotApplication, terminal: AsyncLineTerminal,
     message_channel: ConsoleOperatorMessageChannel | None,
     history_root: Path = DEFAULT_HISTORY_ROOT,
+    *, cleanup_started: asyncio.Event | None = None,
 ) -> int:
     """Own the console's interrupt and cleanup lifecycle in one boundary."""
     try:
@@ -587,6 +588,8 @@ async def _run_console_application(
         LOGGER.info("[APP] interrupted")
         raise
     finally:
+        if cleanup_started is not None:
+            cleanup_started.set()
         await application.stop()
     return 0
 
@@ -598,6 +601,7 @@ async def _run_application(
     observability: RunObservability | None = None,
     shutdown_requested: asyncio.Event | None = None,
     terminal: AsyncLineTerminal | None = None,
+    cleanup_started: asyncio.Event | None = None,
 ) -> int:
     hardware = build_hardware_backend(args)
     camera = build_camera_backend(args)
@@ -755,6 +759,8 @@ async def _run_application(
                     f"bytes={len(frame.data)} output={args.camera_test} status=ok"
                 )
         finally:
+            if cleanup_started is not None:
+                cleanup_started.set()
             await application.stop()
         return 0
 
@@ -762,6 +768,7 @@ async def _run_application(
         return await _run_console_application(
             application, terminal or AsyncLineTerminal(no_color=args.no_color), message_channel,
             history_root,
+            cleanup_started=cleanup_started,
         )
 
     return await _run_headless_application(application, shutdown_requested)
@@ -784,7 +791,7 @@ async def _run_headless_application(
         cancelled_for_shutdown = signal_task in done and not run_task.done()
         if cancelled_for_shutdown:
             application.request_stop()
-            if application.state is not LifecycleState.RUNNING:
+            if application.state in (LifecycleState.CREATED, LifecycleState.STARTING):
                 # Wake blocked startup; application.run still owns partial cleanup.
                 run_task.cancel()
         try:
@@ -807,6 +814,7 @@ async def _run_process_application(
     """Own SIGINT/SIGTERM through startup, execution, and lifecycle cleanup."""
     loop = asyncio.get_running_loop()
     shutdown_requested = asyncio.Event()
+    cleanup_started = asyncio.Event()
     enabled = getattr(args, "ctrl_c_shutdown_enabled", args.mode != "console")
     terminal = None
 
@@ -837,15 +845,17 @@ async def _run_process_application(
             old_loop_handler = getattr(loop, "_signal_handlers", {}).get(signum)
             loop.add_signal_handler(signum, callback)
             previous[signum] = (old, old_loop_handler)
-        kwargs = {"terminal": terminal} if terminal is not None else {}
         work = asyncio.create_task(_run_application(
             args, profile, history_root, history_evidence, observability,
-            shutdown_requested, **kwargs,
+            shutdown_requested, terminal, cleanup_started,
         ), name="runtime-application")
         waiter = asyncio.create_task(shutdown_requested.wait(), name="process-shutdown")
         done, _ = await asyncio.wait((work, waiter), return_when=asyncio.FIRST_COMPLETED)
-        if work in done or args.mode == "run":
+        if work in done or args.mode == "run" or cleanup_started.is_set():
             # Headless lifecycle requests stop itself, including partial start.
+            # Console/diagnostics mark cleanup before awaiting stop: a late
+            # signal must join that cleanup rather than cancel it. Caller task
+            # cancellation still propagates through the ordinary await.
             return await work
         # Console/diagnostics cancellation wakes blocked startup or commands;
         # their existing finally blocks still own application.stop(). Only this

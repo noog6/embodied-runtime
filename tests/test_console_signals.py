@@ -68,10 +68,12 @@ class Console:
             print('COMMAND_COMPLETED', flush=True)
         return '', command in ('exit', 'quit')
 cli.RuntimeConsole = Console
-async def application(args, profile, root, evidence, observability, shutdown, terminal=None):
+async def application(args, profile, root, evidence, observability, shutdown,
+                      terminal=None, cleanup_started=None):
     app = Application()
     if mode == 'console':
-        return await cli._run_console_application(app, terminal, None)
+        return await cli._run_console_application(
+            app, terminal, None, cleanup_started=cleanup_started)
     return await cli._run_headless_application(app, shutdown)
 cli._run_application = application
 originals = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGWINCH)}
@@ -203,3 +205,19 @@ class ProcessSignalTests(unittest.TestCase):
                 else:
                     os.write(master, b'\x04' if ending == 'eof' else b'exit\r')
                 self.finish(process, master, slave, attributes)
+
+    def test_signals_during_quit_or_eof_cleanup_allow_stop_to_finish(self):
+        for ending in (b'quit\r', b'\x04'):
+            for policy, signum in (('enabled', signal.SIGINT), ('auto', signal.SIGTERM)):
+                with self.subTest(ending=ending, policy=policy, signal=signum):
+                    process, master, slave, attributes, _ = self.launch(policy=policy)
+                    self.read_until(master, lambda: b'test>' in self.output)
+                    os.write(master, ending)
+                    self.read_until(master, lambda: b'STOPPING' in self.output)
+                    for _ in range(3):
+                        if signum == signal.SIGINT:
+                            os.write(master, b'\x03')
+                        else:
+                            os.kill(process.pid, signum)
+                        time.sleep(.01)
+                    self.finish(process, master, slave, attributes)

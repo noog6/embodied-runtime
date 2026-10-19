@@ -150,7 +150,10 @@ explicit CLI overrides TOML, then defaults. `auto` enables shutdown without a
 console. `exit`, `quit`, EOF (Ctrl+D at an empty prompt), and SIGTERM retain
 graceful shutdown. Signal handlers remain installed through application cleanup,
 so repeated interrupts cannot escalate into asyncio's default interrupt handling.
-Task cancellation remains independent and propagates after cleanup.
+Signals arriving after quit, EOF, or diagnostics have begun application cleanup
+wait for that cleanup to finish. They only cancel console/diagnostics execution
+while startup or commands are still active. Task cancellation remains independent
+and propagates; cleanup errors are not converted into successful signal exits.
 
 The interactive implementation uses `prompt_toolkit` 3's async API rather than
 custom raw-mode escape parsing, Unicode width calculations, and wrapped-row
