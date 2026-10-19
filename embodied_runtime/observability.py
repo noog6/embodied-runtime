@@ -8,13 +8,15 @@ from collections import Counter, deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 from pathlib import Path
 from threading import Lock
 from time import monotonic
 from types import MappingProxyType
 from typing import Any
+
+from embodied_runtime.monetary import add_usd, parse_usd, usd_string
 
 
 MAX_EVENT_STRING = 160
@@ -107,7 +109,10 @@ class RunObservability:
         }
         self._provider_usage: dict[tuple[str, str, str], Counter[str]] = {}
         self._tts_usage: dict[tuple[str, str, str], Counter[str]] = {}
-        self._unpriceable_usage: set[tuple[str, str, str]] = set()
+        # Lifetime monetary accumulators are independent of tokens and the deque.
+        self._money = {role: {"reported": Decimal(0), "estimated": Decimal(0),
+                              "reported_calls": 0, "estimated_calls": 0, "unknown_calls": 0}
+                       for role in ("cognition", "vision", "tts")}
         self._missing_usage: set[tuple[str, str, str]] = set()
         self._missing_token_fields: dict[tuple[str, str, str], set[str]] = {}
         self._provider_calls: deque[dict[str, object]] = deque(maxlen=event_capacity)
@@ -197,11 +202,13 @@ class RunObservability:
                       returned_model: str | None = None, error: str | None = None,
                       failure_category: str | None = None, role: str = "cognition",
                       attempt_order: int | None = None, fallback: bool = False,
-                      accepted: bool | None = None, http_status: int | None = None) -> None:
+                      accepted: bool | None = None, http_status: int | None = None,
+                      reported_cost_usd: Decimal | None = None) -> None:
         """Account once per attempted outbound call, regardless of output acceptance.
 
-        Reported tokens remain usage even when output is rejected. Missing usage
-        makes aggregate tokens and cost unavailable; it never implies zero use.
+        Reported money and tokens survive rejected output independently. Missing
+        cost evidence and unpriceable usage never imply a free call. Adapters
+        must verify provider semantics before supplying reported_cost_usd.
         """
         if status not in {"completed", "failed", "cancelled"} or type(duration_ms) is not int or duration_ms < 0:
             return
@@ -237,7 +244,14 @@ class RunObservability:
             if not available:
                 self._missing_usage.add(key)
             self._missing_token_fields.setdefault(key, set()).update(missing)
+            reported = parse_usd(reported_cost_usd)
+            estimate = None if reported is not None else self._estimate_call(key, counts, available)
+            basis = self._record_money(role, reported, estimate)
             record = {
+                "reported_cost_usd": usd_string(reported) if reported is not None else None,
+                "cost_basis": basis,
+                "cost_usd": usd_string(reported if reported is not None else estimate)
+                            if basis != "unavailable" else None,
                 "role": role,
                 "backend": provider, "protocol": protocol, "endpoint": endpoint,
                 "requested_model": model, "returned_model": returned_model,
@@ -253,13 +267,6 @@ class RunObservability:
                 name: self._short(value) if isinstance(value, str) else value
                 for name, value in record.items()
             })
-            rate = self._pricing.rates.get(key[1:]) if self._pricing is not None else None
-            if (not available or missing
-                    or cached_input_tokens + cache_write_tokens > input_tokens
-                    or total != input_tokens + output_tokens
-                    or (rate is not None and rate.max_input_tokens is not None
-                        and input_tokens > rate.max_input_tokens)):
-                self._unpriceable_usage.add(key)
             for field, value in (("requests", 1), ("input_tokens", input_tokens),
                                  ("cached_input_tokens", cached_input_tokens),
                                  ("cache_write_tokens", cache_write_tokens),
@@ -300,60 +307,80 @@ class RunObservability:
                 return
             bucket = self._tts_usage.setdefault(key, Counter())
             bucket.update(syntheses=1, characters=characters, duration_ms=duration_ms)
+            rate = self._pricing.character_rates.get(key[:2]) if self._pricing else None
+            unit = parse_usd(rate.usd_per_thousand) if rate else None
+            with localcontext() as context:
+                context.prec = 80
+                estimate = parse_usd(Decimal(characters) * unit / 1_000) if unit is not None else None
+            self._record_money("tts", None, estimate)
         self.event("voice", "tts_synthesis", "completed", source=provider,
                    duration_ms=duration_ms,
                    metadata={"model": model, "characters": characters,
                              "usage_basis": usage_basis})
 
+    def _estimate_call(self, key, counts, available) -> Decimal | None:
+        rate = self._pricing.rates.get(key[1:]) if self._pricing else None
+        if rate is None or not available or any(counts[name] is None for name in TOKEN_FIELDS):
+            return None
+        tokens = counts["input_tokens"]
+        cached, writes = counts["cached_input_tokens"], counts["cache_write_tokens"]
+        if (cached + writes > tokens or counts["total_tokens"] != tokens + counts["output_tokens"]
+                or (rate.max_input_tokens is not None and tokens > rate.max_input_tokens)):
+            return None
+        units = [parse_usd(value) for value in
+                 (rate.input_per_million, rate.cached_input_per_million, rate.output_per_million)]
+        write_unit = parse_usd(rate.cache_write_per_million)
+        if any(value is None for value in units) or (writes and write_unit is None):
+            return None
+        with localcontext() as context:
+            context.prec = 80
+            amount = (Decimal(tokens - cached - writes) * units[0]
+                      + Decimal(cached) * units[1] + Decimal(counts["output_tokens"]) * units[2])
+            if writes:
+                amount += Decimal(writes) * write_unit
+            return parse_usd(amount / 1_000_000)
+
+    def _record_money(self, role, reported, estimate) -> str:
+        bucket = self._money[role]
+        basis = "reported" if reported is not None else "estimated" if estimate is not None else "unavailable"
+        if basis == "unavailable":
+            bucket["unknown_calls"] += 1
+        else:
+            amount = reported if reported is not None else estimate
+            bucket[basis] = add_usd(bucket[basis], amount)
+            bucket[basis + "_calls"] += 1
+        return basis
+
+    @staticmethod
+    def _money_result(bucket, *, empty_unavailable=False) -> dict[str, object]:
+        reported, estimated = bucket["reported"], bucket["estimated"]
+        known = add_usd(reported, estimated)
+        reported_calls, estimated_calls, unknown = (
+            bucket[name + "_calls"] for name in ("reported", "estimated", "unknown"))
+        status = ("unavailable" if unknown or (empty_unavailable and reported_calls + estimated_calls == 0)
+                  else "mixed" if reported_calls and estimated_calls
+                  else "reported" if reported_calls else "estimated")
+        return {"status": status,
+                "total_usd": usd_string(known) if status != "unavailable" else None,
+                # Legacy field retains its original meaning: a complete catalog estimate.
+                "estimated_usd": usd_string(known) if status == "estimated" else None,
+                "reported_usd": usd_string(reported),
+                "catalog_estimated_usd": usd_string(estimated), "known_usd": usd_string(known),
+                "reported_calls": reported_calls, "estimated_calls": estimated_calls,
+                "unknown_calls": unknown}
+
     def _cost(self) -> dict[str, object]:
-        if not self._provider_usage and not self._tts_usage:
-            return {"status": "unavailable", "estimated_usd": None,
-                    "pricing_identity": self._pricing.identity if self._pricing else None}
-        if self._pricing is None:
-            return {"status": "unavailable", "estimated_usd": None, "pricing_identity": None}
-        total = Decimal(0)
-        cognition = Decimal(0)
-        vision = Decimal(0)
-        for (role, provider, model), usage in self._provider_usage.items():
-            if (role, provider, model) in self._unpriceable_usage:
-                return {"status": "unavailable", "estimated_usd": None,
-                        "pricing_identity": self._pricing.identity}
-            rate = self._pricing.rates.get((provider, model))
-            if rate is None:
-                return {"status": "unavailable", "estimated_usd": None,
-                        "pricing_identity": self._pricing.identity}
-            cached = usage["cached_input_tokens"]
-            cache_write = usage["cache_write_tokens"]
-            uncached = usage["input_tokens"] - cached - cache_write
-            if uncached < 0 or (cache_write and rate.cache_write_per_million is None):
-                return {"status": "unavailable", "estimated_usd": None,
-                        "pricing_identity": self._pricing.identity}
-            cost = Decimal(uncached) * rate.input_per_million / Decimal(1_000_000)
-            cost += Decimal(cached) * rate.cached_input_per_million / Decimal(1_000_000)
-            cost += Decimal(usage["output_tokens"]) * rate.output_per_million / Decimal(1_000_000)
-            if cache_write:
-                cost += Decimal(cache_write) * rate.cache_write_per_million / Decimal(1_000_000)
-            if role == "vision":
-                vision += cost
-            else:
-                cognition += cost
-        tts = Decimal(0)
-        for (provider, model, _usage_basis), usage in self._tts_usage.items():
-            rate = self._pricing.character_rates.get((provider, model))
-            if rate is None:
-                return {"status": "unavailable", "estimated_usd": None,
-                        "pricing_identity": self._pricing.identity}
-            tts += Decimal(usage["characters"]) * rate.usd_per_thousand / Decimal(1_000)
-        total = cognition + vision + tts
-        amount = lambda value: str(value.quantize(Decimal("0.000001")))
-        return {"status": "estimated", "estimated_usd": amount(total),
-                "pricing_identity": self._pricing.identity,
-                "components": {
-                    "cognition": {"status": "estimated", "estimated_usd": amount(cognition)},
-                    "vision": {"status": "estimated", "estimated_usd": amount(vision)},
-                    "tts": {"status": "estimated", "estimated_usd": amount(tts),
-                            "basis": "public_api_character_rate"},
-                }}
+        total = {"reported": Decimal(0), "estimated": Decimal(0),
+                 "reported_calls": 0, "estimated_calls": 0, "unknown_calls": 0}
+        components = {}
+        for role, bucket in self._money.items():
+            components[role] = self._money_result(bucket)
+            for name, value in bucket.items():
+                total[name] = add_usd(total[name], value) if isinstance(value, Decimal) else total[name] + value
+        components["tts"]["basis"] = "public_api_character_rate"
+        return {**self._money_result(total, empty_unavailable=True),
+                "currency": "USD", "pricing_identity": self._pricing.identity if self._pricing else None,
+                "components": components}
 
     def snapshot(self) -> Mapping[str, object]:
         with self._lock:
@@ -412,7 +439,7 @@ class RunObservability:
                 for (kind, provider, model), usage in sorted(self._provider_usage.items()) if kind == role
             ]
         return {
-            "schema_version": 5,
+            "schema_version": 6,
             "run": {"run_id": self.run_id, "started_at": self._started_at.isoformat(),
                     "stopped_at": stopped.isoformat() if status else None,
                     "elapsed_seconds": max(0.0, self._monotonic() - self._started_monotonic),
@@ -465,16 +492,21 @@ class RunObservability:
     def banner(self, snapshot: Mapping[str, object] | None = None) -> str:
         data = snapshot or self.snapshot()
         run, metrics, cost = data["run"], data["metrics"], data["cost"]
+        # Historical summaries predate some role counters. Do not invent zeros.
+        metrics = {**dict.fromkeys(_COUNTERS, "unavailable"), **metrics}
         seconds = int(run["elapsed_seconds"])
         duration = f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
         title = f" {self.run_id or 'RUNTIME'} SUMMARY "
         line = "=" * 64
         value = cost["estimated_usd"] if cost["status"] == "estimated" else "unavailable"
         components = cost.get("components", {})
-        cognition_cost = components.get("cognition", {}).get(
-            "estimated_usd", "unavailable"
-        )
-        tts_cost = components.get("tts", {}).get("estimated_usd", "unavailable")
+        def component_cost(role):
+            item = components.get(role, {})
+            amount = item.get("total_usd", item.get("estimated_usd"))
+            return amount if amount is not None else "unavailable"
+        cognition_cost = component_cost("cognition")
+        tts_cost = component_cost("tts")
+        total = cost.get("total_usd", cost.get("estimated_usd"))
         def tokens(name: str) -> object:
             return metrics[name] if metrics[name] is not None else "unavailable"
         return "\n".join((line, title.center(64, "="), "", "Runtime",
@@ -485,7 +517,13 @@ class RunObservability:
             f"  output_tokens:        {tokens('output_tokens')}",
             f"  cognition_cost_usd:   {cognition_cost}",
             f"  tts_cost_usd:         {tts_cost}",
-            f"  estimated_cost_usd:   {value}", "", "Voice",
+            f"  estimated_cost_usd:   {value}",
+            f"  total_cost_usd:       {total if total is not None else 'unavailable'}",
+            f"  cost_basis:           {cost['status']}",
+            f"  reported_cost_usd:    {cost.get('reported_usd', 'unavailable')}",
+            f"  catalog_est_cost_usd: {cost.get('catalog_estimated_usd', 'unavailable')}",
+            f"  known_cost_usd:       {cost.get('known_usd', 'unavailable')}",
+            f"  unknown_cost_calls:   {cost.get('unknown_calls', 'unavailable')}", "", "Voice",
             f"  wake_captures:        {metrics['wake_captures']}",
             f"  stt_captures:         {metrics['stt_captures']}",
             f"  voice_turns:          {metrics['voice_turns']}",
@@ -499,7 +537,7 @@ class RunObservability:
             f"  vision_fallbacks:     {metrics['vision_fallbacks']}",
             f"  vision_input_tokens:  {tokens('vision_input_tokens')}",
             f"  vision_output_tokens: {tokens('vision_output_tokens')}",
-            f"  vision_cost_usd:      {components.get('vision', {}).get('estimated_usd', 'unavailable')}",
+            f"  vision_cost_usd:      {component_cost('vision')}",
             "", "Autonomy",
             f"  attention_episodes:   {metrics['attention_episodes_started']}",
             f"  job_runs_started:     {metrics['job_runs_started']}",

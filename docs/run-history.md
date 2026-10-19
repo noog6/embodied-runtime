@@ -41,12 +41,26 @@ complete usage across all roles. Complete direct vision usage has a separate
 `cost.components.vision`; compatible model names never inherit direct rates.
 The normal perception summary also shows vision requests, fallbacks, and tokens.
 
+Summary schema version 6 adds independent monetary totals and reported-cost
+metadata. Verified OpenRouter `usage.cost` is preferred over local estimates,
+including for models absent from the catalog and responses with incomplete token
+details. `cost.total_usd` and `cost.status` cover reported, estimated, mixed, and
+unavailable totals; known reported/catalog subtotals and unknown-call counts remain
+visible. `estimated_usd` retains its complete catalog-only meaning. Lifetime totals
+survive diagnostic eviction and maintain cognition/vision/TTS separation.
+See [OpenRouter response accounting](openrouter-cost-accounting.md) for the complete
+schema, verified USD denomination, validation bounds, BYOK semantics, compatibility,
+and manual validation procedure. The preceding schema notes describe historical
+behavior; missing tokens now affect money only when a catalog estimate is needed.
+
 The `interruptions` counter is incremented once only when the top-level process result
 is the authoritative interrupted exit code (130). Task cancellation and lower-level
 cleanup do not increment it; completed and other failed runs leave it at zero.
 
-Raw usage is authoritative. Monetary cost is `unavailable` (not zero) unless every
-used provider/model has a rate in an explicitly identified `PricingCatalog`. Rates
+Raw token usage is authoritative for token availability. A call without a valid
+reported monetary amount needs an applicable rate in an explicitly identified
+`PricingCatalog` to contribute a known estimate. An unknown call makes the complete
+monetary total `unavailable` (not zero). Rates
 independently cover input, cached-input, and output tokens and no network pricing lookup
 is performed. Cached reads and cache writes are subtracted from total input before the
 ordinary input rate is applied, so input categories are mutually exclusive. Structurally
@@ -69,7 +83,8 @@ at most 272,000 input tokens. A request above that boundary, or usage from any u
 provider or model, makes the run estimate unavailable rather than applying an unsafe
 fallback. It also covers ElevenLabs `eleven_flash_v2_5` at the public Flash/Turbo API
 estimate dated 2026-10-02: USD $0.05 per 1,000 billed characters. Cost components expose
-cognition and TTS separately and `estimated_usd` combines known usage. This public-rate
+cognition, vision, and TTS separately; `estimated_usd` is populated only for
+complete catalog-only totals, and `total_usd` covers all complete totals. This public-rate
 estimate is not an account invoice: subscriptions, included credits, taxes, and final
 marginal charges may differ. eSpeak has no external API cost. Unknown actually used
 hosted TTS models make cost unavailable rather than silently appearing as zero.
@@ -77,8 +92,9 @@ hosted TTS models make cost unavailable rather than silently appearing as zero.
 This locally calculated value estimates only usage represented in priced provider
 accounting; it is not a billing authority or a complete robot operating cost. Built-in
 pricing is dated and versioned, performs no runtime network lookup, and may become stale.
-The summary observability schema is version 3; this version adds the bounded TTS usage
-basis and does not persist response headers or other provider metadata.
+The current summary observability schema is version 6. Schema 3 introduced the
+bounded TTS usage basis; neither response headers nor arbitrary provider metadata
+are persisted.
 
 Summary persistence reports `written`, `failed`, or `not_requested` to the runtime. A
 failure is logged with its bounded exception class and never changes authoritative

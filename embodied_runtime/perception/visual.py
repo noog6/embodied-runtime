@@ -25,6 +25,7 @@ from embodied_runtime.config import (
     VisionConfiguration, validate_vision_backend_config, validate_vision_configuration,
 )
 from embodied_runtime.observability import RunObservability
+from embodied_runtime.monetary import openrouter_cost
 from embodied_runtime.sensing.camera import CameraFrame
 from embodied_runtime.images import ImageCollection, ImageLimits, JOINT_IMAGE_INSTRUCTIONS
 
@@ -310,6 +311,8 @@ class _RemoteVisualBackend(VisualPerceptionBackend):
                     duration_ms=duration, usage=counts, protocol=self.protocol, endpoint=self.endpoint,
                     returned_model=returned, failure_category=category, http_status=http_status,
                     attempt_order=order, fallback=order > 1, accepted=status == "completed",
+                    reported_cost_usd=(openrouter_cost(response, base_url=self.base_url)
+                                       if self.protocol == "chat-completions" else None),
                 )
 
 

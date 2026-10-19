@@ -368,8 +368,8 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             result.pricing_identity,
         )
         rendered = render_report(report)
-        self.assertIn("est_cost_usd", rendered)
-        self.assertIn("estimated model cost: unavailable", rendered)
+        self.assertIn("cost_usd basis", rendered)
+        self.assertIn("model cost (unavailable): unavailable", rendered)
 
     async def test_rendered_model_and_report_totals_sum_trial_estimates(self):
         report = await run_benchmark(
@@ -390,8 +390,8 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         rendered = render_report(report)
         self.assertIn("$0.015480", rendered)
         self.assertIn("unavailable", rendered)
-        self.assertIn("estimated model cost: unavailable", rendered)
-        self.assertIn("estimated report cost: unavailable", rendered)
+        self.assertIn("model cost (unavailable): unavailable", rendered)
+        self.assertIn("report cost (unavailable): unavailable", rendered)
 
     async def test_report_total_is_unavailable_if_any_model_is_unpriceable(self):
         report = await run_benchmark(
@@ -400,8 +400,8 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         rendered = render_report(report)
         self.assertIn("estimated model cost: $0.015480", rendered)
-        self.assertIn("estimated model cost: unavailable", rendered)
-        self.assertIn("estimated report cost: unavailable", rendered)
+        self.assertIn("model cost (unavailable): unavailable", rendered)
+        self.assertIn("report cost (unavailable): unavailable", rendered)
 
     async def test_all_scenarios_are_selected_and_unknown_fails_clearly(self):
         first = await run_trial(ScriptedBenchmarkBackend(), "fake-model", 1)
@@ -985,7 +985,7 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         first = report.to_json()
         self.assertEqual(first, report.to_json())
         decoded = json.loads(first)
-        self.assertEqual(decoded["format_version"], 3)
+        self.assertEqual(decoded["format_version"], 4)
         self.assertEqual(
             decoded["pricing_identity"], "public-built-in-pricing-2026-10-05",
         )

@@ -30,9 +30,12 @@ def test_zero_snapshot_and_unknown_cost():
     observed, _ = make()
     snapshot = observed.snapshot()
     assert all(value == 0 for value in snapshot["metrics"].values())
-    assert snapshot["cost"] == {
-        "status": "unavailable", "estimated_usd": None, "pricing_identity": None,
-    }
+    assert snapshot["cost"]["status"] == "unavailable"
+    assert snapshot["cost"]["total_usd"] is None
+    assert snapshot["cost"]["estimated_usd"] is None
+    assert snapshot["cost"]["pricing_identity"] is None
+    assert snapshot["cost"]["known_usd"] == "0.000000"
+    assert snapshot["cost"]["unknown_calls"] == 0
 
 
 def test_provider_failure_counts_attempt_and_marks_aggregate_usage_unavailable():
@@ -279,7 +282,7 @@ def test_finalize_once_freezes_late_updates_and_writes_safe_summary(tmp_path):
     assert first["run"]["status"] == "interrupted"
     persisted = json.loads((tmp_path / "summary.json").read_text())
     serialized = json.dumps(persisted)
-    assert persisted["schema_version"] == 5
+    assert persisted["schema_version"] == 6
     assert persisted["provider_usage"] == [{
         "provider": "p", "model": "m", "requests": 1,
         "usage_available": True,
