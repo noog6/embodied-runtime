@@ -92,6 +92,30 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(HISTORICAL_DEFAULTS.earcons_enabled)
         self.assertEqual(HISTORICAL_DEFAULTS.jobs_max_concurrent_work, 1)
 
+    def test_ctrl_c_shutdown_defaults_and_precedence(self):
+        for mode in ("run", "console", "diagnostics"):
+            default = self.effective(f"[runtime]\nmode='{mode}'\n")
+            self.assertEqual(default.ctrl_c_shutdown, "auto")
+            self.assertEqual(default.ctrl_c_shutdown_enabled, mode != "console")
+            for policy in ("auto", "enabled", "disabled"):
+                configured = self.effective(
+                    f"[runtime]\nmode='{mode}'\nctrl_c_shutdown='{policy}'\n")
+                self.assertEqual(configured.ctrl_c_shutdown, policy)
+                self.assertEqual(configured.ctrl_c_shutdown_enabled,
+                                 policy == "enabled" or (policy == "auto" and mode != "console"))
+                for override in ("auto", "enabled", "disabled"):
+                    self.assertEqual(self.effective(
+                        f"[runtime]\nmode='{mode}'\nctrl_c_shutdown='{policy}'\n",
+                        ("--ctrl-c-shutdown", override),
+                    ).ctrl_c_shutdown, override)
+        configured = self.effective("[runtime]\nmode='run'\n", ("--console",))
+        self.assertFalse(configured.ctrl_c_shutdown_enabled)
+        for value in ("true", "1", "'invalid'"):
+            with self.subTest(value=value), self.assertRaises(ConfigurationError):
+                load_runtime_config(self.write(f"[runtime]\nctrl_c_shutdown={value}\n"))
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_launch_arguments(["--ctrl-c-shutdown", "invalid"])
+
     def test_cognition_model_configuration_is_strict_and_optional(self):
         configured = load_runtime_config(self.write(
             "[cognition]\nmodel = '  gpt-5.6-luna  '\n"

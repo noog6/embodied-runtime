@@ -102,6 +102,7 @@ camera = "auto"
 cognition = "openai-responses"
 vision = "openai-responses"
 mode = "console"
+ctrl_c_shutdown = "auto"
 timezone = "America/Toronto"
 
 [cognition]
@@ -212,8 +213,22 @@ python main.py \
 
 This makes the ordinary foreground process daemon-ready; it does **not**
 install or define a systemd service. `SIGTERM` requests graceful shutdown and
-returns success, while `SIGINT`/Ctrl-C remains an interrupted development exit.
+returns success, independently of the Ctrl+C policy.
 `SIGKILL`, an OOM kill, and power loss have no graceful-cleanup guarantee.
+
+`runtime.ctrl_c_shutdown` accepts `"auto"` (default), `"enabled"`, or
+`"disabled"`. Override it with `--ctrl-c-shutdown auto|enabled|disabled`.
+Explicit CLI values take precedence over TOML, then the default; there is no
+environment-variable override. `auto` is resolved after mode selection: Ctrl+C
+clears unfinished input in console mode and requests graceful shutdown in run
+or diagnostics mode. `enabled` requests graceful shutdown in every mode;
+`disabled` keeps the runtime running in every mode. A disabled console interrupt
+resets only the draft and history navigation, including repeated interrupts
+during a command; it does not cancel commands, cognition, or Jobs. An enabled
+interrupt during an executing console command cancels that command as part of
+ordinary lifecycle cleanup. Signal-requested graceful shutdown returns success.
+`exit`, `quit`, and console EOF still stop normally. See the
+[console editor and SSH acceptance checks](console.md#input-editing-and-interrupts).
 
 The initiative values, `voice.enabled`, and `voice.wake_word_enabled` must be
 TOML booleans. `voice.wake_words` must be a non-empty TOML array whose entries

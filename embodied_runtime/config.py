@@ -26,6 +26,7 @@ class RuntimeFileConfig:
     vision: str | None = None
     mode: str | None = None
     timezone: str | None = None
+    ctrl_c_shutdown: str | None = None
 
 
 @dataclass(frozen=True)
@@ -281,6 +282,13 @@ class LaunchConfiguration:
     cognition_openai_compatible: OpenAICompatibleConfig = OpenAICompatibleConfig()
     vision_configuration: VisionConfiguration = VisionConfiguration()
     conversation_media: MediaRetentionConfiguration = MediaRetentionConfiguration()
+    ctrl_c_shutdown: str = "auto"
+
+    @property
+    def ctrl_c_shutdown_enabled(self) -> bool:
+        return self.ctrl_c_shutdown == "enabled" or (
+            self.ctrl_c_shutdown == "auto" and self.mode != "console"
+        )
 
 
 DEFAULT_COGNITION_MODEL = "gpt-5.6-luna"
@@ -317,6 +325,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
 
 _RUNTIME_KEYS = {
     "profile", "hardware", "camera", "cognition", "vision", "mode", "timezone",
+    "ctrl_c_shutdown",
 }
 _COGNITION_KEYS = {"model", "openai_compatible"}
 _COMPATIBLE_KEYS = {
@@ -351,6 +360,7 @@ _ENUMS = {
     "runtime.cognition": {"none", "openai-responses", "openai-compatible"},
     "runtime.vision": {"none", "openai-responses", "configured"},
     "runtime.mode": {"run", "console", "diagnostics"},
+    "runtime.ctrl_c_shutdown": {"auto", "enabled", "disabled"},
     "interaction.environment": {"workstation", "companion", "unattended", "remote"},
 }
 
@@ -725,6 +735,7 @@ def resolve_launch_configuration(
         vision_configuration=file_config.vision,
         conversation_media=file_config.conversation_media,
         mode=mode,
+        ctrl_c_shutdown=scalar("ctrl_c_shutdown", runtime.ctrl_c_shutdown, "auto"),
         timezone=runtime.timezone or HISTORICAL_DEFAULTS.timezone,
         interaction_environment=(interaction.environment
                                  or HISTORICAL_DEFAULTS.interaction_environment),

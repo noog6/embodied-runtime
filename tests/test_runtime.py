@@ -1,4 +1,6 @@
 import asyncio
+import os
+import signal
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 import unittest
@@ -346,50 +348,93 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(application.request_stop_calls, 1)
         self.assertEqual(application.stop_calls, 1)
 
-    async def test_signal_handler_is_installed_only_for_run_mode(self):
+    async def test_process_signals_follow_policy_and_restore_handlers(self):
         profile = RobotProfile("test", "Test Robot")
-        placeholders = (mock.Mock(), mock.Mock())
-        for mode in ("console", "diagnostics"):
-            args = SimpleNamespace(mode=mode)
-            with self.subTest(mode=mode), patch(
-                "embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)
-            ) as run, patch(
-                "embodied_runtime.cli.asyncio.get_running_loop",
-                side_effect=AssertionError("non-run mode must not install a handler"),
-            ):
-                self.assertEqual(await _run_process_application(
-                    args, profile, mock.Mock(), *placeholders,
-                ), 0)
-                self.assertIsNone(run.await_args.args[5] if len(run.await_args.args) > 5 else None)
-
         loop = asyncio.get_running_loop()
-        callbacks = []
+        originals = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        for mode in ("run", "console", "diagnostics"):
+            for enabled in (True, False):
+                callbacks = {}
+                args = SimpleNamespace(mode=mode, ctrl_c_shutdown_enabled=enabled)
+                terminal = mock.Mock()
+                async def run_mode(*positional, **kwargs):
+                    shutdown = positional[5]
+                    callbacks[signal.SIGINT]()
+                    self.assertEqual(shutdown.is_set(), enabled)
+                    if mode == "console" and not enabled:
+                        terminal.cancel_input.assert_called_once()
+                    callbacks[signal.SIGTERM]()
+                    callbacks[signal.SIGTERM]()
+                    self.assertTrue(shutdown.is_set())
+                    return 0
+                with self.subTest(mode=mode, enabled=enabled), patch.object(
+                    loop, "add_signal_handler",
+                    side_effect=lambda sig, callback: callbacks.update({sig: callback}),
+                ), patch.object(loop, "remove_signal_handler", return_value=True) as remove, patch(
+                    "embodied_runtime.cli.AsyncLineTerminal", return_value=terminal,
+                ), patch("embodied_runtime.cli._run_application", side_effect=run_mode):
+                    self.assertEqual(await _run_process_application(
+                        args, profile, mock.Mock(), mock.Mock(), mock.Mock(),
+                    ), 0)
+                    self.assertEqual(remove.call_count, 2)
+                    for sig, original in originals.items():
+                        self.assertEqual(signal.getsignal(sig), original)
 
-        async def run_mode(*args):
-            shutdown = args[5]
-            callbacks[0]()
-            callbacks[0]()
-            self.assertTrue(shutdown.is_set())
-            return 0
+    async def test_headless_external_cancellation_joins_children(self):
+        application = self.ControlledApplication(block_startup=True)
+        task = asyncio.create_task(_run_headless_application(application, asyncio.Event()))
+        await application.start_entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(application.stop_calls, 1)
+        self.assertFalse(any(t.get_name() in ("application-run", "sigterm-wait")
+                             for t in asyncio.all_tasks() if not t.done()))
 
-        with patch.object(
-            loop, "add_signal_handler",
-            side_effect=lambda _signal, callback: callbacks.append(callback),
-        ) as add_handler, patch.object(
-            loop, "remove_signal_handler", return_value=True,
-        ) as remove_handler, patch(
-            "embodied_runtime.cli._run_application", side_effect=run_mode,
-        ), self.assertLogs("embodied_runtime.cli", level="INFO") as captured:
-            self.assertEqual(await _run_process_application(
-                SimpleNamespace(mode="run"), profile, mock.Mock(), *placeholders,
-            ), 0)
-        add_handler.assert_called_once()
-        remove_handler.assert_called_once()
-        self.assertEqual(
-            "\n".join(captured.output).count(
-                "signal=SIGTERM action=shutdown_requested"
-            ), 1,
-        )
+    async def test_process_failure_and_cancellation_restore_previous_handlers(self):
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        originals = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        async def blocked(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+        for failure in (RuntimeError("startup failed"), None):
+            with self.subTest(failure=failure), patch(
+                "embodied_runtime.cli._run_application",
+                new=AsyncMock(side_effect=failure) if failure else blocked,
+            ):
+                task = asyncio.create_task(_run_process_application(
+                    SimpleNamespace(mode="console"), RobotProfile("test", "Test Robot"),
+                    mock.Mock(), mock.Mock(), mock.Mock(),
+                ))
+                if failure:
+                    with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                        await task
+                else:
+                    await entered.wait()
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                for sig, original in originals.items():
+                    self.assertEqual(signal.getsignal(sig), original)
+                    self.assertNotIn(sig, loop._signal_handlers)
+
+    async def test_process_restores_existing_asyncio_signal_callback(self):
+        loop = asyncio.get_running_loop()
+        old = signal.getsignal(signal.SIGINT)
+        called = asyncio.Event()
+        loop.add_signal_handler(signal.SIGINT, called.set)
+        try:
+            with patch('embodied_runtime.cli._run_application', new=AsyncMock(return_value=0)):
+                self.assertEqual(await _run_process_application(
+                    SimpleNamespace(mode='run'), RobotProfile('test', 'Test Robot'),
+                    mock.Mock(), mock.Mock(), mock.Mock(),
+                ), 0)
+            os.kill(os.getpid(), signal.SIGINT)
+            await asyncio.wait_for(called.wait(), 1)
+        finally:
+            loop.remove_signal_handler(signal.SIGINT)
+            signal.signal(signal.SIGINT, old)
 
     async def test_headless_sms_composition_has_no_console_infrastructure(self):
         _, args, _ = parse_launch_arguments(["--mode", "run", "--sms"])

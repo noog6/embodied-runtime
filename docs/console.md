@@ -32,8 +32,8 @@ operator-directed deliveries requested through the current console or another
 dialogue channel. Both are non-dialogue deliveries and create no pending console
 reply, cognition episode, or extra WorkingMemory turn. There is no new `send` or
 `deliver` command: delivery is requested through normal `ask ...` or voice
-cognition. It renders an accepted message immediately as `Mira: ...`, cancels
-the losing wait, and redraws the prompt. This uses no stdin executor, polling, or
+cognition. It renders an accepted message immediately as `Mira: ...`, keeps
+the input wait alive, and redraws the prompt, draft, and cursor. This uses no stdin executor, polling, or
 sleep loop. EOF, quit, cancellation, and shutdown clean pending waits. Questions
 are delivered once and create no pending reply. Messages are not a console
 history, RuntimeState, WorkingMemory, or EventBus history.
@@ -121,6 +121,86 @@ runner cleanup (including pending-task, async-generator, and default-executor
 shutdown), and `[PROCESS] main status=returning` is the final boundary before the
 CLI returns toward interpreter exit. A bounded thread line reports any live
 non-daemon threads that could still hold the process open.
+
+## Input editing and interrupts
+
+On an interactive terminal, Up/Down browse the last 500 nonblank commands from
+this console session without wrapping at the oldest entry. Down past the newest
+entry restores the unfinished draft. Recalled commands are editable copies;
+Enter submits the edited text and adds a new history entry. Spacing, quotes,
+Unicode, and repeated submissions are preserved. This history is private,
+memory-only, discarded on session exit, and has no model-facing API or new
+logging. It is separate from durable run browsing and conversation history.
+
+Left/Right, Home/End, Backspace, and Delete edit one logical input line. Long
+commands may wrap over screen rows; they remain one command, including while
+resizing the SSH terminal or receiving operator messages and runtime logs.
+Bracketed paste replaces pasted line breaks with spaces; there is no multiline
+syntax or multiline editor. `--no-color` and `NO_COLOR` disable styling while
+retaining the terminal controls needed to edit. When stdin or stdout is not a
+TTY, the original asynchronous plain line reader is used; redirected stdout
+receives no editor escape sequences.
+
+The default `--ctrl-c-shutdown auto` clears unfinished console input and resets
+history navigation. It never submits the draft or interrupts executing commands,
+cognition, Jobs, or the runtime. `--ctrl-c-shutdown enabled` requests graceful
+shutdown instead. `disabled` also keeps headless mode running on Ctrl+C. These
+values can be set as `ctrl_c_shutdown = "auto"` under `[runtime]` in TOML;
+explicit CLI overrides TOML, then defaults. `auto` enables shutdown without a
+console. `exit`, `quit`, EOF (Ctrl+D at an empty prompt), and SIGTERM retain
+graceful shutdown. Signal handlers remain installed through application cleanup,
+so repeated interrupts cannot escalate into asyncio's default interrupt handling.
+Task cancellation remains independent and propagates after cleanup.
+
+The interactive implementation uses `prompt_toolkit` 3's async API rather than
+custom raw-mode escape parsing, Unicode width calculations, and wrapped-row
+redrawing. It uses selector input, not blocking `input()` in an executor. Terminal
+mode, input readers, output routing, and previous signal handlers are restored
+on exit or failure. Matching terminal-bound Python stdout/stderr and the runtime's
+duplicated stderr logging handler use redraw-aware output. Redirected log/file
+streams retain their destinations. Native code or subprocesses writing directly
+to the terminal file descriptor bypass this Python routing and can still disturb
+the display; redraw with Ctrl+L if needed.
+
+The supported target is Python 3.13 on Linux/Raspberry Pi OS over a UTF-8,
+VT100-compatible SSH terminal with an accurate `TERM`. Display width for unusual
+emoji or combining sequences depends on terminal/font agreement with Unicode
+width tables. Terminals without cursor-position reports may use
+`PROMPT_TOOLKIT_NO_CPR=1` to suppress the library's capability warning. Windows
+console signal behavior is not covered by these Linux PTY tests.
+
+### Manual acceptance on the Pi over SSH
+
+Use an isolated foreground launch with virtual hardware; leave the live service
+alone. Install the project dependencies in the development virtual environment,
+then run `python main.py --hardware virtual --camera none --console --no-color`.
+
+1. Submit a long harmless command such as
+   `job add "SSH history check" --description "a deliberately long description with spaces and quotes to wrap across several rows"`
+   with Jobs disabled; the rejection is expected and does not create a Job.
+   Type a draft, press Up, edit within the recalled command with Left/Right,
+   Home/End, Backspace/Delete, and Enter. Recall again to verify the original
+   entry, and use Down to restore a draft. Include `café 界` to check UTF-8.
+2. Resize the SSH window while editing a recalled command. Keep the cursor in
+   its middle and check that typing inserts at that position. While a runtime
+   log or operator message arrives in an authorized development session, check
+   that text and cursor survive. Automated PTY tests inject both kinds of output
+   without requiring cognition, credentials, or hardware.
+3. Press Ctrl+C repeatedly on a draft, then submit `status`. Check that no draft
+   was submitted and the runtime still responds. In a development session with
+   an authorized cognition request running, repeat Ctrl+C and verify it finishes.
+4. Use `quit`, relaunch, and verify history is empty. Repeat with `exit` and with
+   Ctrl+D at an empty prompt; verify normal shell echo and cursor behavior.
+5. Relaunch with `--ctrl-c-shutdown enabled`; Ctrl+C should stop cleanly. Launch
+   with `--mode run` and no console; default Ctrl+C should also stop cleanly.
+   With `--mode run --ctrl-c-shutdown disabled`, Ctrl+C should leave it running;
+   send SIGTERM to that isolated PID to stop it.
+6. Run `printf 'status\nquit\n' | python main.py --hardware virtual --camera none --console --no-color > /tmp/console-check.txt`
+   and verify ordinary text with no editor escape sequences.
+
+Automated focused checks (the `test` extra adds the `pyte` screen emulator):
+`python -m pip install -e '.[test]'`, then
+`python -m unittest tests.test_terminal_editor tests.test_console_signals tests.test_console tests.test_configuration tests.test_runtime tests.test_interaction tests.test_logging_config tests.test_console_style tests.test_run_history`.
 
 With `--initiative-continuation`, `attention` additionally reports the latest
 continuation state, action, action status, and bounded response. The flag
