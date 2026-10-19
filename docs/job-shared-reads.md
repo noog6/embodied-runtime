@@ -160,7 +160,7 @@ below use fake providers and temporary stores.
 
 ```sh
 mkdir -p work
-python3.13 main.py --config config/shared-reads-pilot.toml
+python3.13 main.py --config config/experiments/shared-reads-pilot.toml
 ```
 
 The database resolves to `work/shared-reads-pilot.sqlite3`, with the existing

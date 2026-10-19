@@ -194,12 +194,12 @@ operator interaction's request reference.
 
 These commands are an **operator-invoked local pilot**, not changes to a deployed
 catalog. From the repository root, use Python 3.13 and create a separate virtual
-runtime configuration (`config/procedure-experiment.toml`) and catalog. The configured provider still needs its normal
+runtime configuration (`config/experiments/procedure-experiment.toml`) and catalog. The configured provider still needs its normal
 credentials and may charge for manual work; automated validation below needs none.
 
 ```sh
 mkdir -p work
-python3.13 main.py --config config/procedure-experiment.toml
+python3.13 main.py --config config/experiments/procedure-experiment.toml
 ```
 
 The configuration selects virtual hardware, disables actions/messages/earcons and

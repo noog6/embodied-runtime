@@ -22,6 +22,11 @@ may be supplied with `--config`; interactive setup prefers
 files. All service paths are absolute, and paths containing spaces are quoted
 as individual systemd command arguments.
 
+Only top-level `config/*.toml` files are discovered. Model alternatives are
+documented in [Mira deployment profiles](mira-profiles.md); experiments require
+an explicit `--config config/experiments/NAME.toml`. The reflective Job template
+is not a runtime configuration.
+
 The resolved runtime profile supplies the default service name and description
 (`mira.service` and `Mira Embodied Runtime`). `--service-name` accepts a
 conservative lowercase identifier. `--user` selects an existing non-root Unix
@@ -91,6 +96,7 @@ different revision. Updating the checkout remains an explicit operator action.
 Provider requirements are calculated from the effective launch:
 
 - OpenAI cognition, vision, or enabled OpenAI TTS requires `OPENAI_API_KEY`;
+- compatible cognition requires its configured `api_key_env`;
 - configured ordered vision requires each entry's `api_key_env`, deduplicated
   with other requirements; disabled vision contributes no variables;
 - enabled ElevenLabs TTS requires `ELEVENLABS_API_KEY`;

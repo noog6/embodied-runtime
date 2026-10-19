@@ -1,6 +1,4 @@
-# Ordinary-Job experiment; creates/schedules no Jobs at startup.
-# Uses Mira's existing catalog. Shut down its other runtime before launching.
-# These action/message restrictions apply to every Job in this runtime process.
+# Operator-invoked isolated pilot; startup creates no Job definitions.
 [runtime]
 profile = "mira"
 hardware = "virtual"
@@ -25,6 +23,6 @@ enabled = false
 
 [jobs]
 enabled = true
-database_path = "../data/jobs.sqlite3"
+database_path = "../../work/shared-reads-pilot.sqlite3"
 auto_continue = false
 shared_reads_enabled = true

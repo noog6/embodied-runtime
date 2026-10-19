@@ -1,0 +1,90 @@
+# Alternative Mira model profile; shared persistence and ElevenLabs voice.
+# Model/capability sources checked 2026-10-19; not live-tested. See docs/mira-profiles.md.
+[runtime]
+profile = "mira"
+hardware = "auto"
+camera = "auto"
+cognition = "openai-compatible"
+vision = "configured"
+mode = "console"
+timezone = "America/Toronto"
+
+[cognition.openai_compatible]
+model = "~x-ai/grok-latest"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+request_timeout_seconds = 60
+tool_calling = true
+image_input = true
+# The verified model metadata does not advertise parallel_tool_calls.
+# Mira still rejects multiple returned tool calls before executing any.
+parallel_tool_calls_mode = "omit"
+
+[vision]
+request_timeout_seconds = 60
+
+[[vision.backends]]
+backend = "openai-compatible"
+model = "~x-ai/grok-latest"
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+request_timeout_seconds = 60
+
+[interaction]
+environment = "workstation"
+
+[voice]
+enabled = true
+wake_word_enabled = true
+wake_words = ["mira", "mirror", "huh mirror"]
+tts = "elevenlabs"
+fallback_tts = "espeak"
+openai_tts_model = "gpt-4o-mini-tts"
+openai_tts_voice = "marin"
+elevenlabs_tts_model = "eleven_flash_v2_5"
+elevenlabs_tts_voice_id = "pFZP5JQG7iQjIQuC4Bku"
+elevenlabs_tts_speed = 1.1
+initial_timeout_seconds = 18
+followup_timeout_seconds = 12
+
+[earcons]
+enabled = true
+
+[initiative]
+enabled = true
+platform_attention = true
+actions = true
+messages = true
+continuation = true
+goal_closure = true
+
+[memory]
+enabled = true
+database_path = "../data/mira-memory.sqlite3"
+
+[conversation_history]
+enabled = true
+database_path = "../data/conversations.sqlite3"
+
+[jobs]
+enabled = true
+database_path = "../data/jobs.sqlite3"
+auto_continue = true
+heartbeat_seconds = 30
+max_auto_steps = 3
+max_concurrent_work = 4
+findings_context_selection_enabled = true
+# Opt in to bounded historical reads across this catalog; see docs/job-shared-reads.md.
+# shared_reads_enabled = true
+
+[power]
+interval_seconds = 30.0
+attention_voltage_v = 7.4
+recovery_voltage_v = 7.7
+
+[sms]
+enabled = false
+backend = "twilio"
+bind_host = "127.0.0.1"
+bind_port = 8080
+webhook_path = "/sms"

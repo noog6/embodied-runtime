@@ -17,6 +17,10 @@ console, and voice configuration, including the file-only local wake settings.
 It supplies launch values before existing application setup rather than adding
 implicit configuration discovery.
 
+For model-specific alternatives with explicit matching cognition/vision models,
+see [Mira deployment profiles](mira-profiles.md). Experimental runtime files and
+the reflective Job template live under `config/experiments/`.
+
 Mira's checked-in physical voice is ElevenLabs model `eleven_flash_v2_5`, voice
 ID `pFZP5JQG7iQjIQuC4Bku`, at speed `1.1`. Normal startup requires the optional
 ElevenLabs dependency and `ELEVENLABS_API_KEY` in the environment. The profile

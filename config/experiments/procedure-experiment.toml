@@ -1,4 +1,4 @@
-# Operator-invoked isolated pilot; startup creates no Job definitions.
+# Explicit local pilot: no Job is created until job procedure experiment is invoked.
 [runtime]
 profile = "mira"
 hardware = "virtual"
@@ -23,6 +23,5 @@ enabled = false
 
 [jobs]
 enabled = true
-database_path = "../work/shared-reads-pilot.sqlite3"
+database_path = "../../work/procedure-experiment.sqlite3"
 auto_continue = false
-shared_reads_enabled = true
