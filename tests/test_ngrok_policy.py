@@ -68,11 +68,13 @@ class NgrokPolicyTest(unittest.TestCase):
                 "capacity": capacity, "rate": "60s", "bucket_key": [json.dumps(name)],
             }})
         self.assertEqual(rules[1], {
-            "expressions": ["has(req.content_length) && req.content_length > 65536"],
+            "expressions": ["'content-length' in req.headers && req.content_length > 65536"],
             "actions": [{"type": "custom-response", "config": {"status_code": 413}}],
         })
         serialized = json.dumps(self.policy())
-        for forbidden in ("oauth", "req.headers", "req.url.raw", "on_http_response", "log"):
+        # A request-header map may guard Content-Length, but no namespace-level
+        # has() call may return: ngrok rejects it before starting the endpoint.
+        for forbidden in ("oauth", "has(req.", "req.url.raw", "on_http_response", "log"):
             self.assertNotIn(forbidden, serialized)
 
     def test_ambiguous_routes_and_injected_resource_names_are_rejected_without_echo(self):
