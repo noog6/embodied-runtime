@@ -135,9 +135,22 @@ class SmsInboundMessage:
 class MediaDownloadError(RuntimeError):
     """A Twilio media resource failed a bounded safety check."""
 
+    _LOG_REASONS = frozenset({
+        "invalid_media_url", "invalid_media_redirect", "media_auth_failed",
+        "media_not_found", "media_download_failed", "media_too_large",
+        "media_type_mismatch", "unsupported_media_type", "media_download_timeout",
+        "invalid_raster_image", "image_dimensions_exceed_limit", "retained_media_unavailable",
+    })
+
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+    @property
+    def log_reason(self) -> str:
+        # Providers/adapters can raise errors containing private URLs. Only
+        # fixed codes owned by this module may reach the operational log.
+        return self.reason if self.reason in self._LOG_REASONS else "invalid_or_oversized_media"
 
 
 class MediaDownloader(Protocol):
@@ -246,9 +259,14 @@ class TwilioMediaDownloader:
             raise MediaDownloadError("media_download_failed") from error
         if not _matches_magic(declared, data):
             raise MediaDownloadError("media_type_mismatch")
+        from embodied_runtime.jobs.workspace import WorkspaceQuotaError
         try:
             image = ImageAttachment(declared, data)
             image.raster_metadata()
+        except WorkspaceQuotaError as error:
+            # Encoded bytes are already bounded above. A raster quota failure
+            # here identifies the existing per-image dimension/pixel ceiling.
+            raise MediaDownloadError("image_dimensions_exceed_limit") from error
         except Exception as error:
             raise MediaDownloadError("invalid_raster_image") from error
         return image
@@ -789,6 +807,7 @@ class TwilioSmsService(OperatorMessageSink):
                         LOGGER.warning("[SMS] ingestion_state status=unavailable")
                 try:
                     for index, reference in enumerate(media_items):
+                        stage = "retained_lookup"
                         image = None
                         if self.media_store is not None:
                             try:
@@ -799,9 +818,12 @@ class TwilioSmsService(OperatorMessageSink):
                             except Exception:
                                 LOGGER.warning("[SMS] retained_attachment status=unavailable")
                         if image is None:
+                            stage = "download"
                             image = await self._media_downloader.download(reference)
+                            stage = "image_context"
                             image = image.with_context(source="sms", source_message_id=message.message_sid,
                                 attachment_index=index, received_at=received_at, label=f"attachment {index + 1}")
+                        stage = "validation"
                         if image.media_type != _normalized_media_type(reference.declared_media_type):
                             raise MediaDownloadError("media_type_mismatch")
                         self.image_limits.validate((*attachments, image), decode=True)
@@ -818,9 +840,12 @@ class TwilioSmsService(OperatorMessageSink):
                                     message.message_sid, index, image.media_type, len(image.data))
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as error:
                     self._forget(message.message_sid)
-                    LOGGER.info("[SMS] media message_sid=%s status=partial reason=invalid_or_oversized_media", message.message_sid)
+                    reason = (error.log_reason if isinstance(error, MediaDownloadError)
+                              else "invalid_or_oversized_media")
+                    LOGGER.info("[SMS] media message_sid=%s status=partial reason=%s attachment=%s stage=%s",
+                                message.message_sid, reason, index, stage)
                     await self._send_reply(message, MEDIA_FAILURE_REPLY)
                     continue
                 attachments = tuple(attachments)

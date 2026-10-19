@@ -787,6 +787,9 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
         cases = (
             (Context(media_type="image/png"), "media_type_mismatch"),
             (Context(data=b"not-a-jpeg"), "media_type_mismatch"),
+            (Context(data=raster(size=(4097, 1))), "image_dimensions_exceed_limit"),
+            (Context(data=raster(size=(2049, 2048))), "image_dimensions_exceed_limit"),
+            (Context(data=b"\xff\xd8\xffbroken"), "invalid_raster_image"),
             (TimeoutContext(), "media_download_timeout"),
             (Context(status=500), "media_download_failed"),
         )
@@ -811,9 +814,11 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
         )
         service._accepting = True
         service._worker = asyncio.create_task(service._run_worker())
-        self.assertEqual(service._accept_validated_form(media_form()).status, 200)
-        self.assertEqual(service._accept_validated_form(form("SM2", body="next")).status, 200)
-        await service._inbox.join()
+        with self.assertLogs("embodied_runtime.sms", level="INFO") as captured:
+            self.assertEqual(service._accept_validated_form(media_form()).status, 200)
+            self.assertEqual(service._accept_validated_form(form("SM2", body="next")).status, 200)
+            await service._inbox.join()
+        self.assertIn("reason=media_type_mismatch attachment=0 stage=download", "\n".join(captured.output))
         cognition.assert_awaited_once()
         self.assertEqual(cognition.await_args.args, ("next",))
         self.assertEqual(gateway.send.call_count, 2)
@@ -822,6 +827,39 @@ class TwilioMediaSafetyTests(unittest.IsolatedAsyncioTestCase):
             [MEDIA_FAILURE_REPLY, "plain answer"],
         )
         await service.stop()
+
+    async def test_media_failure_logs_only_fixed_codes_without_exception_or_url_values(self):
+        private = "https://private.invalid/outbound-media/private-bearer.jpg?credential=private-token"
+        cases = (
+            (MediaDownloadError("media_too_large"), "media_too_large"),
+            (MediaDownloadError("image_dimensions_exceed_limit"), "image_dimensions_exceed_limit"),
+            (MediaDownloadError("media_auth_failed"), "media_auth_failed"),
+            (MediaDownloadError(private), "invalid_or_oversized_media"),
+            (RuntimeError(private), "invalid_or_oversized_media"),
+        )
+        for error, reason in cases:
+            with self.subTest(reason=reason):
+                cognition = mock.AsyncMock()
+                downloader = types.SimpleNamespace(download=mock.AsyncMock(side_effect=error))
+                gateway = mock.Mock()
+                service = TwilioSmsService(settings(), cognition, gateway=gateway, media_downloader=downloader)
+                service._accepting = True
+                service._worker = asyncio.create_task(service._run_worker())
+                try:
+                    with self.assertLogs("embodied_runtime.sms", level="INFO") as captured:
+                        self.assertEqual(service._accept_validated_form(media_form()).status, 200)
+                        await asyncio.wait_for(service._inbox.join(), 2)
+                    logs = "\n".join(captured.output)
+                    self.assertIn(f"status=partial reason={reason} attachment=0 stage=download", logs)
+                    self.assertNotIn("private-", logs)
+                    self.assertNotIn("https://", logs)
+                    self.assertNotIn("Traceback", logs)
+                    cognition.assert_not_awaited()
+                    self.assertNotIn("SM1", service._accepted)
+                    gateway.send.assert_called_once()
+                    self.assertEqual(gateway.send.call_args.kwargs["body"], MEDIA_FAILURE_REPLY)
+                finally:
+                    await service.stop()
 
     async def test_shutdown_cancels_active_worker_and_never_starts_queued_work(self):
         entered = asyncio.Event()
