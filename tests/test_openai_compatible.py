@@ -25,7 +25,9 @@ from embodied_runtime.benchmarks.scenario import SCENARIOS, FRESH_RUNTIME_SCENAR
 from embodied_runtime.cli import build_cognition_backend, parse_launch_arguments, validate_launch_dependencies
 from embodied_runtime.cognition import CognitionError, CognitionToolDefinition, CognitionToolResult
 from embodied_runtime.cognition.factory import create_cognition_backend
-from embodied_runtime.cognition.openai_compatible import OpenAICompatibleBackend
+from embodied_runtime.cognition.openai_compatible import (
+    OpenAICompatibleBackend, POST_TOOL_RESPONSE_INSTRUCTIONS,
+)
 from embodied_runtime.cognition.openai_responses import OpenAIResponsesBackend
 from embodied_runtime.config import (
     ConfigurationError, OpenAICompatibleConfig, load_runtime_config,
@@ -263,7 +265,7 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
         initial, final = fake.requests
         self.assertEqual(initial["messages"][0]["content"], "old authority")
         self.assertEqual(final["messages"], [
-            {"role": "system", "content": "fresh authority"},
+            {"role": "system", "content": "fresh authority\n\n" + POST_TOOL_RESPONSE_INSTRUCTIONS},
             {"role": "user", "content": "original request"},
             {"role": "assistant", "content": None, "tool_calls": [call()], "reasoning_details": reasoning},
             {"role": "tool", "tool_call_id": "call-exact", "content": '{"status":"applied"}'},
@@ -281,6 +283,47 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
         await backend.respond("new request")
         self.assertEqual(fake.requests[-1]["messages"], [{"role": "user", "content": "new request"}])
         self.assertNotIn("parallel_tool_calls", fake.requests[-1])
+
+    async def test_final_stage_instruction_uses_post_execution_grounding_and_actual_result(self):
+        backend, fake, _ = self.make(response("direct answer"))
+        executor, refreshed = AsyncMock(), Mock()
+        self.assertEqual(await backend.respond(
+            "request", instructions="initial authority", tools=(TOOL,), tool_executor=executor,
+            refreshed_instructions=refreshed,
+        ), "direct answer")
+        executor.assert_not_awaited()
+        refreshed.assert_not_called()
+        self.assertEqual(len(fake.requests), 1)
+        self.assertNotIn("Current response stage", json.dumps(fake.requests[0]))
+        for endpoint, status in product((CONFIG.base_url, "https://compatible.example/v1"),
+                                        ("applied", "rejected")):
+            with self.subTest(endpoint=endpoint, status=status):
+                backend, fake, _ = self.make(response(None, calls=[call()]), response("assessment"),
+                                             config=replace(CONFIG, base_url=endpoint))
+                result = json.dumps({"status": status, "detail": "runtime evidence"})
+                state = "before execution"
+
+                async def execute(_call):
+                    nonlocal state
+                    state = "after execution: " + status
+                    return CognitionToolResult(result)
+
+                refreshed = Mock(side_effect=lambda: state)
+                self.assertEqual(await backend.respond(
+                    "request", instructions=state, tools=(TOOL,), tool_executor=execute,
+                    refreshed_instructions=refreshed,
+                ), "assessment")
+                refreshed.assert_called_once_with()
+                initial, final = fake.requests
+                self.assertEqual(initial["messages"][0]["content"], "before execution")
+                self.assertNotIn("Current response stage", json.dumps(initial))
+                self.assertEqual(final["messages"][0], {
+                    "role": "system", "content": state + "\n\n" + POST_TOOL_RESPONSE_INSTRUCTIONS,
+                })
+                self.assertEqual(final["messages"][-1], {
+                    "role": "tool", "tool_call_id": "call-exact", "content": result,
+                })
+                self.assertEqual(len(fake.requests), 2)
 
     async def test_omit_changes_only_parallel_parameter_on_both_tool_requests(self):
         requests = {}
@@ -387,6 +430,66 @@ class CompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
                     await backend.respond("test")
                 self.assertEqual(caught.exception.category, category)
                 self.assertEqual(observed.snapshot()["provider_calls"][0]["failure_category"], category)
+
+    async def test_rejected_final_tool_diagnostics_are_bounded_and_content_free(self):
+        calls = [call(), call("unoffered-secret"), call("private\nname"), call(["private-name"]),
+                 {"function": {"name": "effect"}}, None, call("x" * 1000), call("éffect")]
+        calls.extend(call("effect", arguments="private-arguments", call_id="private-id") for _ in range(100))
+        for finish, safe_finish, category in (
+            ("tool_calls", "tool_calls", "unexpected_tool_call"),
+            ("stop", "stop", "unexpected_tool_call"),
+            ("length", "length", "truncated"),
+            ("private-finish" * 1000, "<invalid>", "malformed_response"),
+        ):
+            with self.subTest(finish=safe_finish):
+                backend, fake, observed = self.make(response(None, calls=[call()]), response(
+                    "private-response", calls=calls, finish=finish,
+                    reasoning_details=[{"text": "private-reasoning"}],
+                ))
+                executor = AsyncMock(return_value=CognitionToolResult("{}"))
+                with self.assertLogs("embodied_runtime.cognition.openai_compatible", "WARNING") as logs:
+                    with self.assertRaises(CognitionError) as caught:
+                        await self.tool_request(backend, executor)
+                self.assertEqual(caught.exception.category, category)
+                self.assertEqual(len(logs.output), 1)
+                diagnostic = logs.output[0]
+                self.assertIn("provider_request=continuation rejected_final_tool_calls", diagnostic)
+                self.assertIn("finish_reason=" + safe_finish, diagnostic)
+                self.assertIn("tool_call_count=108", diagnostic)
+                self.assertIn("tool_names=" + repr(["effect"] + ["<invalid-or-unoffered>"] * 7), diagnostic)
+                self.assertIn("nonempty_text=True", diagnostic)
+                self.assertLess(len(diagnostic), 500)
+                self.assertNotIn("private", diagnostic)
+                self.assertNotIn("secret", diagnostic)
+                self.assertNotIn("reasoning", diagnostic)
+                executor.assert_awaited_once()
+                self.assertEqual(len(fake.requests), 2)
+                self.assertEqual(observed.snapshot()["provider_calls"][-1]["failure_category"], category)
+
+    async def test_rejected_final_tool_diagnostics_report_text_presence(self):
+        for content, present in ((None, False), (" \n", False), ("private-text", True)):
+            backend, _, _ = self.make(response(None, calls=[call()]), response(content, calls=[call()]))
+            with self.assertLogs("embodied_runtime.cognition.openai_compatible", "WARNING") as logs:
+                with self.assertRaises(CognitionError):
+                    await self.tool_request(backend)
+            self.assertIn(f"nonempty_text={present}", logs.output[0])
+            self.assertNotIn("private-text", logs.output[0])
+
+    async def test_final_tool_diagnostics_do_not_run_on_initial_rejection_or_mask_errors(self):
+        with patch("embodied_runtime.cognition.openai_compatible.LOGGER.warning") as warning:
+            backend, _, _ = self.make(response(None, calls=[call()]))
+            with self.assertRaises(CognitionError):
+                await backend.respond("no tools offered")
+            warning.assert_not_called()
+        backend, _, observed = self.make(response(None, calls=[call()]), response(None, calls=[call()]))
+        with patch("embodied_runtime.cognition.openai_compatible.LOGGER.warning",
+                   side_effect=RuntimeError("diagnostic handler failure")):
+            with self.assertRaises(CognitionError) as caught:
+                await self.tool_request(backend)
+        self.assertEqual(caught.exception.category, "unexpected_tool_call")
+        self.assertEqual(str(caught.exception), "Provider requested an additional or unoffered cognition tool")
+        self.assertEqual(observed.snapshot()["metrics"]["provider_requests"], 2)
+        self.assertEqual(observed.snapshot()["provider_calls"][-1]["failure_category"], "unexpected_tool_call")
 
     async def test_timeouts_cancellation_and_continuation_failure_never_repeat_effect(self):
         async def stall():
@@ -634,24 +737,26 @@ class CompatibleBenchmarkTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(fake.requests), 3)
 
     async def test_rejected_continuation_accounts_usage_in_runtime_and_benchmark(self):
-        prewarm_usage = {"prompt_tokens": 1_000, "completion_tokens": 500, "total_tokens": 1_500,
+        prewarm_usage = {"prompt_tokens": 1_000, "completion_tokens": 500, "total_tokens": 1_500, "cost": .5,
                          "prompt_tokens_details": {"cached_tokens": 200, "cache_write_tokens": 0}}
-        initial_usage = {**USAGE, "prompt_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 0}}
-        final_usage = {"prompt_tokens": 20, "completion_tokens": 7, "total_tokens": 27,
+        initial_usage = {**USAGE, "cost": .01, "prompt_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 0}}
+        final_usage = {"prompt_tokens": 20, "completion_tokens": 7, "total_tokens": 27, "cost": .02,
                        "prompt_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 0}}
+        write_call = call("workspace_write", json.dumps({
+            "path": "assessment.txt", "mode": "upsert", "content": "bounded",
+        }))
         malformed = response("unusable", usage=final_usage)
         malformed["choices"] = []
         for final, category in (
             (response("partial", finish="length", usage=final_usage), "truncated"),
             (response("refused", refusal="refused", usage=final_usage), "refused"),
             (malformed, "malformed_response"),
+            (response("extra request", calls=[write_call], usage=final_usage), "unexpected_tool_call"),
         ):
             with self.subTest(category=category):
                 fake = FakeCompletions(
                     response("ready", usage=prewarm_usage),
-                    response(None, calls=[call("workspace_write", json.dumps({
-                        "path": "assessment.txt", "mode": "upsert", "content": "bounded",
-                    }))], usage=initial_usage), final,
+                    response(None, calls=[write_call], usage=initial_usage), final,
                 )
                 backend = OpenAICompatibleBackend(config=CONFIG, client=client(fake))
                 trial = await run_trial(backend, CONFIG.model, 1)
@@ -663,8 +768,13 @@ class CompatibleBenchmarkTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((trial.metrics.input_tokens, trial.metrics.output_tokens,
                                   trial.metrics.cached_input_tokens), (30, 10, 7))
                 self.assertEqual(trial.provider_calls[-1]["status"], "failed")
+                self.assertEqual(trial.provider_calls[-1]["stage"], "continuation")
+                self.assertEqual(trial.provider_calls[-1]["failure_category"], category)
                 self.assertEqual(trial.provider_calls[-1]["usage"]["total_tokens"], 27)
+                self.assertEqual(trial.cost_basis, "reported")
+                self.assertEqual(trial.cost_usd, "0.030000")
                 snapshot = backend.observability.snapshot()
+                self.assertEqual(snapshot["cost"]["total_usd"], "0.530000")
                 metrics = snapshot["metrics"]
                 self.assertEqual(metrics["provider_requests"], 3)
                 self.assertEqual(metrics["provider_failures"], 1)
@@ -679,8 +789,13 @@ class CompatibleBenchmarkTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(usage["duration_ms"], metrics["provider_duration_ms"])
                 self.assertEqual(len(fake.requests), 3)
                 self.assertEqual(len(trial.tool_trace), 1)
+                self.assertEqual(trial.tool_trace[0].name, "workspace_write")
                 self.assertEqual(trial.tool_trace[0].status, "applied")
                 self.assertEqual(trial.metrics.effect_tool_calls, 1)
+                confirmed = json.loads(trial.tool_trace[0].result)
+                self.assertTrue(confirmed["published"])
+                self.assertTrue(confirmed["durability_confirmed"])
+                self.assertEqual(fake.requests[-1]["messages"][-1]["content"], trial.tool_trace[0].result)
 
     async def test_continuation_timeout_accounts_attempt_and_marks_usage_unknown(self):
         fake = FakeCompletions(
