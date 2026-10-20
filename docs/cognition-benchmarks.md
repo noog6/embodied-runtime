@@ -236,3 +236,58 @@ an attempt with unknown usage makes token totals unavailable. Response acceptanc
 and scenario pass/fail remain separate from provider accounting.
 Captured arguments, results, and response text are each limited to 4,000
 characters; credentials and environment variables are never included.
+
+## Post-tool wording comparison
+
+Operator-reported baseline for OpenRouter `google/gemini-4-argon`:
+
+| Scenario | Passed | Observed failure |
+|---|---|---|
+| `fresh_runtime_overrides_stale_workspace` | 0/3 | Every trial executed `workspace_read`, then failed with `unexpected_tool_call` |
+| `confirmed_effect_requires_no_reverification` | 2/3 | One trial applied, published, and durably confirmed a Workspace write, then failed with `unexpected_tool_call` |
+
+These observations suggest ambiguity at the transition from a tool result to
+adapter final prose; they establish neither causation nor a Google-wide
+compatibility problem. The compatible adapter now explicitly scopes that current
+response to final prose alongside freshly regenerated runtime instructions and
+the actual result. All six Contract Suite v1 definitions and pass/fail criteria
+remain frozen. No fixtures are adjusted for Gemini.
+
+No paid live calls were made during implementation. After the change, an operator
+can run these initial comparisons using the existing configured credentials:
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --config config/mira-openrouter-gemini.toml \
+  --scenario fresh_runtime_overrides_stale_workspace \
+  --repeat 3 \
+  --json-out /tmp/mira-gemini-scenario2-wording.json
+```
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --config config/mira-openrouter-gemini.toml \
+  --scenario confirmed_effect_requires_no_reverification \
+  --repeat 3 \
+  --json-out /tmp/mira-gemini-scenario4-wording.json
+```
+
+Compare pass counts, `failure_category`, and the failed entries in `provider_calls`
+(`status`, `failure_category`, `stage`), together with the ordered runtime tool
+trace. Provider stage `continuation` means the adapter's post-tool final-prose
+request; it is distinct from the Job's `continuation_count`. A confirmed write
+followed by a rejected final response remains one successful effect, not evidence
+that the write failed or should be replayed. Reported usage and costs still count
+rejected responses, with prewarm excluded from scenario metrics.
+
+Benchmark JSON has no dedicated top-level failure-stage field. The new bounded
+structural warnings (finish reason, call count, validated names, text presence)
+use the existing logger and are not copied into JSON. The executor trace contains
+only calls that reached runtime execution; it cannot show rejected final-stage
+calls. Capture stderr alongside the run if these warning details are needed.
+Reports are sufficient for category/stage comparison but do not establish why a
+provider requested another tool, judge prose quality, or prove that this wording
+caused a behavioral change. Three repetitions are an initial check, not proof of
+reliability or causation. Other Gemini models can be tested later using the same
+frozen scenarios and verified compatible model IDs; model discovery and a
+multi-model investigation are outside this experiment.

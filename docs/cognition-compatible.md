@@ -225,6 +225,29 @@ Tool schemas remain on the final request for router validation while tools are
 disabled. OpenRouter requests require parameter support and disable provider
 fallbacks; an unsupported parameter must fail instead of being silently ignored.
 
+The compatible adapter appends an authoritative **current response stage** block
+to those freshly regenerated instructions only after the runtime tool returns.
+It requires brief final prose grounded in the actual result and current context,
+preserves uncertainty and failure, and forbids further calls in that response.
+Further acquisition or action requires a separate runtime-authorized decision;
+the instruction promises no future opportunity. Ending adapter prose does not
+itself complete the overall Job. This wording applies to every compatible model;
+direct OpenAI Responses behavior is unchanged. The existing final request retains
+its schemas and `tool_choice="none"`, and unexpected calls still fail without
+execution, retry, or recovery. Confirmed effects and rejected-response accounting
+remain intact.
+
+Rejected final responses containing tool calls emit one best-effort warning through
+the existing cognition logger: an allow-listed finish reason (otherwise
+`<invalid>`), total call count, at most eight tool names, and whether nonempty
+plain text was also present. Names must match an offered schema and the 1–64
+character ASCII function-name syntax; malformed or unoffered names become
+`<invalid-or-unoffered>`. Arguments, text, reasoning, call IDs, and response bodies
+are excluded. Diagnostic extraction or logging failures cannot replace the
+original rejection. These structural details are log-only; benchmark report
+limitations and the live wording comparison are documented in
+[cognition benchmarks](cognition-benchmarks.md#post-tool-wording-comparison).
+
 Official requirements checked against OpenRouter documentation on 2026-10-12:
 [OpenAI SDK setup](https://openrouter.ai/docs/guides/community/openai-sdk),
 [client tools and continuation schemas](https://openrouter.ai/docs/guides/features/tool-calling),

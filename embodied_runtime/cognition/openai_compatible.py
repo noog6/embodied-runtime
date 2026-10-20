@@ -7,6 +7,7 @@ from copy import deepcopy
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -25,6 +26,15 @@ from .provider_diagnostics import endpoint_identity, failure_category
 
 LOGGER = logging.getLogger(__name__)
 SDK_MAX_RETRIES = 0
+POST_TOOL_RESPONSE_INSTRUCTIONS = (
+    "Current response stage: post-tool final prose (governs this response).\n"
+    "The preceding tool call has completed. No further tool calls are permitted in this response. "
+    "Return a brief textual assessment based on the tool result and current runtime context, "
+    "preserving any uncertainty or failure. Do not claim actions beyond what the result confirms. "
+    "Any further acquisition or action requires a separate runtime-authorized decision; "
+    "do not request or execute it now. This final prose ends only this adapter response; "
+    "it does not itself complete the overall Job."
+)
 
 
 def _field(owner: Any, name: str, default: Any = None) -> Any:
@@ -117,6 +127,8 @@ class OpenAICompatibleBackend(TextCognitionBackend):
             raise
         except CognitionError as error:
             caught = error
+            if final:
+                self._log_rejected_final_tool_calls(response, tools or [])
             raise
         except Exception as error:
             caught = error
@@ -158,6 +170,42 @@ class OpenAICompatibleBackend(TextCognitionBackend):
                     protocol=self.protocol, endpoint=self.endpoint, returned_model=returned,
                     reported_cost_usd=openrouter_cost(response, base_url=self.config.base_url),
                 )
+
+    @staticmethod
+    def _log_rejected_final_tool_calls(response: Any, tools: list[dict[str, Any]]) -> None:
+        """Best-effort structural evidence; never emit provider content or mask rejection."""
+        try:
+            choices = _field(response, "choices")
+            if not isinstance(choices, list) or len(choices) != 1:
+                return
+            choice = choices[0]
+            message = _field(choice, "message")
+            calls = _field(message, "tool_calls")
+            if not isinstance(calls, list) or not calls:
+                return
+            finish = _field(choice, "finish_reason")
+            if not isinstance(finish, str) or finish not in (
+                "stop", "tool_calls", "length", "content_filter", "function_call",
+            ):
+                finish = "<invalid>"
+            offered = {tool["function"]["name"] for tool in tools}
+            names = []
+            # Bound both inspection and output, regardless of the rejected call count.
+            for call in calls[:8]:
+                name = _field(_field(call, "function"), "name")
+                names.append(name if (
+                    _field(call, "type") == "function" and isinstance(name, str)
+                    and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) and name in offered
+                ) else "<invalid-or-unoffered>")
+            content = _field(message, "content")
+            LOGGER.warning(
+                "[COGNITION] provider_request=continuation rejected_final_tool_calls "
+                "finish_reason=%s tool_call_count=%s tool_names=%s nonempty_text=%s",
+                finish, len(calls), names, isinstance(content, str) and bool(content.strip()),
+            )
+        except Exception:
+            # Diagnostics (including logging handlers) cannot replace the original error.
+            pass
 
     @staticmethod
     def _decode(response: Any, *, allow_tool: bool) -> tuple[str | None, dict[str, Any] | None]:
@@ -262,10 +310,10 @@ class OpenAICompatibleBackend(TextCognitionBackend):
         result = await tool_executor(CognitionToolCall(
             call["function"]["name"], call["function"]["arguments"],
         ))
-        # Rebuild, replacing the entire stale instruction message. No provider
-        # session ID, prompt history, reasoning block, or tool result survives.
+        # Replace stale grounding and scope the current response to final prose.
+        # Only this request's user message, assistant call/metadata, and result continue.
         continuation = [
-            {"role": "system", "content": refreshed_instructions()}, original,
+            {"role": "system", "content": refreshed_instructions() + "\n\n" + POST_TOOL_RESPONSE_INSTRUCTIONS}, original,
             assistant, {"role": "tool", "tool_call_id": call["id"], "content": result.output},
         ]
         text, _ = await self._request("continuation", continuation, tools=provider_tools, final=True)
