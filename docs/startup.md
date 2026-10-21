@@ -6,6 +6,56 @@ zero. Console and diagnostics modes remain operator-facing alternatives. The
 **Startup Wizard** only deploys and manages that process; the runtime does not
 know that systemd is its parent.
 
+## Python environment setup
+
+The service wizard does not install Python dependencies. Before deploying a
+service, prepare the environment from the checkout with Python 3.13 or later:
+
+```sh
+python3.13 scripts/setup_environment.py --config config/mira-agentic.toml
+source .venv/bin/activate
+```
+
+Replace the config path with the file for your robot (for example,
+`config/theo-agentic.toml` with its matching `profiles/theo.toml`). The helper
+creates `.venv` if absent and reuses an existing venv without clearing it.
+`--venv PATH` selects a different environment. Config paths are relative to the
+calling directory; the default venv is always in the script's checkout.
+
+The helper installs the editable core package, resolves the configuration using
+the runtime's own defaults, checks the robot profile, and installs only selected
+provider extras. Both OpenAI and compatible cognition, and all current vision
+backends, need the `openai` extra. Enabled voice selects its TTS extra; SMS selects
+`twilio` (including aiohttp). Add `--with-sms` when the service will launch with
+the matching SMS override. Disabled capabilities do not install provider extras.
+Rerun setup after changing those selections; it does not remove old packages.
+
+For a new Pi venv that needs OS-installed Picamera2 or HAT libraries, explicitly
+add `--system-site-packages` on its first creation. Existing environments retain
+their original policy; the helper refuses to change that policy implicitly.
+It does not install OS packages, vendor libraries, audio tools, Piper model
+files, credentials, services, or camera overlays. Follow the hardware and voice
+setup guides for those dependencies.
+
+Verify an existing installation without installing packages:
+
+```sh
+python3.13 scripts/setup_environment.py --config config/mira-agentic.toml --check
+```
+
+Checks run in the selected venv: `pip check`, core/provider imports, and offline
+OpenAI asynchronous client construction with a dummy key. They make no provider
+requests and do not verify real credentials, physical hardware, or service
+health. A missing/broken dependency returns a nonzero exit status. No robot
+process is started and no run history is created.
+
+For a quick repair in an already active venv, install the declared extra rather
+than an unbounded SDK version:
+
+```sh
+python -m pip install -e '.[openai]'
+```
+
 ## Discover and review an installation
 
 Run the wizard from any working directory:
