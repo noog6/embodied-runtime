@@ -8,7 +8,20 @@ episodes connect Jobs, evidence, memory, durable artifacts, and communication.
 
 ## Run the scaffold
 
-Python 3.13 or later is required. From a fresh checkout, run:
+Python 3.13 or later is required. Install the checkout and the provider extras
+needed by your chosen configuration first:
+
+```console
+python3.13 scripts/setup_environment.py --config config/mira-agentic.toml
+source .venv/bin/activate
+```
+
+Use your robot's configuration path instead for a custom deployment. The command
+creates or reuses `.venv`, checks the selected provider imports, and never starts
+the runtime. See [environment setup](docs/startup.md#python-environment-setup)
+for Pi system packages, SMS, and read-only verification.
+
+Then run:
 
 ```console
 python main.py
