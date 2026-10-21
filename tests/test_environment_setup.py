@@ -59,6 +59,29 @@ class EnvironmentSetupTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][1:], ["-m", "pip", "check"])
         verify.assert_called_once_with(["elevenlabs", "openai"])
 
+    def test_credentials_only_skips_pip_and_dependency_checks(self):
+        with patch("embodied_runtime.environment_setup.subprocess.run") as run, \
+                patch("embodied_runtime.environment_setup.verify_imports") as verify, \
+                patch("embodied_runtime.credentials.setup_openai_credentials",
+                      return_value={"OPENAI_API_KEY": "test-placeholder-key"}) as setup:
+            configure_environment(ROOT / "config/mira-agentic.toml", credentials_only=True)
+        run.assert_not_called()
+        verify.assert_not_called()
+        setup.assert_called_once()
+
+    def test_credentials_only_reports_unresolved_missing_key(self):
+        with patch("embodied_runtime.credentials.setup_openai_credentials", return_value={}):
+            with self.assertRaisesRegex(SystemExit, "still missing"):
+                configure_environment(ROOT / "config/mira-agentic.toml", credentials_only=True)
+
+    def test_check_never_prompts_for_credentials(self):
+        with patch("embodied_runtime.environment_setup.subprocess.run"), \
+                patch("embodied_runtime.environment_setup.verify_imports"), \
+                patch("embodied_runtime.credentials.setup_openai_credentials") as setup, \
+                redirect_stdout(io.StringIO()):
+            configure_environment(ROOT / "config/mira-agentic.toml", check_only=True)
+        self.assertIs(setup.call_args.kwargs["interactive"], False)
+
     def test_broken_import_fails_check(self):
         with patch("embodied_runtime.environment_setup.importlib.import_module",
                    side_effect=ImportError("missing dependency")):

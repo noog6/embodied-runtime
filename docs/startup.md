@@ -43,6 +43,25 @@ Verify an existing installation without installing packages:
 python3.13 scripts/setup_environment.py --config config/mira-agentic.toml --check
 ```
 
+Normal interactive setup also offers to configure a missing `OPENAI_API_KEY`
+when the selected config needs it, with hidden entry, protected storage, and an
+optional source line in `~/.bashrc`. Existing keys are preserved. No key is
+printed or validated against a provider. Source the printed file in your current
+terminal before launching. See [credential setup](secrets.md#set-up-local-storage-and-delivery).
+
+To configure credentials independently of dependency checks (including on a
+machine with an unresolved wheel-tag check):
+
+```sh
+python scripts/setup_environment.py --config config/mira-agentic.toml --credentials-only
+source ~/.config/embodied-runtime/openai.env
+```
+
+`--credentials-only` needs an existing venv and core dependencies; it runs no pip
+commands. Add `--replace-openai-key` to explicitly replace an existing key.
+`--check` is read-only and never prompts. Missing-key reports describe what to
+do next; the Python environment's dependency status is separate from credentials.
+
 Checks run in the selected venv: `pip check`, core/provider imports, and offline
 OpenAI asynchronous client construction with a dummy key. They make no provider
 requests and do not verify real credentials, physical hardware, or service

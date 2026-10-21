@@ -20,6 +20,9 @@ Use your robot's configuration path instead for a custom deployment. The command
 creates or reuses `.venv`, checks the selected provider imports, and never starts
 the runtime. See [environment setup](docs/startup.md#python-environment-setup)
 for Pi system packages, SMS, and read-only verification.
+Interactive setup can also collect a missing OpenAI key using protected local
+storage and offer automatic loading in future Bash terminals. Follow the printed
+`source` command for the current terminal; see [API key setup](docs/secrets.md).
 
 Then run:
 

@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from embodied_runtime.images import ImageCollection, ImageInput, ImageLimits, JOINT_IMAGE_INSTRUCTIONS
+from embodied_runtime.cognition.provider_diagnostics import cognition_setup_guidance
 from embodied_runtime.conversation_media import ConversationMediaStore, MediaUnavailableError
 from embodied_runtime.body.base import BodyBackend
 from embodied_runtime.attention import (
@@ -4151,11 +4152,13 @@ class RobotApplication:
                 )
                 try:
                     await backend.prepare()
-                except CognitionError:
+                except CognitionError as error:
+                    category, guidance = cognition_setup_guidance(backend, error)
                     LOGGER.info(
-                        "[COGNITION] backend=%s preparation=failed status=degraded",
-                        backend.identifier,
+                        "[COGNITION] backend=%s preparation=failed status=degraded reason=%s",
+                        backend.identifier, category,
                     )
+                    LOGGER.warning("[COGNITION] setup_help=%s", guidance)
                 else:
                     LOGGER.info(
                         "[COGNITION] backend=%s preparation=ready", backend.identifier

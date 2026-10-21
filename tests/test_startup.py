@@ -789,6 +789,21 @@ api_key_env="COGNITION_ROUTER_KEY"
         self.assertIn("sudo systemctl restart mira.service", output.getvalue())
         command.assert_not_called()
 
+    def test_interactive_key_setup_reaches_explicit_service_capture(self) -> None:
+        deployment = self.deployment(config=self.config(cognition="openai-responses"))
+        output = io.StringIO()
+        with patch("embodied_runtime.startup.build_deployment", return_value=deployment), \
+                patch("embodied_runtime.startup.pwd.getpwuid", return_value=SimpleNamespace(pw_name="robot")), \
+                patch("embodied_runtime.startup.setup_openai_credentials",
+                      return_value={"OPENAI_API_KEY": "dummy-captured"}) as setup, \
+                patch("embodied_runtime.startup.install", return_value=InstallResult("installed")) as install_call, \
+                patch("builtins.input", side_effect=["y", "y", "n"]), redirect_stdout(output):
+            self.assertEqual(wizard_main([], script_path=self.root / "wizard.py", environ={}), 0)
+        setup.assert_called_once_with(deployment.launch, environ={})
+        self.assertTrue(install_call.call_args.args[0].capture_env)
+        self.assertEqual(install_call.call_args.kwargs["environ"]["OPENAI_API_KEY"], "dummy-captured")
+        self.assertNotIn("dummy-captured", output.getvalue())
+
     def test_interactive_inactive_service_keeps_start_prompt(self) -> None:
         deployment = self.deployment()
         output = io.StringIO()
