@@ -284,6 +284,18 @@ class CognitionApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(backend.requests), 1)
         await app.stop()
 
+    async def test_missing_key_startup_logs_actionable_secret_free_guidance(self):
+        backend = PreparingCognition(CognitionUnavailableError("secret-provider-detail", category="missing_credentials"))
+        app = self.make_application(backend)
+        with self.assertLogs("embodied_runtime.app", "INFO") as logs:
+            await app.start()
+        rendered = "\n".join(logs.output)
+        self.assertIn("reason=missing_credentials", rendered)
+        self.assertIn("OPENAI_API_KEY", rendered)
+        self.assertIn("--credentials-only", rendered)
+        self.assertNotIn("secret-provider-detail", rendered)
+        await app.stop()
+
     async def test_unexpected_preparation_failure_stops_startup(self):
         backend = PreparingCognition(RuntimeError("programming defect"))
         app = self.make_application(backend)
@@ -607,6 +619,27 @@ class FakeResponses:
 
 
 class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        environment = patch.dict(os.environ, {"OPENAI_API_KEY": "test-placeholder-key"})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_missing_key_is_explicit_and_never_constructs_client(self):
+        openai = ModuleType("openai")
+        openai.AsyncOpenAI = lambda: self.fail("Missing key must not construct a client")
+        for key in ("", "   "):
+            with patch.dict(os.environ, {"OPENAI_API_KEY": key}), patch.dict(sys.modules, {"openai": openai}):
+                with self.assertRaises(CognitionUnavailableError) as caught:
+                    OpenAIResponsesBackend()._get_client()
+            self.assertEqual(caught.exception.category, "missing_credentials")
+            self.assertIn("--credentials-only", str(caught.exception))
+
+    def test_missing_sdk_has_its_own_category(self):
+        with patch.dict(sys.modules, {"openai": None}):
+            with self.assertRaises(CognitionUnavailableError) as caught:
+                OpenAIResponsesBackend()._get_client()
+        self.assertEqual(caught.exception.category, "missing_dependency")
+
     async def test_excess_images_fail_before_provider_request(self):
         responses = FakeResponses()
         backend = OpenAIResponsesBackend(client=SimpleNamespace(responses=responses))

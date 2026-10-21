@@ -71,13 +71,13 @@ class OpenAICompatibleBackend(TextCognitionBackend):
             except ImportError:
                 raise CognitionUnavailableError(
                     "Compatible cognition requires the 'openai' optional dependency",
-                    category="unavailable",
+                    category="missing_dependency",
                 ) from None
             key = os.environ.get(self.config.api_key_env)
             if not key or not key.strip():
                 raise CognitionUnavailableError(
                     f"Compatible cognition credential environment variable {self.config.api_key_env} is missing or empty",
-                    category="authentication",
+                    category="missing_credentials",
                 )
             try:
                 self._client = AsyncOpenAI(

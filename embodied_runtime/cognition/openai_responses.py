@@ -20,7 +20,7 @@ from embodied_runtime.cognition.base import (
 from embodied_runtime.observability import RunObservability
 from embodied_runtime.attachments import ImageAttachment
 from embodied_runtime.images import ImageLimits, JOINT_IMAGE_INSTRUCTIONS
-from embodied_runtime.cognition.provider_diagnostics import endpoint_identity, failure_category
+from embodied_runtime.cognition.provider_diagnostics import endpoint_identity, failure_category, cognition_setup_guidance
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 PREWARM_INPUT = "Reply ready."
@@ -59,7 +59,8 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         except CognitionError:
             raise
         except Exception as error:
-            raise CognitionError("OpenAI Responses preparation failed", category=failure_category(error)) from None
+            category, guidance = cognition_setup_guidance(self, error)
+            raise CognitionError("OpenAI Responses preparation failed: " + guidance, category=category) from None
 
     def _get_client(self) -> Any:
         if self._client is not None:
@@ -70,14 +71,24 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         except ImportError as error:
             self._log_client_init("failed", started)
             raise CognitionUnavailableError(
-                "OpenAI cognition is unavailable; install the 'openai' optional dependency"
+                "OpenAI SDK is not installed or could not load; run python -m pip install -e '.[openai]'",
+                category="missing_dependency",
             ) from None
+        if not os.environ.get("OPENAI_API_KEY", "").strip():
+            self._log_client_init("failed", started)
+            raise CognitionUnavailableError(
+                "OPENAI_API_KEY is missing or empty in this process. Run "
+                "python scripts/setup_environment.py --config YOUR_CONFIG --credentials-only, "
+                "then source ~/.config/embodied-runtime/openai.env before restarting.",
+                category="missing_credentials",
+            )
         try:
             self._client = AsyncOpenAI()
         except Exception as error:
             self._log_client_init("failed", started)
             raise CognitionUnavailableError(
-                "OpenAI cognition is unavailable; check OPENAI_API_KEY"
+                "OpenAI client initialization failed; check the SDK installation, proxy and endpoint settings",
+                category="client_initialization",
             ) from None
         self._log_client_init("completed", started)
         return self._client
@@ -277,7 +288,8 @@ class OpenAIResponsesBackend(TextCognitionBackend):
         except CognitionError:
             raise
         except Exception as error:
-            raise CognitionError("OpenAI Responses request failed", category=failure_category(error)) from None
+            category, guidance = cognition_setup_guidance(self, error)
+            raise CognitionError("OpenAI Responses request failed: " + guidance, category=category) from None
 
     @staticmethod
     def _provider_tool(tool: CognitionToolDefinition) -> dict[str, Any]:

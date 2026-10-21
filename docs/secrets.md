@@ -20,6 +20,54 @@ setting outside the Git checkout at:
 
 ## Set up local storage and delivery
 
+The environment setup helper can collect a missing OpenAI key interactively:
+
+```sh
+python scripts/setup_environment.py --config config/mira-agentic.toml --credentials-only
+source ~/.config/embodied-runtime/openai.env
+```
+
+Use your own robot's config path, such as `config/v6-agentic.toml`. Run as the
+non-root user who launches the runtime. `--credentials-only` uses the existing
+venv and skips pip entirely, including `pip check`; it does not certify that
+dependencies work. Normal dependency setup also offers credential entry once
+its dependency checks pass. `--check` reports presence without prompting or
+writing files. Unattended runs never ask for a key.
+
+When the selected config needs `OPENAI_API_KEY` and it is missing or empty,
+the helper offers hidden terminal entry, creates the private directory below
+with mode 700, and saves a shell-quoted export in a mode-600 file. Blank entry
+cancels. An existing protected key file can be loaded for setup without
+retyping the key. The helper never prints the key or sends it to a provider;
+presence and offline client construction do not prove that it is valid.
+
+An existing environment key is preserved. To explicitly replace it (for example
+after a provider authentication failure):
+
+```sh
+python scripts/setup_environment.py --config config/mira-agentic.toml --credentials-only --replace-openai-key
+source ~/.config/embodied-runtime/openai.env
+```
+
+Replacement requires an interactive terminal and confirmation before overwriting
+a saved file. Restart any running runtime/service after updating its credential
+delivery. Provider authentication/access failures can also mean project or model
+permissions, so replacing a key is not always the right fix.
+
+The helper separately offers to add one guarded source line to `~/.bashrc`.
+The key stays in the protected file; repeated setup does not duplicate the
+line. It loads the file in future interactive Bash shells only when the variable
+is unset or empty. Python cannot export into its parent terminal: **run the
+printed `source` command once in the current terminal**, even after accepting
+the Bash option. This optional shell setup is independent of systemd delivery.
+
+The interactive service Startup Wizard offers the same key setup when configuring
+a service for the invoking non-root account. Existing confirmation for capturing
+required variables into the service environment still applies. Other provider
+credentials retain their documented setup procedures.
+
+Manual setup is also supported:
+
 Create a private configuration directory and edit the secret file:
 
 ```sh
@@ -140,7 +188,7 @@ OpenAI fallback client.
   its account or process is compromised. Local file permissions are useful
   protection, not magic encryption.
 
-## Why not `~/.bashrc`?
+## Optional `~/.bashrc` delivery
 
 Putting an `export OPENAI_API_KEY=...` setting directly in `~/.bashrc` works,
 but it is less desirable for this project. Every interactive shell then
@@ -148,7 +196,8 @@ inherits the credential, while `.bashrc` is general-purpose configuration that
 is more commonly copied, inspected, or shared during troubleshooting. A
 dedicated protected file makes its ownership and purpose clearer and lets the
 operator source it only when needed. This does not mean `.bashrc` is inherently
-insecure; it is simply not the preferred embodied-runtime procedure.
+insecure. For operators who want automatic loading, the setup helper can add
+a source reference to the protected file instead of embedding the key itself.
 
 ## Why not a repository `.env` file?
 

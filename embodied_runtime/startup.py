@@ -19,6 +19,7 @@ from typing import Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from embodied_runtime.cli import parse_launch_arguments, validate_launch_dependencies
+from embodied_runtime.credentials import setup_openai_credentials
 from embodied_runtime.config import ConfigurationError, LaunchConfiguration
 from embodied_runtime.ngrok_policy import build_traffic_policy, validate_policy_settings
 from embodied_runtime.profile import ProfileLoadError, RobotProfile, load_profile
@@ -952,9 +953,13 @@ def wizard_main(
                     ngrok_twilio_vault=vault, ngrok_twilio_secret=secret,
                     interactive=True, environ=environ,
                 )
+            # Shell key setup is for the invoking non-root account. Service
+            # capture below still requires its existing explicit confirmation.
+            if deployment.user == pwd.getpwuid(os.getuid()).pw_name:
+                environ = setup_openai_credentials(deployment.launch, environ=environ)
             _print_summary(deployment, environ)
             if not input("\nInstall service? [y/N] ").strip().lower().startswith("y"):
-                print("No changes made.")
+                print("No service changes made.")
                 return 0
             if deployment.with_ngrok:
                 capture_prompt = (
