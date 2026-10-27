@@ -50,17 +50,18 @@ tool or image behavior Mira requires. Start the local console with:
 python main.py --cognition openai-responses --console
 ```
 
-Add `--initiative` for bounded goal-directed initiative. It may provide one
+Add `--initiative` for bounded goal-directed initiative. It may provide up to two
 read-only `inspect_self`, `observe_scene`, `recall_memory`, or
 `inspect_run_history` acquisition where available, plus
 the single bounded `schedule_followup` semantic effect. Historically initiative
 used exactly `tools=()`; that description is no longer current.
 `--initiative-actions` independently offers `orient_body` on a nonphysical body.
-`--initiative-messages --console` offers the transport-neutral
-`address_operator(message)` capability, with the console as today's concrete
-operator channel. A statement or question is delivered once and never waits for
+`--initiative-messages` offers the transport-neutral
+`address_operator(message)` capability with a configured console or SMS delivery
+route; headless SMS operation is supported. A statement or question is delivered once and never waits for
 a reply. With both permissions the adapter may receive both definitions, while
-`RobotApplication` independently enforces one capability request total.
+`RobotApplication` independently enforces at most one semantic effect without
+continuation, separately from the two acquisition attempts.
 
 `--initiative-goal-closure` requires only initiative; scheduling supplies the
 base policy's semantic effect without action or message permission. One actually
@@ -93,7 +94,10 @@ The application also explicitly renders up to six prior completed cognition
 interactions as a separate working-memory section. This session-local FIFO is
 bounded and volatile; historical text is quoted as data, while the current
 operator request, operator instructions, and fresh Runtime context have
-precedence. Clearing memory or restarting the process removes this continuity.
+precedence. Clearing WorkingMemory or restarting removes this volatile FIFO. When configured,
+[conversation history](conversation-history.md) supplies separate durable continuity,
+and [persistent memory](persistent-memory.md) supports bounded deliberate recall
+and admission; neither is a retained provider session.
 The provider still has no cross-request conversation or retained session.
 Each retained turn carries its application-captured completion time. A small
 bounded observation projection separately retains acquisition/sample time for
@@ -161,10 +165,12 @@ request is ordinal 2 with `cold=false`.
 Request lines include character/tool counts and public numeric token usage when
 the SDK supplies it; they never include prompt, result, identifier, or tool
 content.
-Independent requests gain continuity only because the runtime explicitly
-supplies its working-memory snapshot. This phase adds no durable storage, task
-manager, planning, retries, physical autonomous action, images, perception,
-audio, streaming, or Realtime API integration.
+Independent requests gain continuity because the runtime explicitly selects
+historical context. WorkingMemory, durable conversation history, semantic-memory
+recall, and Job-specific context retain separate authority and selection rules.
+Client prewarming does not create any of these stores or an execution session.
+Image interpretation and bounded voice are separate implemented capabilities;
+streaming and Realtime integration are not supplied by this text adapter.
 
 For a physical cold-start check, restart the runtime and compare the startup
 `component=client_init` and `provider_request=prewarm` lines before
@@ -175,7 +181,7 @@ For a physical cold-start check, restart the runtime and compare the startup
 
 Add `--initiative-continuation` only together with `--initiative`,
 plus at least one of `--initiative-actions` or `--initiative-messages`; messages
-still require today's `--console` transport. Scheduling supplies the base
+require a configured console or enabled SMS route. Scheduling supplies the base
 temporal effect. Initiative Request A remains a one-tool request. After an
 applied effect, the runtime may make exactly one new independent continuation
 request with fresh Runtime context, the same captured ActiveGoal identity, the
@@ -199,10 +205,9 @@ Autonomous requests render a generic `Attention stimulus` containing one
 provider-neutral `Semantic observation` with its kind, source, and ordered
 facts. It is runtime-generated rather than operator input. Current Runtime
 context and Active goal remain authoritative; WorkingMemory may be stale.
-`--initiative-platform-attention` opts thermal-warning raised/cleared
-transitions into the same goal-gated, one-in-flight Phase 10 path. Memory-pressure
-transitions remain observable semantic events but do not initiate this cognition
-path. It adds no OpenAI tool, provider conversation, polling, or persistent
+`--initiative-platform-attention` opts thermal-warning and memory-pressure
+raised/cleared transitions into the same goal-gated, single-flight general
+initiative path. It adds no OpenAI tool, provider conversation, polling, or persistent
 observation data.
 
 ## Self-inspection tool transport
@@ -214,8 +219,9 @@ See [Bounded semantic self-inspection](self-inspection.md).
 
 ## Temporal effect transport
 
-The exact `schedule_followup(delay_seconds, purpose)` tool is an autonomous
-semantic effect. Provider tool-result finalization is confined to the scheduling
+The exact `schedule_followup(delay_seconds, purpose)` tool is a semantic effect
+available to eligible autonomous and explicit operator episodes under the
+existing goal and initiative gates. Provider tool-result finalization is confined to the scheduling
 request. No `previous_response_id` or request survives the wait; due-time
 attention is independent and uses fresh runtime/capability/memory projections.
 See [Bounded temporal follow-up](temporal-followup.md).

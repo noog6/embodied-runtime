@@ -19,10 +19,11 @@ cognition; `--initiative` permits bounded read-only `inspect_self`,
 available and the single bounded
 `schedule_followup` semantic effect; `--initiative-actions` permits
 `orient_body` on a nonphysical body; and `--initiative-messages` permits
-`address_operator`. The latter currently requires `--console`, because the local
-console is the only configured operator transport. No flag silently enables
+`address_operator`. The latter requires a configured operator delivery route:
+`--console` or enabled SMS. Headless SMS operation is supported. No flag silently enables
 another. With both effect permissions, both tools are offered but the runtime accepts
-only one request total unless bounded continuation is explicitly enabled. Goal
+only one semantic effect unless bounded continuation is explicitly enabled; the
+two read-only acquisition attempts have a separate budget. Goal
 closure requires initiative only and still runs only after an actual semantic
 effect, never after read-only acquisition alone.
 

@@ -43,10 +43,15 @@ implementation.
     framework around hypothetical robots. Mira is the first reference
     implementation and should reveal which abstractions are genuinely reusable.
 
-- One shared runtime-local attention episode ID sequence covers operator and
-  autonomous deliberation, and at most one such episode is active.
-- Explicit operator cognition waits for occupied attention; ordinary autonomous
-  events are lossy while occupied; reflexes remain independent and temporal due
-  work is boundedly deferred.
+- One shared runtime-local attention episode ID sequence covers operator,
+  general autonomous, and Job deliberation. Operator requests serialize with
+  other operator requests and may overlap already-running autonomous work.
+- Job cognition capacity is explicit deployment policy (`jobs.max_concurrent_work`,
+  default `1`); each occurrence retains its own Task, goal, and execution authority.
+  General autonomous initiative remains single-flight and cannot overlap Job work.
+- Active or waiting operator requests suppress new autonomous admission without
+  preempting already-running work. Ordinary autonomous events are lossy while
+  admission is occupied; reflexes remain independent and temporal due work is
+  boundedly deferred. Physical resources remain exclusively arbitrated.
 - Every cognition path has a statically finite grammar. No provider session or
   model-controlled deliberation loop supplies continuity.

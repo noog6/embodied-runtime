@@ -6,6 +6,9 @@ initial reference/demo robot built with the runtime.
 The [cognitive work map](docs/cognitive-work.md) illustrates how Mira's bounded
 episodes connect Jobs, evidence, memory, durable artifacts, and communication.
 
+Browse the [documentation guide](docs/README.md) for setup, operation,
+architecture, feature references, and validation guides.
+
 ## Run the scaffold
 
 Python 3.13 or later is required. Install the checkout and the provider extras
@@ -54,7 +57,8 @@ The same bounded Jobs can also use [OpenRouter via compatible Chat Completions](
 with an explicitly configured endpoint, credential variable, and tool-capable model.
 
 The local console projects the running runtime's current state and provides
-two deliberately narrow development controls. For example, enter `status`,
+explicit operator controls for cognition, Jobs, memory, and diagnostics.
+For example, enter `status`,
 `body`, or `presence` at the profile-derived
 prompt, and enter `quit` to shut down cleanly. See [Local runtime
 console](docs/console.md).

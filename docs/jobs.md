@@ -33,10 +33,11 @@ continuations, outcome cognition, or autonomous attention. Automatic completion
 routing remains deferred; `address_operator` remains the concise autonomous
 notification mechanism.
 
-Jobs are durable runtime infrastructure. Phase 3 lets an operator explicitly
-coordinate one occurrence through the runtime's existing Task lifecycle and
-request one bounded work episode. It does not loop, schedule, route, or retry
-work.
+Jobs are durable runtime infrastructure. Explicit operator coordination starts
+an occurrence through the runtime's Task lifecycle and requests bounded work.
+Configured calendar/event activation and cooperative continuation provide further
+work opportunities under the rules below; no model-controlled execution loop is
+created.
 
 ## Job
 
@@ -265,7 +266,7 @@ Each accepted heartbeat consumes one step and schedules one separately owned,
 finite invocation of the same Job executor. A further `continue` yields fully
 before the next heartbeat; there is no cognition-owned or recursive loop.
 The automatic step is accepted, and its budget charged, only after the attention
-coordinator grants the autonomous lane to the Job episode. Operator activity or
+coordinator admits the exact Job episode within the configured capacity. Operator activity or
 an operator waiter prevents admission of new autonomous Job work and leaves the
 grant unchanged. An autonomous Job episode that has already started is not
 preempted when an operator arrives. Readiness and execution remain bound to the
@@ -275,15 +276,17 @@ The volatile record binds Job ID, JobRun ID, and Task UUID, and records
 `armed` or `awaiting_operator`, the remaining step count, and last summary. It
 does not bind the ActiveGoal, so a paused Task retains the grant and a resumed
 Task can proceed using its fresh, exact Task-owned ActiveGoal. Paused Tasks,
-operator activity or waiters, and another active autonomous episode defer without
-consuming a step. Operator attention wins before automatic work starts; an
+operator activity or waiters, general autonomous initiative, and exhausted Job
+capacity defer without consuming a step. Operator attention wins before automatic work starts; an
 already-started finite Job episode may continue beside it.
 
 Foreground/current Job, Task, and goal APIs remain compatibility and inspection
 views rather than execution authority. Exact JobRun, Task, ActiveGoal,
 continuation, progress, and Workspace authority remain context-local throughout
-an asynchronous episode. Phase 3B trigger fan-out, multiple trigger owners, and
-multi-Job selection from one activation remain deferred.
+an asynchronous episode. Trigger activation visits enabled subscribers in
+stable Job-ID order and applies ordinary admission to each. Pending activation
+is scoped to the Job and trigger; explicit priority, fairness, preemption, and
+durable activation queuing remain deferred.
 
 Budget exhaustion leaves the Task and JobRun running in `awaiting_operator`;
 an explicit `job work` can grant a fresh burst. An automatic provider failure
