@@ -6,6 +6,9 @@ initial reference/demo robot built with the runtime.
 The [cognitive work map](docs/cognitive-work.md) illustrates how Mira's bounded
 episodes connect Jobs, evidence, memory, durable artifacts, and communication.
 
+Browse the [documentation guide](docs/README.md) for setup, operation,
+architecture, feature references, and validation guides.
+
 ## Run the scaffold
 
 Python 3.13 or later is required. Install the checkout and the provider extras
