@@ -4,8 +4,9 @@ Active, bounded image interpretation is documented in
 [`visual-perception.md`](visual-perception.md). It is a separate provider-neutral
 perception adapter rather than a camera or authoritative state concern.
 
-The implemented AI experiment uses the OpenAI Responses API for grounded text,
-bounded runtime-owned working memory, and one semantic capability request:
+Text cognition uses replaceable OpenAI Responses or compatible Chat Completions
+adapters. The runtime owns grounding, bounded acquisition and effect budgets,
+and validation; providers transport requests and results:
 
 ```text
 operator text + request-time runtime projection -> text cognition
@@ -13,8 +14,9 @@ operator text + request-time runtime projection -> text cognition
     -> refreshed authoritative state -> final cognition response
 ```
 
-Across asks, the application explicitly composes current runtime facts, one
-current active goal, the current operator request, and up to six completed turns:
+Across asks, the application explicitly composes current runtime facts, the
+applicable active-goal projection, the current operator request, and bounded
+historical context, including up to six completed WorkingMemory turns:
 
 ```text
 current runtime facts + current active goal + bounded working memory
@@ -23,57 +25,70 @@ current runtime facts + current active goal + bounded working memory
 
 Provider requests remain independent. This volatile FIFO supplies continuity
 without provider conversations. Historical context may be stale, so the fresh
-authoritative runtime projection always wins for current robot facts. There is
-no persistent memory, retrieval, embedding, or summarization layer.
+authoritative runtime projection always wins for current robot facts. The runtime
+also supports configured durable [conversation history](conversation-history.md), bounded
+[persistent-memory recall and admission](persistent-memory.md), and
+[Finding context](findings.md). These are distinct from WorkingMemory and are
+selected by the runtime, not retained provider sessions. Persistent-memory recall
+uses exact entity matching, not embeddings or vector search.
 
-Phase 5 keeps the owners distinct: `RuntimeState` owns current reality,
-`ActiveGoal` owns the single current intention, and `WorkingMemory` owns bounded
+The owners remain distinct: `RuntimeState` owns current reality,
+`ActiveGoal` represents an exact runtime-owned intention, and `WorkingMemory` owns bounded
 history. The provider owns none of them. Goal text cannot override current
 operator input, runtime facts, safety, or capability validation. Setting a goal
 does not perform it, and no goal wakes cognition, retries, monitors satisfaction,
 or resolves itself.
 
-A Task's optional `TaskGoal` is durable semantic state belonging to that bounded
-work, not itself a volatile current intention. Explicit application activation
-may bind the one current running Task to an exact session-local `ActiveGoal`
-created from the TaskGoal description. Pausing keeps the Task current but removes
-that active intention and its temporal follow-up; resuming creates a fresh
-session-local `ActiveGoal`. Thus no TaskGoal is projected as active while paused,
-and standalone goal capabilities remain unavailable because the Task still owns
-the intention slot. Explicit Task stop is terminal, whereas runtime shutdown only
-discards the volatile binding and assigns no Task outcome. These operations
-coordinate state only: they do not wake cognition, preempt capabilities or
-hardware operations, release resources, schedule work, or persist progress. No
-executor, scheduler, resource arbiter, persistence, or recovery is implemented.
+A Task's optional `TaskGoal` describes its desired outcome and survives that
+Task's lifecycle transitions; Task snapshots themselves are session-resident.
+A running Task may bind an exact session-local `ActiveGoal`. Each live Job
+occurrence owns its own Task/goal binding in a `JobExecutionContext`; foreground
+`current_task` and `active_goal` views are not global execution authority.
+Pausing releases that Task's resources and active intention; resuming creates
+a fresh active intention. Generic goal mutation cannot replace a Task-owned goal.
 
-It exists to test the responsibility boundary between the runtime and cognition;
-it does not select the reference robot's permanent AI architecture. The
+The runtime implements resource arbitration, durable Jobs and JobRuns,
+calendar/event activation, and bounded continuation. It does not persist or
+recover live Task execution contexts. Shutdown drops volatile Task ownership
+and interrupts nonterminal JobRuns under the existing persistence policy;
+it does not assert semantic Task completion. See [Jobs](jobs.md) and
+[execution-context ownership](architecture.md#job-execution-context-ownership).
+
+These implementations preserve the responsibility boundary between runtime and
+cognition without fixing the reference robot's permanent AI architecture. The
 application creates an allow-listed immutable projection of its current state
 immediately before every request. Authoritative state remains runtime-owned and
 is neither handed to nor queried by the cognition backend. Each request remains
 independent. AI intent is advisory: the runtime decides whether and how an
 action occurs. Autonomous semantic capabilities are explicitly projected:
 `orient_body` remains limited to a nonphysical body, while `address_operator`
-is independent of body physicality. Without continuation, the runtime accepts at most one initiative
-capability request per episode. Cognition-driven physical actuation is not
-approved. No model-controlled or persistent memory, images, Realtime, or audio
-capability is added. See
-[OpenAI text cognition setup](cognition-openai.md).
+is independent of body physicality. Without continuation, the runtime accepts
+at most one initiative semantic effect per episode, independently of the two
+acquisition attempts. Cognition-driven physical body actuation remains restricted.
+Image interpretation, retained-image workflows, and bounded voice interaction
+are implemented through separate runtime capabilities; no persistent provider
+session or Realtime integration supplies execution continuity. See
+[OpenAI text cognition setup](cognition-openai.md),
+[compatible cognition](cognition-compatible.md), and
+[bounded voice conversation](voice-conversation.md).
 
-Realtime, chained, and hybrid approaches remain open candidates.
+The bounded chained voice path is implemented; direct speech-to-speech and
+hybrid approaches remain candidates.
 
 ## Goal-directed attention and bounded initiative
 
-Phase 6 is explicitly opt-in and transition-driven:
+General initiative is explicitly opt-in and transition-driven:
 
 ```text
 semantic runtime event + ActiveGoal
                  -> deterministic attention gate
-                 -> one read-only autonomous cognition request
+                 -> one bounded autonomous cognition episode
 ```
 
-Only a completed semantic orientation change whose runtime-owned source begins
-with `reflex:` can wake this path, and only while a goal exists. The request is
+A completed semantic orientation change whose runtime-owned source begins
+with `reflex:` can wake this path while a goal exists. Opt-in platform transitions
+and due temporal follow-ups also enter general attention. Durable Job activation
+uses its separate scheduling and trigger rules. The request is
 given fresh Runtime context, ActiveGoal, and bounded operator WorkingMemory plus
 a provider-neutral attention stimulus. Initiative now has independent capability permissions:
 
@@ -85,7 +100,7 @@ a provider-neutral attention stimulus. Initiative now has independent capability
 - `--initiative-actions` permits `orient_body` only on a nonphysical body;
 - `--initiative-messages` permits `address_operator` only with a configured sink;
 - enabling action and message permissions offers those effects alongside
-  scheduling, but without continuation the runtime accepts at most one request total;
+  scheduling, but without continuation the runtime accepts at most one semantic effect;
 - `--initiative-goal-closure` requires only `--initiative` and permits
   one independent post-effect evaluation and same-goal completion after an
   applied effect.
@@ -117,6 +132,10 @@ ownership, observability, and portability.
 
 Speech-to-text -> reasoning/agent -> text-to-speech.
 
+The implemented [voice path](voice-conversation.md) uses this arrangement in a
+bounded, half-duplex session. Barge-in and continuous full-duplex conversation
+remain outside that implementation.
+
 Potential strengths:
 
 - explicit intermediate state;
@@ -141,7 +160,7 @@ behaviour, not merely benchmark model names.
 
 `--initiative-continuation` is an explicit opt-in requiring `--initiative`,
 plus at least one of `--initiative-actions` or `--initiative-messages` (the
-latter still requires today's `--console` message sink). Temporal scheduling
+latter requires a configured console or SMS delivery route). Temporal scheduling
 supplies the base semantic effect. Request A retains its one-call budget. Only
 when its requested effect is `applied`, the application is still running, the
 exact episode-start `ActiveGoal` object remains current, and a different freshly
@@ -179,8 +198,8 @@ attention. Phase 10 works identically for every supported observation kind.
 
 ## Bounded semantic self-inspection
 
-Phase 13 adds one provider-neutral, read-only `inspect_self` capability for four
-bounded local areas. Autonomous self-inspection may consume either or both of the
+The provider-neutral, read-only `inspect_self` capability exposes five bounded
+areas: `network`, `storage`, `camera`, `runtime`, and `earcons`. Autonomous self-inspection may consume either or both of the
 episode's two read-only acquisition attempts and may precede—but never count as—
 the existing bounded semantic effects. See
 [Bounded semantic self-inspection](self-inspection.md).
@@ -202,7 +221,11 @@ attempts before any effect. Rejections consume slots, the same tool can gather
 different information twice, each pass reconstructs Runtime state, and no third
 acquisition or acquisition after an effect exists. Acquisition follow-up is not
 effect continuation, temporal due work starts a fresh single-flight episode, and
-goal closure remains post-effect only.
+standalone goal closure remains post-effect only. Job outcome evaluation has its
+own evidence and progress rules in [Jobs](jobs.md). Concurrency changes admission,
+not per-episode budgets: operator requests serialize independently, general
+initiative is single-flight, and Job cognition is bounded by
+`jobs.max_concurrent_work` (default `1`).
 
 ## Finite operator cognition grammar
 

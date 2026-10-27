@@ -54,7 +54,8 @@ The same bounded Jobs can also use [OpenRouter via compatible Chat Completions](
 with an explicitly configured endpoint, credential variable, and tool-capable model.
 
 The local console projects the running runtime's current state and provides
-two deliberately narrow development controls. For example, enter `status`,
+explicit operator controls for cognition, Jobs, memory, and diagnostics.
+For example, enter `status`,
 `body`, or `presence` at the profile-derived
 prompt, and enter `quit` to shut down cleanly. See [Local runtime
 console](docs/console.md).

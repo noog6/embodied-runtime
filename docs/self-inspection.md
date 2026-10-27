@@ -1,6 +1,7 @@
 # Bounded semantic self-inspection
 
-`inspect_self(area)` is the runtime's single read-only inspection capability.
+`inspect_self(area)` is a bounded read-only inspection capability. Separate
+[runtime diagnostic tools](runtime-diagnostics.md) expose operational evidence.
 Its exact areas are `network`, `storage`, `camera`, `runtime`, and `earcons`; aliases,
 multiple areas, extra arguments, commands, and model-selected paths are rejected.
 Immutable `SelfInspectionResult` and `SelfInspectionFact` values carry a small
@@ -14,8 +15,10 @@ and playback confirmation does not prove human perception. This inspection is
 passive: it cannot acquire the speaker, play a cue, or offer a model-selectable
 audio effect. Activity is not persisted and starts empty in each new player.
 
-Operator cognition may make one tool call and use its provider-local result
-continuation. An autonomous episode may spend either or both of its two acquisition
+Operator cognition may spend either or both of its two acquisition attempts on
+inspection, followed by at most one operator effect. Each acquisition may lead
+to a fresh runtime-orchestrated decision; provider-local tool-result finalization
+does not extend the episode budget. An autonomous episode may spend either or both of its two acquisition
 attempts on inspection, including the same capability for different exact areas.
 Every attempt, including a rejection, consumes a slot. An inspection causes one
 independent bounded follow-up decision with fresh `RuntimeState`, the exact same

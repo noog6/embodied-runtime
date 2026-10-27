@@ -12,8 +12,9 @@ not an event/audit history and does not capture reflex, presence, platform,
 camera, or console body activity.
 
 Application-owned `ActiveGoal` is also explicitly **not** part of
-`RuntimeState`. It is the single current, volatile intentional commitment, not
-a physical fact. `WorkingMemory` remains historical context and may remember
+`RuntimeState`. It represents an exact volatile intentional commitment, not a physical fact.
+Concurrent Job occurrences retain independent ActiveGoals; the foreground
+projection does not own a sibling Job's intention. `WorkingMemory` remains historical context and may remember
 old goal discussions without owning the active goal. Neither abstraction
 changes physical-state ownership.
 
@@ -23,8 +24,9 @@ session lifecycle. Its optional immutable `TaskGoal` is the semantic desired
 outcome of that work; a task goal is neither physical `RuntimeState` nor EventBus
 history. Tasks are immutable, currently session-resident domain values and own no
 runtime machinery. Defining a Task or TaskGoal causes neither execution nor a
-cognition wake. The application may explicitly own one volatile current Task
-binding. A running current Task's durable `TaskGoal` (when present) is represented
+cognition wake. Standalone Task coordination has one volatile binding. Each
+live Job occurrence instead owns its exact Task binding in a JobExecutionContext;
+current/foreground Task views are compatibility projections. A running current Task's durable `TaskGoal` (when present) is represented
 by one exact, session-local `ActiveGoal`; neither the binding nor that ActiveGoal
 is stored inside the Task. Pausing retains current ownership and the `TaskGoal`,
 but releases the exact `ActiveGoal`, clears its age marker, and cancels its temporal
@@ -32,9 +34,10 @@ follow-up. Resuming creates a fresh `ActiveGoal` rather than reusing the prior
 activation. Generic goal mutation cannot replace the current-Task intention slot,
 including while the Task is paused. A current Task without a TaskGoal has no
 ActiveGoal and the Task description is not used as an implicit goal.
-Existing cognition goal closure therefore applies only to standalone ActiveGoals
-in this phase. A Task-owned ActiveGoal is released only through explicit Task
-lifecycle coordination; cognition does not yet complete Tasks. Goal mutation
+The generic cognition goal-closure effect applies only to standalone ActiveGoals.
+Job cognition can propose a terminal outcome through `report_job_outcome`; the
+runtime validates it and coordinates the exact Task/JobRun transition and release
+of that Task's ActiveGoal. The model does not directly mutate Task state. Goal mutation
 capabilities are not projected to cognition while a Task owns the current-intention
 slot.
 
@@ -50,8 +53,10 @@ and any Task-bound ActiveGoal; it does not force a running or paused domain snap
 to a terminal state. Pause/resume/stop provide coordination at a safe application
 boundary only. They do not interrupt arbitrary code or in-flight hardware work,
 checkpoint progress, or persist it. Resource acquisition is currently explicit,
-exclusive, synchronous, and fail-fast; current ownership adds no executor,
-scheduler, waiting policy, persistence, recovery, or autonomous work. One-shot
+exclusive, synchronous, and fail-fast. Jobs add bounded execution, scheduling,
+and durable results around Task ownership, without persisting or recovering live
+Task execution contexts. Shutdown interrupts nonterminal durable JobRuns under
+that separate policy. One-shot
 camera frame acquisition is integrated with an exclusive, short-lived `camera`
 lease. Normal voice speaker output is integrated through the exclusive
 `audio.speaker` lease owned by `runtime:voice`; TTS and the wake cue hold the exact
@@ -173,8 +178,8 @@ It is never persisted. See [Bounded temporal follow-up](temporal-followup.md).
 
 Current RuntimeState remains authoritative continuous truth while an attention
 episode is active. Operator acquisition stages reconstruct it afresh and include
-the current zero-or-one ActiveGoal even though operator episodes normally are not
-goal-bound. Episode lifecycle state is volatile, session-local, and not persisted.
+the current foreground ActiveGoal projection even though operator episodes normally
+are not goal-bound. Job episodes instead use their exact context-owned goal. Episode lifecycle state is volatile, session-local, and not persisted.
 
 ## Power condition
 

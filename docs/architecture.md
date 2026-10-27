@@ -174,9 +174,12 @@ Task PAUSED ---------------------> Current Task binding
   +-------------------------------------> no ActiveGoal
 ```
 
-The lifecycle domains remain independent. `RobotApplication.start_task()` owns
-the volatile zero-or-one current Task binding. It installs a new running Task
-snapshot and, only when the Task has a `TaskGoal`, creates one ordinary
+The lifecycle domains remain independent. The diagram describes one Task
+binding. Standalone Task coordination retains a zero-or-one binding; each live
+Job occurrence instead owns its exact binding in a `JobExecutionContext`.
+Foreground/current Task APIs remain compatibility views, not a global limit on
+Job execution. `RobotApplication.start_task()` installs a new running Task
+snapshot in the standalone binding and, only when the Task has a `TaskGoal`, creates one ordinary
 session-local `ActiveGoal` from that goal's description. The binding retains that
 exact goal object so existing identity-based runtime coordination is preserved. A
 Task with no `TaskGoal` still becomes current but creates no implicit goal from
@@ -199,12 +202,12 @@ ownership, but deliberately leaves either a running or paused snapshot semantica
 unchanged: ending a runtime session is not Task stop.
 
 Pause and stop are coordination boundaries, not arbitrary execution preemption.
-Work may continue for a Task only while its current application snapshot is
-running; future executors and capabilities must cooperatively observe that rule.
-The APIs do not cancel arbitrary `asyncio.Task` objects, interrupt Python or an
-in-flight hardware operation, unwind capabilities, or checkpoint work. There is
-still no executor, scheduler, queue, persistence, recovery, or Task lifecycle
-event publication.
+Work may continue only while its exact Task binding is running. The generic
+Task APIs do not interrupt arbitrary Python or in-flight hardware operations,
+checkpoint work, or publish Task lifecycle events. Job coordination adds bounded
+execution, scheduling, durable JobRun outcomes, and exact-run cancellation/join
+of owned cognition tasks; these do not make Task snapshots or live execution
+contexts recoverable after restart. See [Jobs](jobs.md).
 
 ## Runtime resource ownership
 
@@ -342,7 +345,8 @@ current truth, current intention, and bounded history:
 ```text
 RobotApplication
   |- RuntimeState       current authoritative truth
-  |- ActiveGoal         current intentional state (zero or one)
+  |- ActiveGoal         standalone/foreground intention projection
+  |- Job contexts       exact per-occurrence Task and ActiveGoal bindings
   |- WorkingMemory      bounded operator cognition history
   |- Attention          deterministic relevance gate
 
@@ -357,9 +361,10 @@ neither part of `RuntimeState` nor EventBus history, and unrelated state changes
 do not create memory turns. Each request receives a fresh current-state
 projection plus a snapshot of memory that predates that request.
 
-`ActiveGoal` is a separate volatile, immutable description of the application's
-single current commitment. It is neither physical truth nor conversation
-history. Establishing it causes no action, and actions or reflex-driven state
+`ActiveGoal` is a separate volatile, immutable description of an exact runtime
+commitment. Concurrent Job contexts retain independent goal identities; the
+foreground projection is not authority for a sibling Job. An ActiveGoal is neither
+physical truth nor conversation history. Establishing it causes no action, and actions or reflex-driven state
 changes neither satisfy nor clear it. Without explicitly enabled initiative,
 cognition runs only on an explicit ask.
 
@@ -382,18 +387,19 @@ their providers are configured) and the
 single `schedule_followup` semantic effect. Independent effect permissions project
 `orient_body` for a nonphysical body and/or `address_operator` when an operator
 message sink is configured. Without the Phase 10 continuation opt-in, the application accepts at most one
-capability request total, even if both are offered.
+semantic effect, even if both are offered; acquisitions have a separate budget.
 
 For outward initiative, cognition chooses only bounded message text.
 `RobotApplication` validates it and delivers an immutable
 `OperatorMessage(text, source="initiative")` through a provider-neutral sink. The
-local console is today's concrete transport; speech, web, and mobile transports
-are possible replacements but are not implemented. Recipient, source, routing,
+configured console and SMS routes support initiative delivery. Route selection
+and voice-only limits are described in [interaction routing](interactions.md). Recipient, source, routing,
 and presentation remain runtime-owned. Questions do not wait for or correlate a
 reply.
 
-Autonomous responses, messages, tool results, and outcomes enter neither
-WorkingMemory nor RuntimeState and create no history. With explicit
+General autonomous responses, messages, tool results, and outcomes enter neither
+WorkingMemory nor RuntimeState as conversational turns. Job work separately
+persists terminal outcomes and authorized artifacts under [Job](jobs.md) rules. With explicit
 `--initiative-goal-closure`, one requested effect may receive one independent
 outcome evaluation using fresh reality and the same request-local goal and memory
 snapshot. An applied effect may expose only `complete_goal`, guarded by same-goal
@@ -458,7 +464,7 @@ Phase 16 makes each accepted autonomous attention pass an explicit immutable
 temporary focus, goals provide continuity across episodes, runtime state provides
 current truth, and effects remain explicitly bounded. An event is merely a runtime
 occurrence and may be ignored; an episode is created only after existing eligibility
-and single-flight checks accept it. A goal is a longer-lived, runtime-owned intention
+and admission checks accept it. A goal is a longer-lived, runtime-owned intention
 with a monotonically allocated session-local identity and may span many episodes.
 Runtime state remains the authoritative reconstruction of current facts, while
 WorkingMemory is historical and may be stale.
@@ -468,8 +474,9 @@ and bound goal ID remain fixed until it closes as handled, no-action, stale-goal
 error, or cancelled. Current and last-completed diagnostics are retained, not an
 episode history. A scheduled follow-up closes its scheduling episode and creates a
 new episode when due; it neither reopens the old episode nor reserves authority.
-The runtime still permits one active goal and one autonomous episode in flight.
-An operator episode may coexist in its separate lane. Continuity requires no
+General initiative permits one episode in flight. Job work instead has bounded
+concurrent slots and exact per-occurrence goals. An operator episode may coexist
+with already-running autonomous work in its separate lane. Continuity requires no
 persistent provider conversation, and there is no model-controlled deliberation loop.
 
 Semantic attention makes an initial decision. It either stops, applies semantic
@@ -483,8 +490,9 @@ the first effect.
 
 The fixed budgets are: two acquisition attempts (including rejected attempts),
 two semantic effects, one effect
-continuation, one outcome evaluation, one autonomous cognition episode in flight, one temporal
-commitment, and zero autonomous WorkingMemory writes. A `TemporalFollowupDue`
+continuation, one outcome evaluation, and zero autonomous WorkingMemory writes
+per episode. General initiative remains single-flight, while Job concurrency is
+configured separately. The runtime retains one session-local temporal commitment. A `TemporalFollowupDue`
 starts a new episode; it never continues the scheduling episode. Acquisition
 follow-up and effect continuation are separate provider requests, but only the
 latter is controlled by `--initiative-continuation`. The same acquisition tool may
@@ -507,26 +515,31 @@ decisions. Operator and voice transport were outside autonomous episodes in Phas
 Deliberative cognition uses one runtime-local substrate:
 
 ```
-CONTINUOUS RUNTIME (sensors, monitors, one active goal, timers, reflexes)
+CONTINUOUS RUNTIME (sensors, monitors, goal bindings, timers, reflexes)
              -> attention-worthy trigger
              -> ATTENTION EPISODE
              -> freshly grounded, bounded deliberation
              -> close
 ```
 
-A shared coordinator owns the monotonically increasing, globally unique `E<n>`
-namespace, explicit `operator` and `autonomous` current-lane records, and the last
-completed record. Each lane is independently single-flight. An explicit operator
-request waits only for another operator request, so its asyncio cognition task may
-overlap an already-running autonomous task. New autonomous admission is suppressed
-while either lane is occupied or an operator waiter exists; already-running
-autonomous work is not cancelled when an operator arrives. Reflex execution is
-outside these lanes. Due temporal work remains pending until autonomous admission
-is available.
+A shared coordinator owns the monotonically increasing runtime-local `E<n>`
+namespace, operator/general-autonomous records, bounded Job episode records,
+and the last completed record. Admission differs by kind:
 
-The application retains one operator cognition task and one Job work task. Shutdown
-cancels and joins both before body and hardware teardown and their lane closures
-are independent.
+- Operator requests serialize with other operator requests, but can overlap
+  already-running general initiative or Job work.
+- General autonomous initiative starts only when no autonomous or operator
+  episode is active and no operator request is waiting. Ordinary transitions
+  are lossy under contention; due temporal work remains boundedly pending.
+- Job cognition uses `jobs.max_concurrent_work` slots (default `1`, range
+  `1..256`). At capacity one it uses the single autonomous lane; above one,
+  exact Job episodes can overlap each other. General initiative, active operator
+  work, or an operator waiter blocks new Job admission. Existing Job work is
+  not preempted by an arriving operator.
+
+Reflex execution is outside these cognition lanes. The application retains the
+operator cognition task and each context-owned Job work task. Shutdown cancels
+and joins owned work before body and hardware teardown.
 
 Operator episodes need no goal and normally have `goal_id: none`; an existing
 ActiveGoal is nevertheless included as current intention in every fresh grounding.
@@ -538,9 +551,10 @@ continuation), one outcome evaluation, and no WorkingMemory write.
 
 This is asyncio concurrency, not an OS thread per semantic activity. The
 `ResourceArbiter` remains authoritative for exclusive microphones, speakers,
-camera/body effects, and Task-derived resources. Jobs themselves remain
-single-flight in Phase 2: their volatile authority now belongs to exact
-per-JobRun execution contexts, while multi-Job cognition remains deferred.
+camera/body effects, and Task-derived resources. Different Jobs can execute
+concurrently, while repeated activation of the same Job coalesces to its one
+active occurrence. Each Job's volatile authority belongs to its exact execution
+context, not the foreground compatibility projection.
 
 ## Authoritative temporal grounding
 
@@ -591,14 +605,15 @@ owner. It is never recovered across process restarts.
                               |
                         admitted Job work
                               |
-                       autonomous lane
+                       bounded Job episode slot
 ```
 
-The registry is an ownership model, not a worker pool. Phase 2 retains one
-runtime-wide Job cognition slot and the existing bounded parked-context policy;
-only the admitted context may use the autonomous lane. The independently
-single-flight operator lane can still overlap that work. Physical effects remain
-separately controlled by `ResourceArbiter` and its exact Task-derived owner.
+The registry owns exact occurrence state. Job cognition capacity is separately
+bounded by `jobs.max_concurrent_work`; parked and merely runnable contexts do
+not occupy a work slot. A slot is occupied while that context's asyncio cognition
+task runs. The independently single-flight operator lane can overlap admitted
+work without consuming a Job slot. Physical effects remain separately controlled
+by `ResourceArbiter` and its exact Task-derived owner.
 
 WorkingMemory, persistent memory, RuntimeState, platform/sensor state,
 diagnostics, and the cognition backend remain shared application services—not
@@ -608,6 +623,8 @@ already-running Job episode's history, while the next Job episode sees the new
 shared turn. Job work continues to use Workspace for Job-specific material and
 does not append ordinary conversational turns.
 
-Phase 3 can admit multiple eligible contexts only after adding an explicit Job
-cognition capacity, bounded autonomous attention admission, multi-Job trigger
-arbitration, and policy for genuinely shared resources.
+Multiple eligible contexts and trigger subscribers are supported under bounded
+admission. Explicit priority, fairness, preemption, and durable activation queues
+remain deferred; deterministic iteration order is not a priority policy. See
+[Jobs](jobs.md#session-execution-contexts) for occurrence ownership and
+[configuration](configuration.md) for capacity policy.
