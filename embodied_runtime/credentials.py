@@ -1,4 +1,4 @@
-"""Local, interactive OpenAI credential setup. Never execute stored shell text."""
+"""Local, interactive provider credential setup. Never execute stored shell text."""
 
 import getpass
 import os
@@ -9,9 +9,19 @@ import sys
 import tempfile
 import warnings
 
-SOURCE_LINE = ('if [ -z "${OPENAI_API_KEY:-}" ] && '
-               '[ -r "$HOME/.config/embodied-runtime/openai.env" ]; then '
-               '. "$HOME/.config/embodied-runtime/openai.env"; fi')
+_PROVIDERS = {
+    "OPENAI_API_KEY": ("OpenAI", "openai.env"),
+    "ELEVENLABS_API_KEY": ("ElevenLabs", "elevenlabs.env"),
+}
+
+
+def _source_line(variable, filename):
+    return (f'if [ -z "${{{variable}:-}}" ] && '
+            f'[ -r "$HOME/.config/embodied-runtime/{filename}" ]; then '
+            f'. "$HOME/.config/embodied-runtime/{filename}"; fi')
+
+
+SOURCE_LINE = _source_line("OPENAI_API_KEY", "openai.env")
 SETUP_COMMAND = "python scripts/setup_environment.py --config YOUR_CONFIG --credentials-only"
 
 
@@ -28,6 +38,16 @@ def openai_key_required(launch):
                 entry.api_key_env == "OPENAI_API_KEY"
                 for entry in launch.vision_configuration.backends))
             or (launch.voice_enabled and launch.voice_tts == "openai"))
+
+
+def required_credentials(launch):
+    """Select the two supported wizard credentials from the effective launch."""
+    required = []
+    if openai_key_required(launch):
+        required.append("OPENAI_API_KEY")
+    if launch.voice_enabled and launch.voice_tts == "elevenlabs":
+        required.append("ELEVENLABS_API_KEY")
+    return tuple(required)
 
 
 def _validate_key(key):
@@ -48,7 +68,7 @@ def _private_directory(directory, repository):
     directory.chmod(0o700)
 
 
-def _read_saved_key(path):
+def _read_saved_key(path, variable):
     # O_NOFOLLOW plus fstat prevents opening symlinks or permissive secret files.
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd) as stream:
@@ -58,29 +78,29 @@ def _read_saved_key(path):
             raise CredentialSetupError("Saved key must be a user-owned regular file with mode 600.")
         lines = [line.strip() for line in stream if line.strip() and not line.lstrip().startswith("#")]
     if len(lines) != 1:
-        raise CredentialSetupError("Saved key file must contain one export OPENAI_API_KEY assignment.")
+        raise CredentialSetupError(f"Saved key file must contain one export {variable} assignment.")
     try:
         tokens = shlex.split(lines[0])
     except ValueError:
         raise CredentialSetupError("Saved key file has invalid quoting.") from None
-    if len(tokens) != 2 or tokens[0] != "export" or not tokens[1].startswith("OPENAI_API_KEY="):
-        raise CredentialSetupError("Saved key file must contain one export OPENAI_API_KEY assignment.")
+    if len(tokens) != 2 or tokens[0] != "export" or not tokens[1].startswith(variable + "="):
+        raise CredentialSetupError(f"Saved key file must contain one export {variable} assignment.")
     return _validate_key(tokens[1].split("=", 1)[1])
 
 
-def _save_key(path, key):
+def _save_key(path, key, variable):
     if path.is_symlink():
         raise CredentialSetupError("Credential file must not be a symbolic link.")
-    fd, temporary = tempfile.mkstemp(prefix=".openai-", dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as stream:
-            stream.write("export OPENAI_API_KEY=" + shlex.quote(key) + "\n")
+            stream.write(f"export {variable}=" + shlex.quote(key) + "\n")
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
 
-def _enable_bashrc(home, repository):
+def _enable_bashrc(home, repository, variable, provider, filename):
     path = home / ".bashrc"
     if path.resolve().is_relative_to(repository.resolve()):
         raise CredentialSetupError("Shell configuration must be outside the Git checkout.")
@@ -91,20 +111,40 @@ def _enable_bashrc(home, repository):
             raise CredentialSetupError(".bashrc must be a regular file owned by the current user.")
         if info.st_mode & 0o022:
             raise CredentialSetupError(".bashrc must not be writable by other users.")
-        if SOURCE_LINE not in stream.read().splitlines():
-            stream.write("\n# Embodied Runtime: load the protected OpenAI key when not already set.\n" + SOURCE_LINE + "\n")
+        source_line = _source_line(variable, filename)
+        if source_line not in stream.read().splitlines():
+            stream.write(f"\n# Embodied Runtime: load the protected {provider} key when not already set.\n"
+                         + source_line + "\n")
 
 
 def setup_openai_credentials(launch, *, environ=None, interactive=None, home=None, repository=None, replace=False):
-    """Return a setup-local environment; never imply the parent shell was changed."""
+    """Keep the existing OpenAI-only entry point for the service startup wizard."""
     environment = dict(os.environ if environ is None else environ)
     if not openai_key_required(launch):
         return environment
-    if environment.get("OPENAI_API_KEY", "").strip() and not replace:
-        print("OPENAI_API_KEY: set (not validated with the provider)")
+    return _setup_key("OPENAI_API_KEY", environment, interactive=interactive,
+                      home=home, repository=repository, replace=replace)
+
+
+def setup_credentials(launch, *, environ=None, interactive=None, home=None, repository=None,
+                      replace_openai_key=False, replace_elevenlabs_key=False):
+    """Handle each required provider independently in a setup-local environment."""
+    environment = dict(os.environ if environ is None else environ)
+    replacements = {"OPENAI_API_KEY": replace_openai_key,
+                    "ELEVENLABS_API_KEY": replace_elevenlabs_key}
+    for variable in required_credentials(launch):
+        environment = _setup_key(variable, environment, interactive=interactive,
+                                 home=home, repository=repository, replace=replacements[variable])
+    return environment
+
+
+def _setup_key(variable, environment, *, interactive, home, repository, replace):
+    provider, filename = _PROVIDERS[variable]
+    if environment.get(variable, "").strip() and not replace:
+        print(f"{variable}: set (not validated with the provider)")
         return environment
-    print("OPENAI_API_KEY: replacement requested." if replace else
-          "OPENAI_API_KEY: missing or empty. OpenAI requests will be unavailable.")
+    print(f"{variable}: replacement requested." if replace else
+          f"{variable}: missing or empty. {provider} requests will be unavailable.")
     print("Set it up with: " + SETUP_COMMAND)
     if interactive is None:
         interactive = sys.stdin.isatty() and sys.stderr.isatty()
@@ -115,16 +155,16 @@ def setup_openai_credentials(launch, *, environ=None, interactive=None, home=Non
         return environment
     home = Path.home() if home is None else Path(home)
     repository = Path(__file__).resolve().parent.parent if repository is None else Path(repository)
-    path = home / ".config/embodied-runtime/openai.env"
+    path = home / ".config/embodied-runtime" / filename
     try:
-        if not input(f"Set up OPENAI_API_KEY using protected storage at {path}? [y/N] ").strip().lower().startswith("y"):
+        if not input(f"Set up {variable} using protected storage at {path}? [y/N] ").strip().lower().startswith("y"):
             return environment
         _private_directory(path.parent, repository)
         if path.exists() or path.is_symlink():
             if not replace and input("Load the existing protected key for this setup? [Y/n] ").strip().lower() != "n":
-                key = _read_saved_key(path)
+                key = _read_saved_key(path, variable)
             else:
-                if not input("Replace the saved OpenAI key? [y/N] ").strip().lower().startswith("y"):
+                if not input(f"Replace the saved {provider} key? [y/N] ").strip().lower().startswith("y"):
                     return environment
                 key = None
         else:
@@ -132,20 +172,20 @@ def setup_openai_credentials(launch, *, environ=None, interactive=None, home=Non
         if key is None:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", getpass.GetPassWarning)
-                entered = getpass.getpass("OpenAI API key (hidden; blank cancels): ")
+                entered = getpass.getpass(f"{provider} API key (hidden; blank cancels): ")
             if not entered:
                 print("Credential entry cancelled.")
                 return environment
             key = _validate_key(entered)
         # Normalize reused files too: only a literal, shell-quoted assignment
         # may be sourced later, never arbitrary existing shell expressions.
-        _save_key(path, key)
-        environment["OPENAI_API_KEY"] = key
-        print("OPENAI_API_KEY is available to this setup process; no API request was made.")
+        _save_key(path, key, variable)
+        environment[variable] = key
+        print(f"{variable} is available to this setup process; no API request was made.")
         print("Your current terminal is unchanged. Before launching, run:\n"
-              "  source ~/.config/embodied-runtime/openai.env")
+              f"  source ~/.config/embodied-runtime/{filename}")
         if input("Load the protected key automatically in future Bash terminals via ~/.bashrc? [y/N] ").strip().lower().startswith("y"):
-            _enable_bashrc(home, repository)
+            _enable_bashrc(home, repository, variable, provider, filename)
             print("Bash startup source line is configured; the key itself is not in .bashrc.")
     except (EOFError, KeyboardInterrupt, getpass.GetPassWarning):
         print("\nCredential entry cancelled or a hidden-input terminal was unavailable.")

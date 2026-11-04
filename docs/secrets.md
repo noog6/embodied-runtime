@@ -11,35 +11,48 @@ secrets. In particular, OpenAI cognition expects `OPENAI_API_KEY`. An
 environment variable delivers a value to a process; it is not persistent
 secret storage and does not encrypt or otherwise protect the value by itself.
 
-For current Mira and Raspberry Pi development, store the OpenAI environment
-setting outside the Git checkout at:
+For local development and robot hosts, store the OpenAI and ElevenLabs
+environment settings outside the Git checkout at:
 
 ```text
 ~/.config/embodied-runtime/openai.env
+~/.config/embodied-runtime/elevenlabs.env
 ```
 
 ## Set up local storage and delivery
 
-The environment setup helper can collect a missing OpenAI key interactively:
+The environment setup helper can collect missing OpenAI and ElevenLabs keys
+interactively, based on the selected launch configuration:
 
 ```sh
-python scripts/setup_environment.py --config config/mira-agentic.toml --credentials-only
-source ~/.config/embodied-runtime/openai.env
+python scripts/setup_environment.py \
+  --config config/opie-agentic.toml \
+  --credentials-only
+source ~/.config/embodied-runtime/elevenlabs.env
 ```
 
-Use your own robot's config path, such as `config/v6-agentic.toml`. Run as the
+Use your host's config path; `config/opie-agentic.toml` is an example of a local
+robot configuration. If setup also saved an OpenAI key, run
+`source ~/.config/embodied-runtime/openai.env` too. Run as the
 non-root user who launches the runtime. `--credentials-only` uses the existing
 venv and skips pip entirely, including `pip check`; it does not certify that
 dependencies work. Normal dependency setup also offers credential entry once
 its dependency checks pass. `--check` reports presence without prompting or
 writing files. Unattended runs never ask for a key.
 
-When the selected config needs `OPENAI_API_KEY` and it is missing or empty,
-the helper offers hidden terminal entry, creates the private directory below
-with mode 700, and saves a shell-quoted export in a mode-600 file. Blank entry
-cancels. An existing protected key file can be loaded for setup without
-retyping the key. The helper never prints the key or sends it to a provider;
-presence and offline client construction do not prove that it is valid.
+The helper requires `OPENAI_API_KEY` for OpenAI cognition, vision, or enabled
+OpenAI TTS, including compatible cognition and configured vision backends that
+use that variable. It requires `ELEVENLABS_API_KEY` only when voice is enabled
+and ElevenLabs is selected for TTS. It does not prompt for unused providers.
+Each required key is handled independently: an existing OpenAI key does not
+prevent setup of a missing ElevenLabs key.
+
+For each missing or empty key, the helper offers hidden terminal entry, creates
+the private directory with mode 700, and saves a shell-quoted export in the
+provider's mode-600 file above. Blank entry cancels that provider's entry. An
+existing protected key file can be reused without retyping the key, or explicitly
+replaced after confirmation. The helper never prints the key or sends it to a
+provider; presence and offline client construction do not prove that it is valid.
 
 An existing environment key is preserved. To explicitly replace it (for example
 after a provider authentication failure):
@@ -50,21 +63,26 @@ source ~/.config/embodied-runtime/openai.env
 ```
 
 Replacement requires an interactive terminal and confirmation before overwriting
-a saved file. Restart any running runtime/service after updating its credential
-delivery. Provider authentication/access failures can also mean project or model
-permissions, so replacing a key is not always the right fix.
+a saved file. For ElevenLabs, use `--replace-elevenlabs-key` instead and then run
+`source ~/.config/embodied-runtime/elevenlabs.env`. Both replacement options can
+be supplied together when both providers are required. Restart any running
+runtime/service after updating its credential delivery. Provider authentication/access
+failures can also mean project or model permissions, so replacing a key is not
+always the right fix.
 
-The helper separately offers to add one guarded source line to `~/.bashrc`.
-The key stays in the protected file; repeated setup does not duplicate the
-line. It loads the file in future interactive Bash shells only when the variable
-is unset or empty. Python cannot export into its parent terminal: **run the
+The helper separately offers to add one guarded source line per provider to
+`~/.bashrc`. Each key stays in its protected file; repeated setup does not
+duplicate the lines. It loads each file in future interactive Bash shells only
+when its variable is unset or empty. Python cannot export into its parent terminal: **run the
 printed `source` command once in the current terminal**, even after accepting
 the Bash option. This optional shell setup is independent of systemd delivery.
 
-The interactive service Startup Wizard offers the same key setup when configuring
-a service for the invoking non-root account. Existing confirmation for capturing
-required variables into the service environment still applies. Other provider
-credentials retain their documented setup procedures.
+The interactive service Startup Wizard offers the same OpenAI key setup when
+configuring a service for the invoking non-root account. Use the environment
+setup helper above to configure and source ElevenLabs before service deployment.
+Existing confirmation for capturing required variables into the service
+environment still applies. Other provider credentials retain their documented
+setup procedures.
 
 Manual setup is also supported:
 
