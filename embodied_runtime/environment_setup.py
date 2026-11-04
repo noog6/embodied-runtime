@@ -41,7 +41,8 @@ def verify_imports(extras):
         print("OpenAI client initialization: OK (offline)")
 
 
-def configure_environment(config, *, with_sms=False, check_only=False, credentials_only=False, replace_openai_key=False):
+def configure_environment(config, *, with_sms=False, check_only=False, credentials_only=False,
+                          replace_openai_key=False, replace_elevenlabs_key=False):
     from embodied_runtime.config import load_runtime_config, resolve_launch_configuration
     from embodied_runtime.profile import load_profile
 
@@ -49,14 +50,16 @@ def configure_environment(config, *, with_sms=False, check_only=False, credentia
     launch = resolve_launch_configuration(SimpleNamespace(), load_runtime_config(Path(config)))
     load_profile(launch.profile)
     extras = required_extras(launch, with_sms=with_sms)
-    from embodied_runtime.credentials import setup_openai_credentials
+    from embodied_runtime.credentials import required_credentials, setup_credentials
     if credentials_only:
-        if replace_openai_key and not (sys.stdin.isatty() and sys.stderr.isatty()):
-            raise SystemExit("Replacing an OpenAI key requires an interactive terminal; no key was changed.")
-        environment = setup_openai_credentials(launch, replace=replace_openai_key)
-        from embodied_runtime.credentials import openai_key_required
-        if openai_key_required(launch) and not environment.get("OPENAI_API_KEY", "").strip():
-            raise SystemExit("OPENAI_API_KEY is still missing. Source the protected key file and retry.")
+        if (replace_openai_key or replace_elevenlabs_key) and not (sys.stdin.isatty() and sys.stderr.isatty()):
+            raise SystemExit("Replacing a provider key requires an interactive terminal; no key was changed.")
+        environment = setup_credentials(launch, interactive=False if check_only else None,
+                                        replace_openai_key=replace_openai_key,
+                                        replace_elevenlabs_key=replace_elevenlabs_key)
+        missing = [name for name in required_credentials(launch) if not environment.get(name, "").strip()]
+        if missing:
+            raise SystemExit(", ".join(missing) + " still missing. Source the protected key file(s) and retry.")
         return
     print("Required provider extras: " + (", ".join(extras) or "none"), flush=True)
     if not check_only:
@@ -64,4 +67,4 @@ def configure_environment(config, *, with_sms=False, check_only=False, credentia
         subprocess.run([sys.executable, "-m", "pip", "install", "-e", target], check=True)
     subprocess.run([sys.executable, "-m", "pip", "check"], check=True)
     verify_imports(extras)
-    setup_openai_credentials(launch, interactive=False if check_only else None)
+    setup_credentials(launch, interactive=False if check_only else None)

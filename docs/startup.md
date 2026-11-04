@@ -34,7 +34,7 @@ For a new Pi venv that needs OS-installed Picamera2 or HAT libraries, explicitly
 add `--system-site-packages` on its first creation. Existing environments retain
 their original policy; the helper refuses to change that policy implicitly.
 It does not install OS packages, vendor libraries, audio tools, Piper model
-files, credentials, services, or camera overlays. Follow the hardware and voice
+files, services, or camera overlays. Follow the hardware and voice
 setup guides for those dependencies.
 
 Verify an existing installation without installing packages:
@@ -43,24 +43,39 @@ Verify an existing installation without installing packages:
 python3.13 scripts/setup_environment.py --config config/mira-agentic.toml --check
 ```
 
-Normal interactive setup also offers to configure a missing `OPENAI_API_KEY`
-when the selected config needs it, with hidden entry, protected storage, and an
-optional source line in `~/.bashrc`. Existing keys are preserved. No key is
-printed or validated against a provider. Source the printed file in your current
-terminal before launching. See [credential setup](secrets.md#set-up-local-storage-and-delivery).
+Normal interactive setup also offers to configure missing credentials selected
+by the effective launch configuration: `OPENAI_API_KEY` for OpenAI cognition,
+vision, or enabled OpenAI TTS (including compatible/configured backends that
+use that variable), and `ELEVENLABS_API_KEY` for enabled ElevenLabs TTS. Disabled
+voice or another TTS provider does not prompt for ElevenLabs. Each required
+provider is handled independently, so an existing OpenAI key does not skip a
+missing ElevenLabs key. Hidden entry, protected storage, saved-key reuse, and
+optional source lines in `~/.bashrc` are available for each. Existing environment
+keys are preserved. No key is printed or validated against a provider. See
+[credential setup](secrets.md#set-up-local-storage-and-delivery).
 
 To configure credentials independently of dependency checks (including on a
 machine with an unresolved wheel-tag check):
 
 ```sh
-python scripts/setup_environment.py --config config/mira-agentic.toml --credentials-only
-source ~/.config/embodied-runtime/openai.env
+python scripts/setup_environment.py \
+  --config config/opie-agentic.toml \
+  --credentials-only
+source ~/.config/embodied-runtime/elevenlabs.env
 ```
 
+Use the config file from your host; `config/opie-agentic.toml` is an example of
+a local robot configuration. If OpenAI was also saved, run
+`source ~/.config/embodied-runtime/openai.env` too. Run the exact source commands
+printed by setup in the current terminal before launching the runtime: the setup
+subprocess cannot change its parent shell, even after enabling future Bash loading.
+
 `--credentials-only` needs an existing venv and core dependencies; it runs no pip
-commands. Add `--replace-openai-key` to explicitly replace an existing key.
-`--check` is read-only and never prompts. Missing-key reports describe what to
-do next; the Python environment's dependency status is separate from credentials.
+commands. Add `--replace-openai-key` or `--replace-elevenlabs-key` to explicitly
+replace that provider's existing key, with interactive confirmation. Unattended
+runs and `--check` never prompt or write credentials. Credentials-only exits
+nonzero if any required key remains missing; dependency status is separate from
+credentials.
 
 Checks run in the selected venv: `pip check`, core/provider imports, and offline
 OpenAI asynchronous client construction with a dummy key. They make no provider
