@@ -15,7 +15,7 @@ Python 3.13 or later is required. Install the checkout and the provider extras
 needed by your chosen configuration first:
 
 ```console
-python3.13 scripts/setup_environment.py --config config/mira-agentic.toml
+python scripts/setup_environment.py --config config/mira-agentic.toml
 source .venv/bin/activate
 ```
 
