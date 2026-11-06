@@ -3,12 +3,16 @@
 from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
+from itertools import product
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import venv
 
 from embodied_runtime.config import load_runtime_config, resolve_launch_configuration
 from embodied_runtime.credentials import setup_credentials
@@ -105,22 +109,24 @@ class EnvironmentSetupTest(unittest.TestCase):
                 self.assertFalse((home / ".config/embodied-runtime/openai.env").exists())
 
     def test_noninteractive_and_check_modes_do_not_prompt_read_or_write_credentials(self):
-        for mode in ({}, {"credentials_only": True}, {"check_only": True}):
-            with self.subTest(mode=mode), patch.dict("os.environ", {}, clear=True), \
+        configurations = (("mira-agentic.toml", "OPENAI_API_KEY, ELEVENLABS_API_KEY"),
+                          ("mira-openrouter-gemini.toml", "OPENROUTER_API_KEY, ELEVENLABS_API_KEY"))
+        for (filename, missing), mode in product(configurations, ({}, {"credentials_only": True}, {"check_only": True})):
+            with self.subTest(config=filename, mode=mode), patch.dict("os.environ", {}, clear=True), \
                     patch("embodied_runtime.environment_setup.subprocess.run"), \
                     patch("embodied_runtime.environment_setup.verify_imports"), \
-                    patch("embodied_runtime.credentials.sys.stdin.isatty", return_value=False), \
-                    patch("embodied_runtime.credentials.sys.stderr.isatty", return_value=False), \
+                    patch("embodied_runtime.credentials.sys.stdin.isatty", return_value=bool(mode.get("check_only"))), \
+                    patch("embodied_runtime.credentials.sys.stderr.isatty", return_value=bool(mode.get("check_only"))), \
                     patch("builtins.input") as prompt, patch("getpass.getpass") as hidden, \
                     patch("embodied_runtime.credentials._read_saved_key") as read, \
                     patch("embodied_runtime.credentials._save_key") as save, \
                     patch("embodied_runtime.credentials._enable_bashrc") as bashrc, \
                     redirect_stdout(io.StringIO()) as output:
                 if mode.get("credentials_only"):
-                    with self.assertRaisesRegex(SystemExit, "OPENAI_API_KEY, ELEVENLABS_API_KEY still missing"):
-                        configure_environment(ROOT / "config/mira-agentic.toml", **mode)
+                    with self.assertRaisesRegex(SystemExit, missing + " still missing"):
+                        configure_environment(ROOT / "config" / filename, **mode)
                 else:
-                    configure_environment(ROOT / "config/mira-agentic.toml", **mode)
+                    configure_environment(ROOT / "config" / filename, **mode)
                 self.assertIn("ELEVENLABS_API_KEY", output.getvalue())
                 for mocked in (prompt, hidden, read, save, bashrc):
                     mocked.assert_not_called()
@@ -134,13 +140,96 @@ class EnvironmentSetupTest(unittest.TestCase):
         hidden.assert_not_called()
 
     def test_replacement_requires_interactive_terminal(self):
-        for option in ("replace_openai_key", "replace_elevenlabs_key"):
+        for option in ("replace_openai_key", "replace_elevenlabs_key", "replace_openrouter_key"):
+            for stdin, stderr in ((False, True), (True, False)):
+                with self.subTest(option=option, stdin=stdin, stderr=stderr), \
+                        patch("embodied_runtime.environment_setup.sys.stdin.isatty", return_value=stdin), \
+                        patch("embodied_runtime.environment_setup.sys.stderr.isatty", return_value=stderr), \
+                        patch("embodied_runtime.credentials.setup_credentials") as setup:
+                    with self.assertRaisesRegex(SystemExit, "interactive terminal"):
+                        configure_environment(ROOT / "config/mira-agentic.toml", credentials_only=True, **{option: True})
+                    setup.assert_not_called()
+
+    def test_configure_environment_rotation_requires_credentials_only(self):
+        for option in ("replace_openai_key", "replace_elevenlabs_key", "replace_openrouter_key"):
+            for check in (False, True):
+                with self.subTest(option=option, check=check), \
+                        patch("embodied_runtime.environment_setup.subprocess.run") as run, \
+                        patch("embodied_runtime.credentials.setup_credentials") as setup:
+                    with self.assertRaisesRegex(SystemExit, "requires --credentials-only"):
+                        configure_environment(ROOT / "config/mira-agentic.toml", check_only=check, **{option: True})
+                    run.assert_not_called()
+                    setup.assert_not_called()
+
+    def test_configure_environment_forwards_each_rotation_flag(self):
+        options = ("replace_openai_key", "replace_elevenlabs_key", "replace_openrouter_key")
+        for option in options:
             with self.subTest(option=option), \
-                    patch("embodied_runtime.environment_setup.sys.stdin.isatty", return_value=False), \
-                    patch("embodied_runtime.credentials.setup_credentials") as setup:
-                with self.assertRaisesRegex(SystemExit, "interactive terminal"):
-                    configure_environment(ROOT / "config/mira-agentic.toml", credentials_only=True, **{option: True})
-                setup.assert_not_called()
+                    patch("embodied_runtime.environment_setup.sys.stdin.isatty", return_value=True), \
+                    patch("embodied_runtime.environment_setup.sys.stderr.isatty", return_value=True), \
+                    patch("embodied_runtime.environment_setup.subprocess.run") as run, \
+                    patch("embodied_runtime.credentials.setup_credentials",
+                          return_value={"OPENROUTER_API_KEY": "dummy-router", "ELEVENLABS_API_KEY": "dummy-voice"}) as setup:
+                configure_environment(ROOT / "config/mira-openrouter-gemini.toml", credentials_only=True, **{option: True})
+                self.assertEqual(setup.call_args.kwargs,
+                                 {"interactive": None, **{name: name == option for name in options}})
+                run.assert_not_called()
+
+    def test_openrouter_entry_and_saved_reuse_in_both_setup_modes(self):
+        for credentials_only in (False, True):
+            with self.subTest(credentials_only=credentials_only), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary) / "home"
+                with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "dummy-voice"}, clear=True), \
+                        patch("embodied_runtime.credentials.Path.home", return_value=home), \
+                        patch("embodied_runtime.credentials.os.geteuid", return_value=1000), \
+                        patch("embodied_runtime.credentials.sys.stdin.isatty", return_value=True), \
+                        patch("embodied_runtime.credentials.sys.stderr.isatty", return_value=True), \
+                        patch("embodied_runtime.environment_setup.subprocess.run") as run, \
+                        patch("embodied_runtime.environment_setup.verify_imports") as verify, \
+                        patch("builtins.input", side_effect=["y", "n", "y", "", "n"]), \
+                        patch("getpass.getpass", return_value="dummy-router") as hidden, \
+                        redirect_stdout(io.StringIO()) as output:
+                    for _ in range(2):
+                        configure_environment(ROOT / "config/mira-openrouter-gemini.toml", credentials_only=credentials_only)
+                    if credentials_only:
+                        run.assert_not_called()
+                        verify.assert_not_called()
+                hidden.assert_called_once()
+                saved = home / ".config/embodied-runtime/openrouter.env"
+                self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(saved.parent.stat().st_mode & 0o777, 0o700)
+                self.assertFalse((saved.parent / "elevenlabs.env").exists())
+                self.assertNotIn("dummy-router", output.getvalue())
+                self.assertIn("source ~/.config/embodied-runtime/openrouter.env", output.getvalue())
+
+    def test_sourced_openrouter_key_satisfies_real_credentials_only_cli_without_pip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            environment = Path(temporary) / "venv"
+            venv.EnvBuilder(with_pip=False).create(environment)
+            # Borrow the test environment's installed core dependencies without
+            # invoking package tooling in this otherwise empty target venv.
+            version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+            (environment / "lib" / version / "site-packages/test-dependencies.pth").write_text(
+                "\n".join(path for path in sys.path if path.endswith("site-packages")) + "\n")
+            config = ROOT / "config/mira-openrouter-gemini.toml"
+            launch = resolve_launch_configuration(SimpleNamespace(), load_runtime_config(config))
+            with patch("builtins.input", side_effect=["y", "n"]), \
+                    patch("getpass.getpass", return_value="dummy-router"), redirect_stdout(io.StringIO()):
+                setup_credentials(launch, environ={"ELEVENLABS_API_KEY": "dummy-voice"},
+                                  home=home, repository=ROOT, interactive=True)
+            child_environment = {key: value for key, value in os.environ.items() if key != "OPENROUTER_API_KEY"}
+            child_environment.update(HOME=str(home), ELEVENLABS_API_KEY="dummy-voice")
+            result = subprocess.run([
+                "bash", "--noprofile", "--norc", "-c",
+                '. "$HOME/.config/embodied-runtime/openrouter.env"; exec "$@"', "test",
+                str(environment / "bin/python"), str(ROOT / "scripts/setup_environment.py"),
+                "--config", str(config), "--venv", str(environment), "--credentials-only",
+            ], env=child_environment, cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("OPENROUTER_API_KEY: set", result.stdout)
+            self.assertIn("Credential setup finished", result.stdout)
+            self.assertNotIn("dummy-", result.stdout + result.stderr)
 
     def test_configuration_selects_only_required_credentials(self):
         for voice in ('enabled = false\ntts = "elevenlabs"', 'enabled = true\ntts = "espeak"'):
@@ -185,8 +274,9 @@ class EnvironmentSetupTest(unittest.TestCase):
                                 for call in run.call_args_list))
 
     def test_bootstrap_forwards_each_replacement_flag_without_pip(self):
-        for flag, expected in (("--replace-openai-key", ["1", "0"]),
-                               ("--replace-elevenlabs-key", ["0", "1"])):
+        for flag, expected in (("--replace-openai-key", ["1", "0", "0"]),
+                               ("--replace-elevenlabs-key", ["0", "1", "0"]),
+                               ("--replace-openrouter-key", ["0", "0", "1"])):
             with self.subTest(flag=flag), tempfile.TemporaryDirectory() as temporary:
                 environment = Path(temporary) / "venv"
                 environment.mkdir()
@@ -196,10 +286,20 @@ class EnvironmentSetupTest(unittest.TestCase):
                     self.assertEqual(bootstrap.main(["--config", str(ROOT / "config/mira-agentic.toml"),
                                                      "--venv", str(environment), "--credentials-only", flag]), 0)
                 self.assertEqual(run.call_count, 2)
-                self.assertEqual(run.call_args.args[0][-3:], ["1", *expected])
+                command = run.call_args.args[0]
+                self.assertEqual(command[-4:], ["1", *expected])
+                with patch("embodied_runtime.environment_setup.configure_environment") as configure, \
+                        patch.object(sys, "argv", ["-c", *command[3:]]):
+                    exec(command[2])
+                self.assertEqual(configure.call_args.kwargs, {
+                    "with_sms": False, "check_only": False, "credentials_only": True,
+                    "replace_openai_key": expected[0] == "1",
+                    "replace_elevenlabs_key": expected[1] == "1",
+                    "replace_openrouter_key": expected[2] == "1",
+                })
 
     def test_bootstrap_replacement_flags_require_credentials_only(self):
-        for flag in ("--replace-openai-key", "--replace-elevenlabs-key"):
+        for flag in ("--replace-openai-key", "--replace-elevenlabs-key", "--replace-openrouter-key"):
             with self.subTest(flag=flag), redirect_stderr(io.StringIO()) as error:
                 with self.assertRaises(SystemExit):
                     bootstrap.main(["--config", str(ROOT / "config/mira-agentic.toml"), flag])

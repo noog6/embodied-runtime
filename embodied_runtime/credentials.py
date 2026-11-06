@@ -11,6 +11,7 @@ import warnings
 
 _PROVIDERS = {
     "OPENAI_API_KEY": ("OpenAI", "openai.env"),
+    "OPENROUTER_API_KEY": ("OpenRouter", "openrouter.env"),
     "ELEVENLABS_API_KEY": ("ElevenLabs", "elevenlabs.env"),
 }
 
@@ -41,10 +42,16 @@ def openai_key_required(launch):
 
 
 def required_credentials(launch):
-    """Select the two supported wizard credentials from the effective launch."""
+    """Select supported wizard credentials from the effective launch."""
     required = []
     if openai_key_required(launch):
         required.append("OPENAI_API_KEY")
+    if ((launch.cognition == "openai-compatible"
+         and launch.cognition_openai_compatible.api_key_env == "OPENROUTER_API_KEY")
+            or (launch.vision == "configured" and any(
+                entry.api_key_env == "OPENROUTER_API_KEY"
+                for entry in launch.vision_configuration.backends))):
+        required.append("OPENROUTER_API_KEY")
     if launch.voice_enabled and launch.voice_tts == "elevenlabs":
         required.append("ELEVENLABS_API_KEY")
     return tuple(required)
@@ -127,11 +134,13 @@ def setup_openai_credentials(launch, *, environ=None, interactive=None, home=Non
 
 
 def setup_credentials(launch, *, environ=None, interactive=None, home=None, repository=None,
-                      replace_openai_key=False, replace_elevenlabs_key=False):
+                      replace_openai_key=False, replace_elevenlabs_key=False,
+                      replace_openrouter_key=False):
     """Handle each required provider independently in a setup-local environment."""
     environment = dict(os.environ if environ is None else environ)
     replacements = {"OPENAI_API_KEY": replace_openai_key,
-                    "ELEVENLABS_API_KEY": replace_elevenlabs_key}
+                    "ELEVENLABS_API_KEY": replace_elevenlabs_key,
+                    "OPENROUTER_API_KEY": replace_openrouter_key}
     for variable in required_credentials(launch):
         environment = _setup_key(variable, environment, interactive=interactive,
                                  home=home, repository=repository, replace=replacements[variable])

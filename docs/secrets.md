@@ -11,18 +11,19 @@ secrets. In particular, OpenAI cognition expects `OPENAI_API_KEY`. An
 environment variable delivers a value to a process; it is not persistent
 secret storage and does not encrypt or otherwise protect the value by itself.
 
-For local development and robot hosts, store the OpenAI and ElevenLabs
+For local development and robot hosts, store the OpenAI, OpenRouter, and ElevenLabs
 environment settings outside the Git checkout at:
 
 ```text
 ~/.config/embodied-runtime/openai.env
+~/.config/embodied-runtime/openrouter.env
 ~/.config/embodied-runtime/elevenlabs.env
 ```
 
 ## Set up local storage and delivery
 
-The environment setup helper can collect missing OpenAI and ElevenLabs keys
-interactively, based on the selected launch configuration:
+The environment setup helper can collect missing OpenAI, OpenRouter, and
+ElevenLabs keys interactively, based on the selected launch configuration:
 
 ```sh
 python scripts/setup_environment.py \
@@ -43,9 +44,11 @@ writing files. Unattended runs never ask for a key.
 The helper requires `OPENAI_API_KEY` for OpenAI cognition, vision, or enabled
 OpenAI TTS, including compatible cognition and configured vision backends that
 use that variable. It requires `ELEVENLABS_API_KEY` only when voice is enabled
-and ElevenLabs is selected for TTS. It does not prompt for unused providers.
-Each required key is handled independently: an existing OpenAI key does not
-prevent setup of a missing ElevenLabs key.
+and ElevenLabs is selected for TTS. It selects `OPENROUTER_API_KEY` for compatible
+cognition or any entry in an enabled configured vision chain using that variable.
+Disabled vision and custom variable names do not trigger OpenRouter setup;
+custom credentials remain operator-supplied environment variables. Each required
+key is handled independently, and a shared cognition/vision key is handled once.
 
 For each missing or empty key, the helper offers hidden terminal entry, creates
 the private directory with mode 700, and saves a shell-quoted export in the
@@ -64,11 +67,13 @@ source ~/.config/embodied-runtime/openai.env
 
 Replacement requires an interactive terminal and confirmation before overwriting
 a saved file. For ElevenLabs, use `--replace-elevenlabs-key` instead and then run
-`source ~/.config/embodied-runtime/elevenlabs.env`. Both replacement options can
-be supplied together when both providers are required. Restart any running
-runtime/service after updating its credential delivery. Provider authentication/access
-failures can also mean project or model permissions, so replacing a key is not
-always the right fix.
+`source ~/.config/embodied-runtime/elevenlabs.env`. For OpenRouter, use
+`--replace-openrouter-key` and then
+`source ~/.config/embodied-runtime/openrouter.env`. Replacement options can
+be combined when those providers are required. Cancelling preserves the existing
+key. Restart any running runtime/service after updating its credential delivery.
+Provider authentication/access failures can also mean project or model
+permissions, so replacing a key is not always the right fix.
 
 The helper separately offers to add one guarded source line per provider to
 `~/.bashrc`. Each key stays in its protected file; repeated setup does not
@@ -79,8 +84,8 @@ the Bash option. This optional shell setup is independent of systemd delivery.
 
 The interactive service Startup Wizard offers the same OpenAI key setup when
 configuring a service for the invoking non-root account. Use the environment
-setup helper above to configure and source ElevenLabs before service deployment.
-Existing confirmation for capturing required variables into the service
+setup helper above to configure and source OpenRouter and ElevenLabs before
+service deployment. Existing confirmation for capturing required variables into the service
 environment still applies. Other provider credentials retain their documented
 setup procedures.
 
@@ -144,16 +149,27 @@ fi
 For `openai-compatible`, `cognition.openai_compatible.api_key_env` selects the
 environment-variable **name**; `OPENROUTER_API_KEY` is the recommended name for
 OpenRouter. The value must remain outside TOML, command arguments, source, and
-URLs. Use the same protected-file procedure as above, with
-`~/.config/embodied-runtime/openrouter.env` and this editor-entered content:
+URLs. Use an existing OpenRouter profile with the credential helper:
 
 ```sh
-export OPENROUTER_API_KEY='YOUR_KEY_HERE'
+python scripts/setup_environment.py \
+  --config config/mira-openrouter-gemini.toml --credentials-only
+source ~/.config/embodied-runtime/openrouter.env
+source ~/.config/embodied-runtime/elevenlabs.env
+python main.py --config config/mira-openrouter-gemini.toml
 ```
 
-Protect it with mode `600`, then source it before starting runtime or benchmarks:
+This example profile also requires ElevenLabs voice credentials. Setup offers
+hidden entry or reuse of each protected file; source the files it saved before
+launching. An already exported key satisfies setup without saving a file. The
+OpenRouter file is `~/.config/embodied-runtime/openrouter.env` with mode `600`
+inside the mode-`700` directory. No manual secret-file editing is needed.
+
+To rotate the OpenRouter key:
 
 ```sh
+python scripts/setup_environment.py \
+  --config config/mira-openrouter-gemini.toml --credentials-only --replace-openrouter-key
 source ~/.config/embodied-runtime/openrouter.env
 ```
 

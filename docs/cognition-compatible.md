@@ -21,10 +21,25 @@ their own configuration and credentials.
 
 ## Configure OpenRouter
 
-Keep `OPENROUTER_API_KEY` in a protected environment file outside the checkout,
-using the [secret delivery procedure](secrets.md#openrouter-cognition). Never put
-the credential value in TOML, command arguments, URLs, or logs. Create your own
-configuration, for example `/tmp/mira-openrouter.toml`:
+Use the environment setup wizard to collect `OPENROUTER_API_KEY` with hidden
+entry, protected saved-key reuse, and optional Bash startup loading. With an
+existing venv and core dependencies installed:
+
+```sh
+python scripts/setup_environment.py \
+  --config config/mira-openrouter-gemini.toml --credentials-only
+source ~/.config/embodied-runtime/openrouter.env
+source ~/.config/embodied-runtime/elevenlabs.env
+python main.py --config config/mira-openrouter-gemini.toml
+```
+
+That profile also enables ElevenLabs voice; source each file saved by setup.
+Already exported keys satisfy setup. Add `--replace-openrouter-key` to the
+credentials-only command to rotate the OpenRouter key interactively, then source
+`openrouter.env` again. See [credential delivery](secrets.md#openrouter-cognition).
+Never put the credential value in TOML, command arguments, URLs, or logs.
+
+Alternatively, create your own configuration, for example `/tmp/mira-openrouter.toml`:
 
 ```toml
 [runtime]
@@ -51,6 +66,7 @@ credential variable name, or tool-capability declaration fails clearly. A missin
 credential fails during preparation. Timeout must be finite and positive.
 
 ```sh
+python scripts/setup_environment.py --config /tmp/mira-openrouter.toml --credentials-only
 source ~/.config/embodied-runtime/openrouter.env
 python main.py --config /tmp/mira-openrouter.toml
 ```

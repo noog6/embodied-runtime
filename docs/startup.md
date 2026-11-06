@@ -46,10 +46,13 @@ python3.13 scripts/setup_environment.py --config config/mira-agentic.toml --chec
 Normal interactive setup also offers to configure missing credentials selected
 by the effective launch configuration: `OPENAI_API_KEY` for OpenAI cognition,
 vision, or enabled OpenAI TTS (including compatible/configured backends that
-use that variable), and `ELEVENLABS_API_KEY` for enabled ElevenLabs TTS. Disabled
+use that variable), `OPENROUTER_API_KEY` for compatible cognition or any enabled
+configured vision chain entry using that variable, and `ELEVENLABS_API_KEY` for
+enabled ElevenLabs TTS. Custom credential variable names remain operator-supplied
+environment variables. Disabled vision contributes no key requirement; disabled
 voice or another TTS provider does not prompt for ElevenLabs. Each required
-provider is handled independently, so an existing OpenAI key does not skip a
-missing ElevenLabs key. Hidden entry, protected storage, saved-key reuse, and
+provider is handled independently, with a shared cognition/vision key handled
+once. Hidden entry, protected storage, saved-key reuse, and
 optional source lines in `~/.bashrc` are available for each. Existing environment
 keys are preserved. No key is printed or validated against a provider. See
 [credential setup](secrets.md#set-up-local-storage-and-delivery).
@@ -70,9 +73,24 @@ a local robot configuration. If OpenAI was also saved, run
 printed by setup in the current terminal before launching the runtime: the setup
 subprocess cannot change its parent shell, even after enabling future Bash loading.
 
+For an existing OpenRouter profile:
+
+```sh
+python scripts/setup_environment.py \
+  --config config/mira-openrouter-gemini.toml --credentials-only
+source ~/.config/embodied-runtime/openrouter.env
+source ~/.config/embodied-runtime/elevenlabs.env
+python main.py --config config/mira-openrouter-gemini.toml
+```
+
+This profile also enables ElevenLabs voice. Source each file saved by setup;
+an already exported key needs no saved file.
+
 `--credentials-only` needs an existing venv and core dependencies; it runs no pip
-commands. Add `--replace-openai-key` or `--replace-elevenlabs-key` to explicitly
-replace that provider's existing key, with interactive confirmation. Unattended
+commands. Add `--replace-openai-key`, `--replace-openrouter-key`, or
+`--replace-elevenlabs-key` to explicitly replace that provider's existing key,
+with an interactive terminal and confirmation. Cancelling preserves the existing
+key. After replacement, source that provider's file again. Unattended
 runs and `--check` never prompt or write credentials. Credentials-only exits
 nonzero if any required key remains missing; dependency status is separate from
 credentials.

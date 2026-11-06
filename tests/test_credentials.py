@@ -121,6 +121,23 @@ class CredentialTests(unittest.TestCase):
         self.assertNotIn("dummy-old", self.path.read_text())
         self.assertNotIn("dummy-new", self.output.getvalue())
 
+    def test_replacement_cancellation_preserves_existing_environment_and_file(self):
+        with patch("builtins.input", side_effect=["y", "n"]), patch("getpass.getpass", return_value="dummy-old"):
+            self.setup(interactive=True)
+        original = self.path.read_bytes()
+        for answers, entry in ((["n"], None), (["y", "n"], None), (["y", "y"], "")):
+            with self.subTest(answers=answers):
+                with patch("builtins.input", side_effect=answers), patch("getpass.getpass", return_value=entry):
+                    result = self.setup(interactive=True, replace=True, environ={self.variable: "dummy-current"})
+                self.assertEqual(result[self.variable], "dummy-current")
+                self.assertEqual(self.path.read_bytes(), original)
+        for error in (EOFError, KeyboardInterrupt):
+            with self.subTest(error=error), patch("builtins.input", side_effect=["y", "y"]), \
+                    patch("getpass.getpass", side_effect=error):
+                result = self.setup(interactive=True, replace=True, environ={self.variable: "dummy-current"})
+            self.assertEqual(result[self.variable], "dummy-current")
+            self.assertEqual(self.path.read_bytes(), original)
+
     def test_insecure_saved_key_is_not_loaded(self):
         self.path.parent.mkdir(parents=True)
         self.path.write_text(f"export {self.variable}=dummy-key\n")
@@ -208,17 +225,6 @@ class ElevenLabsCredentialTests(CredentialTests):
                                 '. "$HOME/.bashrc"; [ "$ELEVENLABS_API_KEY" = "$1" ]',
                                 "test", existing or "dummy-saved"], env=environment, check=True)
 
-    def test_replacement_cancellation_preserves_existing_environment_and_file(self):
-        with patch("builtins.input", side_effect=["y", "n"]), patch("getpass.getpass", return_value="dummy-old"):
-            self.setup(interactive=True)
-        original = self.path.read_bytes()
-        for answers, entry in ((["n"], None), (["y", "n"], None), (["y", "y"], "")):
-            with self.subTest(answers=answers):
-                with patch("builtins.input", side_effect=answers), patch("getpass.getpass", return_value=entry):
-                    result = self.setup(interactive=True, replace=True, environ={self.variable: "dummy-current"})
-                self.assertEqual(result[self.variable], "dummy-current")
-                self.assertEqual(self.path.read_bytes(), original)
-
     def test_saved_openai_assignment_is_not_loaded_as_elevenlabs(self):
         self.path.parent.mkdir(parents=True)
         self.path.write_text("export OPENAI_API_KEY=dummy-other-provider\n")
@@ -235,6 +241,37 @@ class ElevenLabsCredentialTests(CredentialTests):
             self.assertEqual(self.setup(interactive=True)[self.variable], "$(id)")
         hidden.assert_not_called()
         self.assertEqual(self.path.read_text(), "export ELEVENLABS_API_KEY='$(id)'\n")
+
+
+class OpenRouterCredentialTests(CredentialTests):
+    variable = "OPENROUTER_API_KEY"
+    filename = "openrouter.env"
+    launch_options = {"cognition": "openai-compatible", "compatible_api_key_env": "OPENROUTER_API_KEY"}
+    setup_provider = staticmethod(setup_credentials)
+    replace_option = "replace_openrouter_key"
+    source_line = ('if [ -z "${OPENROUTER_API_KEY:-}" ] && '
+                   '[ -r "$HOME/.config/embodied-runtime/openrouter.env" ]; then '
+                   '. "$HOME/.config/embodied-runtime/openrouter.env"; fi')
+
+    def test_bash_startup_loads_missing_key_and_preserves_environment_key(self):
+        with patch("builtins.input", side_effect=["y", "y"]), patch("getpass.getpass", return_value="dummy-saved"):
+            self.setup(interactive=True)
+        for existing in (None, "", "dummy-environment"):
+            with self.subTest(existing=existing):
+                environment = {"HOME": str(self.home)}
+                if existing is not None:
+                    environment[self.variable] = existing
+                subprocess.run(["bash", "--noprofile", "--norc", "-c",
+                                '. "$HOME/.bashrc"; [ "$OPENROUTER_API_KEY" = "$1" ]',
+                                "test", existing or "dummy-saved"], env=environment, check=True)
+
+    def test_saved_openai_assignment_is_not_loaded_as_openrouter(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("export OPENAI_API_KEY=dummy-other-provider\n")
+        self.path.chmod(0o600)
+        with patch("builtins.input", side_effect=["y", ""]):
+            self.assertNotIn(self.variable, self.setup(interactive=True))
+        self.assertNotIn("dummy-other-provider", self.output.getvalue())
 
 
 class CredentialSelectionTests(unittest.TestCase):
@@ -264,6 +301,69 @@ class CredentialSelectionTests(unittest.TestCase):
                 launch = replace(self.launch(), vision="configured", vision_configuration=SimpleNamespace(
                     backends=[SimpleNamespace(api_key_env=variable)]))
                 self.assertEqual(required_credentials(launch), expected)
+
+    def test_openrouter_cognition_only_uses_configured_variable_name(self):
+        for variable, expected in (("OPENROUTER_API_KEY", ("OPENROUTER_API_KEY",)), ("CUSTOM_ROUTER_KEY", ())):
+            for base_url in ("https://openrouter.ai/api/v1", "https://compatible.example/v1"):
+                with self.subTest(variable=variable, base_url=base_url):
+                    launch = self.launch(cognition="openai-compatible", compatible_api_key_env=variable,
+                                         compatible_base_url=base_url)
+                    self.assertEqual(required_credentials(launch), expected)
+
+    def test_openrouter_vision_only_checks_every_enabled_chain_entry(self):
+        for variables in (("OPENROUTER_API_KEY",), ("CUSTOM_KEY", "OPENROUTER_API_KEY")):
+            with self.subTest(variables=variables):
+                launch = replace(self.launch(), vision="configured", vision_configuration=SimpleNamespace(
+                    backends=[SimpleNamespace(api_key_env=variable) for variable in variables]))
+                self.assertEqual(required_credentials(launch), ("OPENROUTER_API_KEY",))
+                self.assertEqual(required_credentials(replace(launch, vision="none")), ())
+
+    def test_openrouter_cognition_and_repeated_vision_entries_are_collected_once(self):
+        launch = replace(self.launch(cognition="openai-compatible", compatible_api_key_env="OPENROUTER_API_KEY"),
+                         vision="configured", vision_configuration=SimpleNamespace(
+                             backends=[SimpleNamespace(api_key_env="OPENROUTER_API_KEY")] * 2))
+        self.assertEqual(required_credentials(launch), ("OPENROUTER_API_KEY",))
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch("builtins.input", side_effect=["y", "n"]), \
+                patch("getpass.getpass", return_value="dummy-router") as hidden, redirect_stdout(io.StringIO()):
+            result = setup_credentials(launch, environ={}, home=Path(temporary) / "home",
+                                       repository=Path(temporary) / "repo", interactive=True)
+        hidden.assert_called_once()
+        self.assertEqual(result, {"OPENROUTER_API_KEY": "dummy-router"})
+
+    def test_unused_or_custom_openrouter_configuration_keeps_operator_environment(self):
+        launch = self.launch(cognition="openai-compatible", compatible_api_key_env="OPENROUTER_API_KEY")
+        disabled = replace(launch, cognition="none")
+        custom = replace(self.launch(cognition="openai-compatible", compatible_api_key_env="CUSTOM_ROUTER_KEY"),
+                         vision="configured", vision_configuration=SimpleNamespace(
+                             backends=[SimpleNamespace(api_key_env="CUSTOM_VISION_KEY")]))
+        environment = {"CUSTOM_ROUTER_KEY": "dummy-cognition", "CUSTOM_VISION_KEY": "dummy-vision"}
+        for launch in (disabled, custom):
+            with self.subTest(launch=launch), patch("builtins.input") as prompt:
+                self.assertEqual(required_credentials(launch), ())
+                self.assertEqual(setup_credentials(launch, environ=environment, interactive=True), environment)
+                prompt.assert_not_called()
+
+    def test_mixed_providers_collect_each_key_independently_after_cancellation(self):
+        launch = replace(self.launch(cognition="openai-responses", voice=True, tts="elevenlabs"),
+                         vision="configured", vision_configuration=SimpleNamespace(
+                             backends=[SimpleNamespace(api_key_env="OPENROUTER_API_KEY")]))
+        self.assertEqual(required_credentials(launch), ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ELEVENLABS_API_KEY"))
+        for openai in ({}, {"OPENAI_API_KEY": "dummy-openai"}):
+            with self.subTest(openai=openai), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary) / "home"
+                answers = ["y", "n", "y", "n"] if openai else ["n", "y", "n", "y", "n"]
+                with patch("builtins.input", side_effect=answers), \
+                        patch("getpass.getpass", side_effect=["dummy-router", "dummy-voice"]) as hidden, \
+                        redirect_stdout(io.StringIO()):
+                    result = setup_credentials(launch, environ=openai, home=home,
+                                               repository=Path(temporary) / "repo", interactive=True)
+                self.assertEqual(hidden.call_count, 2)
+                self.assertEqual(result, {**openai, "OPENROUTER_API_KEY": "dummy-router",
+                                          "ELEVENLABS_API_KEY": "dummy-voice"})
+                self.assertTrue((home / ".config/embodied-runtime/openrouter.env").is_file())
+                self.assertTrue((home / ".config/embodied-runtime/elevenlabs.env").is_file())
+                self.assertFalse((home / ".config/embodied-runtime/openai.env").exists())
 
     def test_both_required_keys_are_collected_independently(self):
         launch = self.launch(cognition="openai-responses", voice=True, tts="elevenlabs")

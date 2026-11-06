@@ -42,21 +42,26 @@ def verify_imports(extras):
 
 
 def configure_environment(config, *, with_sms=False, check_only=False, credentials_only=False,
-                          replace_openai_key=False, replace_elevenlabs_key=False):
+                          replace_openai_key=False, replace_elevenlabs_key=False,
+                          replace_openrouter_key=False):
     from embodied_runtime.config import load_runtime_config, resolve_launch_configuration
     from embodied_runtime.profile import load_profile
 
+    replacing = replace_openai_key or replace_elevenlabs_key or replace_openrouter_key
+    if replacing and not credentials_only:
+        raise SystemExit("Replacing a provider key requires --credentials-only; no key was changed.")
     repository = Path(__file__).resolve().parent.parent
     launch = resolve_launch_configuration(SimpleNamespace(), load_runtime_config(Path(config)))
     load_profile(launch.profile)
     extras = required_extras(launch, with_sms=with_sms)
     from embodied_runtime.credentials import required_credentials, setup_credentials
     if credentials_only:
-        if (replace_openai_key or replace_elevenlabs_key) and not (sys.stdin.isatty() and sys.stderr.isatty()):
+        if replacing and not (sys.stdin.isatty() and sys.stderr.isatty()):
             raise SystemExit("Replacing a provider key requires an interactive terminal; no key was changed.")
         environment = setup_credentials(launch, interactive=False if check_only else None,
                                         replace_openai_key=replace_openai_key,
-                                        replace_elevenlabs_key=replace_elevenlabs_key)
+                                        replace_elevenlabs_key=replace_elevenlabs_key,
+                                        replace_openrouter_key=replace_openrouter_key)
         missing = [name for name in required_credentials(launch) if not environment.get(name, "").strip()]
         if missing:
             raise SystemExit(", ".join(missing) + " still missing. Source the protected key file(s) and retry.")
