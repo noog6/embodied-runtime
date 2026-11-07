@@ -114,8 +114,11 @@ output: it creates no cognition turn, administrative mutation, or Job episode.
 Transport IDs map to existing runtime `REQ...` identifiers where the dispatcher
 produces one; normal request/result text remains present. Results are transferred
 in pages of at most 16,000 Unicode characters, preserving complete long responses
-without frame truncation. Retention is bounded by result count and age, and its
-memory use follows the full sizes of those results; it is not a durable store.
+without frame truncation. The client holds an unfinished line across pages and
+writes the final text with its trailing newlines before restoring the active
+prompt, preserving both the reply ending and any input draft. Retention is
+bounded by result count and age, and its memory use follows the full sizes of
+those results; it is not a durable store.
 
 Unknown/expired IDs are reported explicitly. A runtime restart has a new instance
 ID and can lose all transient results. The client reports a lost connection and

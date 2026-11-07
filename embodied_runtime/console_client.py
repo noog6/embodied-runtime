@@ -132,15 +132,22 @@ class ConsoleClient:
             return
         await self.terminal.display(f"\n{'Recovered response' if recovered else 'Response'} {request_id} ({state['state']})\n")
         offset = 0
+        pending = ""
         while True:
             page = await self.request({"type": "response", "id": request_id, "offset": offset})
             if page.get("state") == "unknown_or_expired":
                 raise ConsoleConnectionError("response retention expired during recovery; outcome is unknown")
-            await self.terminal.display(self.terminal.style.report(page["text"]))
+            pending += page["text"]
             offset = page["next"]
             if offset == page["chars"]:
+                await self.terminal.display(self.terminal.style.report(pending) + "\n\n")
                 break
-        await self.terminal.display("\n\n")
+            # A prompt redraw can erase an unfinished output line. Keep that
+            # tail across pages and end every display on a newline.
+            end = pending.rfind("\n") + 1
+            if end:
+                await self.terminal.display(self.terminal.style.report(pending[:end]))
+                pending = pending[end:]
         await self.receipt(request_id)
 
     async def close(self):
