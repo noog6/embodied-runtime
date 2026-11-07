@@ -2,13 +2,15 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
 import re
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from embodied_runtime.temporal_context import LocalDayWindow
 
 
 DEFAULT_HISTORY_ROOT = Path("data/runs")
@@ -219,7 +221,7 @@ class RunHistoryEvidenceReader:
         )
 
     def inspect(self, operation: object, run: object = None,
-                query: object = None) -> dict[str, object]:
+                query: object = None, *, window: LocalDayWindow | None = None) -> dict[str, object]:
         if operation not in ("recent", "overview", "search"):
             return self._rejected("invalid_tool_arguments")
         if operation == "recent":
@@ -232,7 +234,8 @@ class RunHistoryEvidenceReader:
                                       or len(query) > MAX_GREP_QUERY_LENGTH):
             return self._rejected("invalid_tool_arguments")
         if run == "previous_day":
-            return self._previous_day(operation, query)
+            return self._previous_day(operation, query, window or
+                                     LocalDayWindow.previous_day(self._clock(), self._timezone_name))
         resolved, reason = self._resolve(run)
         if resolved is None:
             return self._rejected(reason or "invalid_run_selector")
@@ -258,14 +261,18 @@ class RunHistoryEvidenceReader:
 
     def _safe_ids(self) -> list[str]:
         try:
-            numbered = []
-            for child in self._root.iterdir():
-                match = _RUN_DIRECTORY.fullmatch(child.name)
-                if match and not child.is_symlink() and child.is_dir():
-                    numbered.append((int(match.group(1)), child.name))
-            return [name for _, name in sorted(numbered, reverse=True)]
+            return self._discover_safe_ids()
         except OSError:
             return []
+
+    def _discover_safe_ids(self) -> list[str]:
+        """Strict discovery lets daily coverage distinguish an empty from a lost root."""
+        numbered = []
+        for child in self._root.iterdir():
+            match = _RUN_DIRECTORY.fullmatch(child.name)
+            if match and not child.is_symlink() and child.is_dir():
+                numbered.append((int(match.group(1)), child.name))
+        return [name for _, name in sorted(numbered, reverse=True)]
 
     def _resolve(self, selector: str) -> tuple[str | None, str | None]:
         if selector == "current":
@@ -369,21 +376,29 @@ class RunHistoryEvidenceReader:
             return None, False, "runtime_log_unavailable"
         return matches, False, ""
 
-    def _previous_day(self, operation: str, query: object) -> dict[str, object]:
+    def _previous_day(self, operation: str, query: object,
+                      window: LocalDayWindow) -> dict[str, object]:
         """Aggregate safe completed log records by local line timestamp."""
-        local_now = self._clock().astimezone(self._timezone)
-        calendar_date = local_now.date() - timedelta(days=1)
         categories: dict[str, int] = {}
         first: list[dict[str, object]] = []
         last: list[dict[str, object]] = []
         matches: list[dict[str, object]] = []
         run_ids: list[str] = []
         safe_count = 0
-        truncated = False
-        ids = list(reversed(self._safe_ids()))
-        if len(ids) > MAX_DAILY_RUNS:
-            truncated = True
-            ids = ids[-MAX_DAILY_RUNS:]
+        matching_count = 0
+        unclassified_timestamps = 0
+        unavailable: list[str] = []
+        readable = 0
+        discovery = "available"
+        try:
+            discovered = self._discover_safe_ids()
+            omitted_directories = max(0, len(discovered) - MAX_DAILY_RUNS)
+            ids = list(reversed(discovered[:MAX_DAILY_RUNS]))
+            discovered_count = len(discovered)
+        except OSError:
+            ids = []
+            discovery = "unavailable"
+            discovered_count = omitted_directories = None
         needle = query.casefold() if isinstance(query, str) else None
         for run_id in ids:
             represented = False
@@ -394,19 +409,19 @@ class RunHistoryEvidenceReader:
                         continue
                     try:
                         timestamp = datetime.fromisoformat(line.split(" ", 1)[0].replace("Z", "+00:00"))
-                    except ValueError:
+                    except (ValueError, OverflowError):
+                        unclassified_timestamps += 1
                         continue
-                    if timestamp.astimezone(self._timezone).date() != calendar_date:
+                    if not window.start <= timestamp < window.end:
                         continue
                     represented = True
                     safe_count += 1
                     item = {"run_id": run_id, **self._bounded_line(number, line)}
                     if operation == "search":
                         if needle in line.casefold():  # type: ignore[operator]
+                            matching_count += 1
                             if len(matches) < MAX_COGNITION_MATCHES:
                                 matches.append(item)
-                            else:
-                                truncated = True
                     else:
                         category = _STRUCTURED_LOG_RECORD.match(line).group(1)  # type: ignore[union-attr]
                         categories[category] = categories.get(category, 0) + 1
@@ -415,21 +430,38 @@ class RunHistoryEvidenceReader:
                         last.append(item)
                         if len(last) > 16:
                             last.pop(0)
+                readable += 1
             except (OSError, FileNotFoundError, RunDataUnavailable):
-                continue
+                unavailable.append(run_id)
             if represented:
                 run_ids.append(run_id)
+        by_key = {(item["run_id"], item["line_number"]): item for item in (*first, *last)}
+        returned = matches if operation == "search" else list(by_key.values())
+        coverage = ("unavailable" if discovery == "unavailable" or
+                    (ids and not readable and not safe_count) else
+                    "partial" if unavailable or omitted_directories or unclassified_timestamps else "complete")
+        omitted_lines = (matching_count if operation == "search" else safe_count) - len(returned)
+        clipped = sum(bool(item.get("truncated")) for item in returned)
         common = {"status": "applied", "operation": operation,
-                  "selector": "previous_day", "calendar_date": calendar_date.isoformat(),
-                  "timezone": self._timezone_name, "run_ids": run_ids,
-                  "safe_line_count": safe_count, "truncated": truncated}
+                  "selector": "previous_day", **window.metadata(), "run_ids": run_ids,
+                  "safe_line_count": safe_count if coverage != "unavailable" else None,
+                  "log_coverage": {
+                      "status": coverage, "scope": "retained_complete_model_safe_lines",
+                      "discovery": discovery, "directory_limit": MAX_DAILY_RUNS,
+                      "discovered_directories": discovered_count,
+                      "examined_directories": len(ids), "omitted_directories": omitted_directories,
+                      "readable_logs": readable, "unavailable_run_ids": unavailable,
+                      "unclassified_timestamp_lines": unclassified_timestamps,
+                  },
+                  "log_details": {"returned_lines": len(returned),
+                                  "omitted_lines": omitted_lines if coverage != "unavailable" else None,
+                                  "clipped_lines": clipped},
+                  "truncated": bool(coverage != "complete" or omitted_lines or clipped)}
         if operation == "search":
             return {**common, "query": query, "matches": matches}
-        by_key = {(item["run_id"], item["line_number"]): item for item in (*first, *last)}
         return {**common, "category_counts": dict(sorted(categories.items())),
                 "first_lines": first, "last_lines": last,
-                "lines": list(by_key.values()),
-                "truncated": truncated or safe_count > len(by_key)}
+                "lines": returned}
 
 
 class RunHistorySetupError(OSError):

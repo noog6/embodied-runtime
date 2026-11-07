@@ -149,7 +149,7 @@ from embodied_runtime.state import (
 from embodied_runtime.power import PowerMonitor, PowerMonitorPolicy
 from embodied_runtime.tasks import Task, TaskGoal, TaskStatus
 from embodied_runtime.temporal import TemporalFollowupController, TemporalFollowupStatus
-from embodied_runtime.temporal_context import TemporalContext, TemporalSituation
+from embodied_runtime.temporal_context import LocalDayWindow, TemporalContext, TemporalSituation
 from embodied_runtime.voice import (
     MICROPHONE_RESOURCE,
     TextToSpeechProvider,
@@ -5347,7 +5347,12 @@ class RobotApplication:
             "is only a partial snapshot persisted so far. A stored started status alone does "
             "not prove running, crashed, or abandoned. Attribute acquired facts to the run "
             "record, do not reconstruct withheld content, and inspect history only when "
-            "materially relevant."
+            "materially relevant. A previous_day overview also supplies JobRun metadata "
+            "accounting when Jobs persistence is available. Its overlapping counts refer "
+            "to retained records, not episode counts, output usefulness or scheduled "
+            "obligation fulfillment. Status at retrieval is not historical execution "
+            "state. Read log source coverage, database coverage and omitted details "
+            "separately; unavailable or unclassified evidence is not zero activity."
         )
 
     async def _request_initiative(
@@ -7916,18 +7921,55 @@ class RobotApplication:
                 raise RuntimeError("expected active goal is no longer current")
             operation, selector, query = self._normalize_run_history_arguments(call)
             run = None if operation == "recent" else selector
-            result = self._run_history_evidence.inspect(operation, run, query)
+            if selector == "previous_day":
+                window = LocalDayWindow.previous_day(self._aware_wall_clock(), self.timezone_name)
+                result = self._run_history_evidence.inspect(operation, run, query, window=window)
+                if operation == "overview":
+                    result["job_activity"] = self._daily_job_activity(window)
+            else:
+                result = self._run_history_evidence.inspect(operation, run, query)
         except (json.JSONDecodeError, TypeError, ValueError, RuntimeError):
             result = {"status": "rejected", "reason": "invalid_tool_arguments"}
         status = str(result.get("status", "rejected"))
         reason = result.get("reason")
-        count = len(result.get("matches", [])) if isinstance(result.get("matches"), list) else 0
-        LOGGER.info(
-            "[HISTORY] episode=%s operation=%s run=%s status=%s matches=%s reason=%s",
-            f"E{episode_id}" if episode_id is not None else "none", operation,
-            selector, status, count, reason or "none",
-        )
+        episode = f"E{episode_id}" if episode_id is not None else "none"
+        if operation == "search":
+            LOGGER.info(
+                "[HISTORY] episode=%s operation=%s run=%s status=%s matches=%s truncated=%s reason=%s",
+                episode, operation, selector, status, len(result.get("matches", [])),
+                str(result.get("truncated", False)).lower(), reason or "none")
+        elif operation == "overview":
+            evidence = result.get("evidence", result)
+            logs = result.get("log_coverage", {})
+            jobs = result.get("job_activity", {})
+            LOGGER.info(
+                "[HISTORY] episode=%s operation=%s run=%s status=%s returned_lines=%s "
+                "safe_lines=%s truncated=%s log_coverage=%s omitted_directories=%s "
+                "unavailable_logs=%s jobs_status=%s jobs_records=%s jobs_coverage=%s reason=%s",
+                episode, operation, selector, status, len(evidence.get("lines", [])),
+                result.get("safe_line_count", "unknown"),
+                str(evidence.get("truncated", False)).lower(), logs.get("status", "not_reported"),
+                logs.get("omitted_directories", "unknown"), len(logs.get("unavailable_run_ids", [])),
+                jobs.get("status", "not_requested"), jobs.get("totals", {}).get("records", "unknown"),
+                jobs.get("coverage", {}).get("status", "unavailable"), reason or "none")
+        else:
+            LOGGER.info(
+                "[HISTORY] episode=%s operation=%s run=%s status=%s returned_runs=%s reason=%s",
+                episode, operation, selector, status, len(result.get("runs", [])), reason or "none")
         return CognitionToolResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    def _daily_job_activity(self, window: LocalDayWindow) -> dict[str, object]:
+        """Compose operational metadata under history authority, never shared content."""
+        if self.jobs is None:
+            activity = {"status": "unavailable", "reason": "jobs_persistence_unavailable"}
+        else:
+            try:
+                activity = self.jobs.summarize_activity(
+                    window.start, window.end, retrieved_at=window.retrieved_at)
+            except sqlite3.Error:
+                activity = {"status": "unavailable", "reason": "jobs_storage_unavailable"}
+        activity.setdefault("coverage", {"status": "unavailable"})
+        return {"source": "configured_jobs_database", **window.metadata(), **activity}
 
     @staticmethod
     def _normalize_run_history_arguments(

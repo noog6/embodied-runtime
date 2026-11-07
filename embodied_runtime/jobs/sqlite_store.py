@@ -10,6 +10,7 @@ import sqlite3
 import unicodedata
 from zoneinfo import ZoneInfo
 
+from .activity import summarize_activity, timestamp_us
 from .focus import JobFocus, JobFocusProposal
 from .procedure import (ProcedureProposal, ProcedureFeedback, MAX_PROCEDURE_RUNS,
                         EXPERIMENT_DESCRIPTION, render_procedure)
@@ -115,6 +116,7 @@ class SQLiteJobStore:
         self._clock = clock
         self._connection = sqlite3.connect(path, timeout=timeout, isolation_level=None)
         self._connection.row_factory = sqlite3.Row
+        self._connection.create_function("job_activity_time", 1, timestamp_us, deterministic=True)
         self._connection.execute("PRAGMA foreign_keys = ON")
         try:
             self._initialize_schema()
@@ -530,6 +532,13 @@ class SQLiteJobStore:
             "SELECT * FROM job_runs WHERE job_id = ? ORDER BY id", (job_id,)
         ).fetchall()
         return tuple(_run(row) for row in rows)
+
+    def summarize_activity(self, start: datetime, end: datetime, *,
+                           retrieved_at: datetime) -> dict[str, object]:
+        if sqlite3.sqlite_version_info < (3, 35, 0):
+            return {"status": "unavailable", "reason": "sqlite_activity_aggregation_unsupported",
+                    "coverage": {"status": "unavailable"}}
+        return summarize_activity(self._connection, start, end, retrieved_at)
 
     def get_latest_completed_run(self, job_id: int) -> JobRun | None:
         """Return the newest completed occurrence, excluding every other state."""

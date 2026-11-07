@@ -137,6 +137,13 @@ latest-completed semantics. Its historical content is excluded from current
 Job-progress evidence; it does not change the operator tool's availability. Retrieval creates
 no JobRun, memory, readiness, progress, artifact, delivery, or acknowledgement.
 
+The existing history overview separately provides [daily recorded Job activity](run-history.md#daily-recorded-job-activity):
+IDs, timestamps and deterministic counts from this configured database, without
+Job-authored content. This operational metadata follows history-inspection
+authority in operator and autonomous work; it neither enables shared reads nor
+changes the result/Workspace permissions above. Day counts and retrieval-time
+status are distinct, and recorded completion does not establish output quality.
+
 Workspace inspection has operator and Job-owned authority paths, plus the
 independent opt-in source-selecting shared-read path. In operator dialogue, exact
 `JOB<n>` or exact case-sensitive Job-name selectors resolve the Job itself, so a
