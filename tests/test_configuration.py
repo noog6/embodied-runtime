@@ -490,7 +490,7 @@ request_timeout_seconds = 15
         with patch("embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)):
             self.assertEqual(main(["--config", str(valid)]), 0)
         invalid = self.write(
-            "[runtime]\ncognition='openai-responses'\nmode='run'\n"
+            "[runtime]\ncognition='openai-responses'\nmode='run'\nlocal_console_enabled=false\n"
             "[initiative]\nenabled=true\nmessages=true\n"
         )
         with patch("sys.stderr"), self.assertRaises(SystemExit):

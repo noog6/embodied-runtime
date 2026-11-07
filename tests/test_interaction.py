@@ -99,7 +99,7 @@ class InteractionIdentityTests(unittest.TestCase):
         ))
 
     def test_console_sink_and_message_keep_channel_separate_from_provenance(self):
-        sink = ConsoleOperatorMessageChannel()
+        sink = ConsoleOperatorMessageChannel(attached=True)
         message = OperatorMessage("hello", "initiative", CONSOLE_NOTIFICATION)
         self.assertEqual(sink.channel, InteractionChannel.CONSOLE)
         self.assertEqual(message.source, "initiative")
@@ -208,13 +208,13 @@ class InteractionIdentityTests(unittest.TestCase):
 
 class ConsoleChannelValidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_accepts_valid_console_notification(self):
-        channel = ConsoleOperatorMessageChannel()
+        channel = ConsoleOperatorMessageChannel(attached=True)
         message = OperatorMessage("hello", "initiative", CONSOLE_NOTIFICATION)
         await channel.deliver(message)
         self.assertIs(await channel.receive(), message)
 
     async def test_accepts_valid_operator_delivery(self):
-        channel = ConsoleOperatorMessageChannel()
+        channel = ConsoleOperatorMessageChannel(attached=True)
         message = OperatorMessage("hello", "voice", CONSOLE_DELIVERY)
         await channel.deliver(message)
         self.assertIs(await channel.receive(), message)
@@ -237,7 +237,7 @@ class ConsoleChannelValidationTests(unittest.IsolatedAsyncioTestCase):
             InteractionContext(InteractionChannel.CONSOLE, InteractionMode.NOTIFICATION,
                                InteractionInitiator.OPERATOR, False),
         )
-        channel = ConsoleOperatorMessageChannel()
+        channel = ConsoleOperatorMessageChannel(attached=True)
         for interaction in invalid:
             with self.assertRaises(ValueError):
                 await channel.deliver(OperatorMessage(
@@ -279,7 +279,7 @@ class OperatorDeliveryRouteCatalogTests(unittest.TestCase):
         )
 
     def test_valid_console_route_and_empty_catalog(self):
-        route = self.route(sink=ConsoleOperatorMessageChannel())
+        route = self.route(sink=ConsoleOperatorMessageChannel(attached=True))
         empty = OperatorDeliveryRouteCatalog()
         catalog = OperatorDeliveryRouteCatalog((route,))
 
@@ -1146,7 +1146,7 @@ class ConsoleDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 await self.release.wait()
                 return None
 
-        channel = ConsoleOperatorMessageChannel()
+        channel = ConsoleOperatorMessageChannel(attached=True)
         app = RobotApplication(
             RobotProfile("mira", "Mira"), VirtualHardwareBackend(),
             platform_provider=Platform(), body_backend=VirtualBodyBackend(),

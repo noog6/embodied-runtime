@@ -928,6 +928,7 @@ api_key_env="COGNITION_ROUTER_KEY"
 profile="mira"
 cognition="openai-responses"
 mode="console"
+local_console_enabled=false
 [initiative]
 enabled=true
 messages=true
@@ -935,6 +936,8 @@ messages=true
         with self.assertRaisesRegex(StartupError, "operator delivery route"):
             self.deployment(config=config)
         self.assertTrue(self.deployment(config=config, with_sms=True).launch.sms_enabled)
+        config.write_text(config.read_text().replace('local_console_enabled=false', 'local_console_enabled=true'))
+        self.assertTrue(self.deployment(config=config).launch.local_console_enabled)
 
     def test_root_requires_explicit_non_root_user(self) -> None:
         with self.assertRaisesRegex(StartupError, "requires --user"):

@@ -336,8 +336,17 @@ class OperatorDeliveryRouteCatalog:
 class ConsoleOperatorMessageChannel(OperatorMessageSink):
     """Transient queue joining runtime delivery to the local console."""
 
-    def __init__(self) -> None:
-        self._messages: asyncio.Queue[OperatorMessage] = asyncio.Queue()
+    def __init__(self, *, attached: bool = False) -> None:
+        self._messages: asyncio.Queue[OperatorMessage] = asyncio.Queue(maxsize=16)
+        self.attached = attached
+
+    def set_attached(self, attached: bool) -> None:
+        self.attached = attached
+        if not attached:
+            while not self._messages.empty():
+                message = self._messages.get_nowait()
+                if message.delivery_attempt is not None:
+                    message.delivery_attempt.finish('submission_unconfirmed', failure='transport_error')
 
     @property
     def channel(self) -> InteractionChannel:
@@ -364,8 +373,11 @@ class ConsoleOperatorMessageChannel(OperatorMessageSink):
         attempt = delivery_attempt(channel=self.channel,
             kind='report' if message.report_source is not None else (
                 'notification' if notification else 'message'), report_source=message.report_source)
+        if not self.attached or self._messages.full() or len(message.text.encode('utf-8')) > 64 * 1024:
+            attempt.finish('not_submitted', failure='transport_error')
+            raise RuntimeError('console is disconnected, full, or message exceeds 65536 bytes')
         queued = replace(message, delivery_attempt=attempt) if attempt.evidence is not None else message
-        await self._messages.put(queued)
+        self._messages.put_nowait(queued)
         attempt.finish('queued')
 
     async def receive(self) -> OperatorMessage:

@@ -56,12 +56,24 @@ keys](docs/secrets.md) procedure for local credential storage and delivery.
 The same bounded Jobs can also use [OpenRouter via compatible Chat Completions](docs/cognition-compatible.md)
 with an explicitly configured endpoint, credential variable, and tool-capable model.
 
-The local console projects the running runtime's current state and provides
-explicit operator controls for cognition, Jobs, memory, and diagnostics.
-For example, enter `status`,
-`body`, or `presence` at the profile-derived
-prompt, and enter `quit` to shut down cleanly. See [Local runtime
-console](docs/console.md).
+Run continuously in the foreground, or use the existing systemd service workflow:
+
+```console
+python main.py --config config/mira-agentic.toml --mode run
+```
+
+In another local terminal, as the same user, attach independently:
+
+```console
+python console.py
+```
+
+Enter `help`, `status`, or `jobs`. Leave with `quit` or EOF; the runtime and
+ongoing Jobs continue. The client never starts another agent and needs no API
+credentials. With multiple agents, select `python console.py --agent INSTANCE_ID`
+using an identity printed by discovery. The migration mode `python main.py --console`
+still owns its process: its `quit` and EOF stop that runtime. See [Local runtime
+console](docs/console.md) for recovery, configuration, and troubleshooting.
 
 Diagnostics report both the selected robot hardware backend and a separate
 snapshot of the real host platform, including available identity and resource

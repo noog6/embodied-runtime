@@ -182,6 +182,14 @@ line contains `--sms` only for the explicit override. Headless initiative
 messaging is checked with the same launch dependency validator used by the
 normal CLI.
 
+The local Unix console listener is enabled by default in this headless workflow.
+The operator attaches independently as the service user with `python console.py`
+and leaves with `quit`, keeping the service running. The wizard/service rendering
+does not need a terminal or an SSH `XDG_RUNTIME_DIR` and changes no supervision
+policy for attachment. Configure `[runtime] local_console_enabled = false` to
+disable it, or set an absolute `local_console_directory` and matching client
+`--directory`. See [console endpoint policy](console.md#endpoint-policy-and-troubleshooting).
+
 The unit uses `Type=simple`, waits for network-online and sound targets, writes
 stdout/stderr to journald, allows 30 seconds to stop, and uses
 `Restart=on-failure` with a 10-second delay. Three starts within 300 seconds
@@ -334,6 +342,12 @@ sudo systemctl restart mira-ngrok.service
 systemd owns supervisor output in journald. The runtime continues to own its
 per-run records under `data/runs/Rxx/`; no additional daemon log is created.
 
+From a shell as the service user, activate the environment and run
+`python console.py`. Use `--agent INSTANCE_ID` if discovery lists more than one
+runtime. `status`, `jobs`, and `help` run inside the existing service; `quit`
+disconnects the client. Keep routine log inspection in `journalctl`, not the
+console. Attach/detach never restarts the service.
+
 Uninstalling an ngrok-enabled deployment stops/disables only its profile-scoped
 units and removes the managed unit, YAML, and non-secret state. Both environment files are
 preserved unless `--purge-env` is explicit. It never removes the ngrok binary,
@@ -341,6 +355,33 @@ domain/account, unrelated `ngrok.service`, global configuration, or Twilio
 resources.
 
 ## Raspberry Pi acceptance plan
+
+The separate-console implementation has offline coverage; the following Pi and
+systemd checks must be performed by an authorized operator on the target:
+
+1. Review the deployed revision/configuration, then start the existing service
+   with `sudo systemctl start mira.service`. Check its journal for the local
+   listener and note systemd's `MainPID`. Use the configured service user below.
+2. In an SSH shell with the venv active, run `python console.py`. Record the
+   handshake runtime instance ID. Run `help`, `status`, `jobs`, and `job current`;
+   record any ongoing RUN IDs. These checks require no physical motion commands.
+3. Use Up/Down, cursor editing, Unicode, resize, bracketed paste, and Ctrl+C on
+   an unfinished draft. Confirm the draft is cleared, no command is submitted,
+   and the runtime ID/MainPID and Job state remain unchanged.
+4. Enter `quit`, attach again, and compare the instance ID, MainPID and existing
+   Job/RUN identities. Repeat with EOF and closing the client terminal.
+5. With explicitly authorized bounded cognition/manual Job work, note the
+   accepted request ID, close the client while it runs, and reconnect. Confirm
+   outstanding work is shown, a conflicting command is rejected while busy, and
+   `--recover REQUEST_ID` retrieves its result without another episode or mutation.
+6. Try a second console while the first is attached; expect rejection. Stop the
+   service through systemd; the client must report connection loss and the owned
+   endpoint must disappear. Start it again and verify a new instance ID and no
+   invented transient old response. Verify persistent Jobs by their normal store
+   semantics rather than expecting transient response retention across restart.
+
+These checks do not require changing supervision, installing Jobs, modifying
+live configuration, or operating actuators as part of implementation validation.
 
 On the target Pi: install and confirm both units enabled; start both; confirm
 Mira reports SMS ready and ngrok is active; send one inbound SMS and confirm

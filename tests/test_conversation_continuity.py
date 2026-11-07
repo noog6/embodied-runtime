@@ -393,7 +393,7 @@ class RuntimeContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_console_queue_is_not_terminal_confirmation(self):
         from embodied_runtime.interaction import ConsoleOperatorMessageChannel, OperatorMessage, operator_delivery
         app = await self.app()
-        channel = ConsoleOperatorMessageChannel()
+        channel = ConsoleOperatorMessageChannel(attached=True)
         evidence = app.continuity.begin(InteractionChannel.VOICE)
         token = CURRENT_REQUEST.set(evidence)
         try:
