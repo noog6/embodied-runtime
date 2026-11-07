@@ -1,5 +1,161 @@
 # Local runtime console
 
+## Attach to a running agent
+
+Start through the existing foreground or systemd workflow. The checked-in Mira
+configuration retains combined console mode, so explicitly select headless mode
+for a continuous foreground process:
+
+```sh
+python main.py --config config/mira-agentic.toml --mode run
+# In another terminal, under the same Unix user:
+python console.py
+```
+
+The service renderer already selects `--mode run`; no terminal, service restart,
+or configuration reload is needed when an operator attaches or leaves. The
+handshake displays agent name, profile identifier, a fresh runtime instance ID,
+and connection state. `help` comes from the runtime dispatcher. `quit`, `exit`,
+EOF, terminal closure, SIGTERM, or a client crash disconnect only this terminal.
+Ctrl+C clears input and resets history navigation; it does not cancel
+accepted work or stop the runtime. Stop the runtime through the existing
+process/systemd mechanisms. There is no new shutdown command.
+
+The client owns the existing asynchronous terminal editor, colours, prompt,
+rendering, and temporary command history. It imports no application, provider,
+hardware backend, persistence store, or configuration loader and needs no API
+credentials. The runtime owns a single `RuntimeConsole` dispatcher, application
+state, conversation continuity, and all existing command authority checks.
+Attaching changes no dialogue identity. Natural language after `ask`, quoting,
+operator coordination, Job execution, and physical-resource arbitration use the
+existing runtime paths. Paths such as `camera capture relative.jpg` are relative
+to the **runtime's working directory** (the repository for generated services),
+regardless of the client's directory. An absolute invocation such as
+`/path/to/venv/bin/python /path/to/repo/console.py` works from another directory.
+
+Connection options, also shown by `python console.py --help`:
+
+| Option | Meaning |
+| --- | --- |
+| `--agent ID` | Select an exact profile identifier or full runtime instance ID; duplicate profile identifiers require an instance ID. |
+| `--directory /absolute/path` | Use the private socket directory selected by runtime `--local-console-directory`. |
+| `--socket /absolute/path/agent-INSTANCE.sock` | Connect to an explicit endpoint, bypassing discovery. |
+| `--recover REQUEST_ID` | Inspect/wait for accepted work and retrieve its retained response without executing it. |
+| `--no-color` | Disable colours; `NO_COLOR` is also respected. |
+
+Exactly one discovered runtime is selected automatically. None produces an
+actionable nonzero exit; multiple runtimes are listed and require selection.
+One attachment is allowed per runtime. An attached client or legacy embedded
+console causes a clear rejection of another client. Discovery probes do not
+occupy the slot. Headless logs remain in journald and run history; the detached
+console displays replies and operator messages, not a stream of runtime logs.
+
+## Endpoint policy and troubleshooting
+
+The deterministic default is `/tmp/embodied-runtime-<effective-uid>/`, ignoring
+`HOME`, `TMPDIR`, and `XDG_RUNTIME_DIR`. Thus a normal systemd service and SSH shell
+resolve the same endpoint directory despite different environments. It must be
+owned by that user with mode `0700`; instance-unique sockets have mode `0600`.
+Ancestors must be real directories owned by the user or the filesystem's system
+owner and must not be group/other writable, except a system-owned sticky
+directory such as `/tmp`. Symlinks, unsafe permissions, and wrong-owner sockets
+are rejected. Linux `SO_PEERCRED` checks effective UID on both ends. This is a
+same-user trust boundary, not isolation from a compromised same-user process.
+There are no TCP listeners, remote endpoints, authentication credentials, or
+network discovery in this feature.
+
+Set `[runtime] local_console_enabled = false` or pass `--no-local-console` to
+disable the listener. Explicit `--local-console` enables it again. Set
+`local_console_directory = "/absolute/private/directory"` under `[runtime]`, or
+pass `--local-console-directory`, to override the directory; use matching client
+`--directory` or an exact `--socket`. CLI overrides TOML, then defaults. The
+directory's parent must already exist. Diagnostics mode opens no listener.
+An enabled listener setup failure is fatal, prints an actionable error, and
+cleans up the application; it never claims console availability. Disabling the
+listener leaves legacy `--console` usable.
+
+For connection failures, check the service is running, use the service's Unix
+user, inspect journald for `[CONSOLE] status=listening` or a setup error, and
+check the directory and explicit selection. A custom service with `PrivateTmp`
+or another filesystem namespace needs an explicitly shared private directory;
+the repository's generated unit does not enable `PrivateTmp`. Runtime crashes
+can leave stale sockets. Discovery bounds and reports failed probes, never
+deletes their endpoints, and continues past them. After verifying an endpoint
+is stale, an operator may remove it manually. Runtime startup never replaces
+an existing socket; shutdown removes only its own socket with the same device
+and inode. Excess stale entries require explicit `--socket` selection or manual
+cleanup: discovery scans at most 256 entries and probes at most 64 endpoints,
+eight concurrently. Handshake/connect/write waits are bounded to two seconds
+per stage; an incomplete frame has a two-second deadline. An idle attached
+terminal may remain connected indefinitely.
+
+## Acceptance, reconnect, and delivery
+
+The client prints a transport request ID before submission. Acceptance occurs
+when the runtime records that ID and creates its independently owned command
+task, **before** writing `accepted`. One command may be accepted at a time;
+there is no pending command backlog. Disconnecting cannot cancel this task.
+Reconnecting exposes the outstanding ID and refuses conflicting submissions
+until that task finishes. Runtime shutdown still cancels owned execution through
+normal cleanup, and explicit Job cancellation retains its existing meaning.
+
+Each instance retains up to 16 complete recent command states/results for 15
+minutes after completion, evicting the oldest on capacity pressure. Active work
+does not expire. Expiry is checked on access and by a 30-second cleanup task.
+The reconnect handshake lists retained IDs and output-confirmation state; an
+outstanding response is recovered automatically. For a completed response use:
+
+```sh
+python console.py --agent INSTANCE_ID --recover REQUEST_ID
+```
+
+Recovered text is labelled **Recovered response**. Recovery only reads retained
+output: it creates no cognition turn, administrative mutation, or Job episode.
+Transport IDs map to existing runtime `REQ...` identifiers where the dispatcher
+produces one; normal request/result text remains present. Results are transferred
+in pages of at most 16,000 Unicode characters, preserving complete long responses
+without frame truncation. Retention is bounded by result count and age, and its
+memory use follows the full sizes of those results; it is not a durable store.
+
+Unknown/expired IDs are reported explicitly. A runtime restart has a new instance
+ID and can lose all transient results. The client reports a lost connection and
+does not automatically reconnect or resubmit. A lost acceptance acknowledgement
+can leave execution uncertain: inspect/recover the printed ID, and use existing
+request/Job history when appropriate. Do not infer that an unknown ID did not
+execute. There is no exactly-once execution or delivery guarantee across crashes.
+
+The wire format is version 1: four-byte unsigned big-endian byte length followed
+by a UTF-8 JSON object with an explicit `type`. Unsupported versions are rejected.
+Messages cover `hello` (discovery/attachment), `command`, `accepted`, `rejected`,
+`status`, paged `response`, `notification`, `receipt`, and `error`. Frames are
+limited to 128 KiB and commands to 64 KiB of UTF-8, subject also to the encoded
+frame limit. Oversize commands are rejected before execution. This accommodates
+2,000-character Job descriptions and bounded 8,000-character Workspace reads;
+larger aggregate responses use pages. There is no Python object deserialization,
+shell execution transport, or generic RPC interface. At most 16 connection
+handlers exist. Output has no unbounded queue: the handler and notification pump
+share a write lock with a two-second total wait/write deadline.
+
+A configured route, attachment, acceptance, execution completion, and response
+delivery are separate facts. Merely completing work does not create a successful
+delivery receipt. Each response retrieval begins an attempt; only a client
+receipt after writing/flushing the complete response records `terminal_written`.
+A socket write alone proves no terminal output. Even `terminal_written` does not
+prove human reading or acknowledgement. A repeat recovery may display the same
+text again but does not repeat execution.
+
+Console-directed operator notifications and deliveries use the existing route
+and receipt model. With no attachment, delivery fails as `not_submitted`; it
+does not queue offline or fall back to SMS. When attached, there are at most 16
+queued messages of at most 64 KiB each and 16 awaiting terminal receipts. Queue
+acceptance records `queued`, not human delivery. A terminal receipt advances it
+to `terminal_written`; disconnect/write failure leaves unconfirmed output and
+drops pending messages. Missing receipts/full output disconnect a slow client.
+Notifications have no recovery, persistence, automatic retry, or durable backlog.
+Command-result retention is independent of this lossy notification policy.
+
+## Commands and the combined migration mode
+
 `job files JOB<n> [directory]` lists at most one bounded Workspace directory
 page without recursion. `job file JOB<n> <logical-path> [offset_chars]` reads at
 most 8,000 Unicode characters and reports its SHA-256 content version, byte
@@ -20,7 +176,12 @@ available and the single bounded
 `schedule_followup` semantic effect; `--initiative-actions` permits
 `orient_body` on a nonphysical body; and `--initiative-messages` permits
 `address_operator`. The latter requires a configured operator delivery route:
-`--console` or enabled SMS. Headless SMS operation is supported. No flag silently enables
+the enabled local-console endpoint (default), legacy `--console`, or enabled SMS.
+Headless mode preserves SMS notification selection when SMS is enabled, while
+keeping the local console available for operator commands. Otherwise it selects
+the configured console; embedded `--console` mode also retains console selection.
+Attachment, detachment, and delivery failure never switch the selected route.
+No flag silently enables
 another. With both effect permissions, both tools are offered but the runtime accepts
 only one semantic effect unless bounded continuation is explicitly enabled; the
 two read-only acquisition attempts have a separate budget. Goal
@@ -39,7 +200,9 @@ sleep loop. EOF, quit, cancellation, and shutdown clean pending waits. Questions
 are delivered once and create no pending reply. Messages are not a console
 history, RuntimeState, WorkingMemory, or EventBus history.
 
-Run `python main.py --console` for the asynchronous local console. Normal
+Run `python main.py --console` for the compatible combined process/console. Its
+quit, exit, EOF and configured shutdown interrupts still stop the runtime, and it
+occupies the attachment slot for its entire lifecycle. Normal
 full-agentic Mira startup uses
 `python main.py --config config/mira-agentic.toml`; the file selects console mode
 and the established initiative permissions. See [Runtime startup
@@ -142,7 +305,8 @@ retaining the terminal controls needed to edit. When stdin or stdout is not a
 TTY, the original asynchronous plain line reader is used; redirected stdout
 receives no editor escape sequences.
 
-The default `--ctrl-c-shutdown auto` clears unfinished console input and resets
+In combined `main.py --console` mode, the default `--ctrl-c-shutdown auto`
+clears unfinished console input and resets
 history navigation. It never submits the draft or interrupts executing commands,
 cognition, Jobs, or the runtime. `--ctrl-c-shutdown enabled` requests graceful
 shutdown instead. `disabled` also keeps headless mode running on Ctrl+C. These
@@ -155,6 +319,8 @@ Signals arriving after quit, EOF, or diagnostics have begun application cleanup
 wait for that cleanup to finish. They only cancel console/diagnostics execution
 while startup or commands are still active. Task cancellation remains independent
 and propagates; cleanup errors are not converted into successful signal exits.
+The separately attached client always uses the clear-input behavior; it has no
+runtime shutdown policy option.
 
 The interactive implementation uses `prompt_toolkit` 3's async API rather than
 custom raw-mode escape parsing, Unicode width calculations, and wrapped-row

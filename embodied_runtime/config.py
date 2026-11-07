@@ -27,6 +27,8 @@ class RuntimeFileConfig:
     mode: str | None = None
     timezone: str | None = None
     ctrl_c_shutdown: str | None = None
+    local_console_enabled: bool | None = None
+    local_console_directory: str | None = None
 
 
 @dataclass(frozen=True)
@@ -283,6 +285,8 @@ class LaunchConfiguration:
     vision_configuration: VisionConfiguration = VisionConfiguration()
     conversation_media: MediaRetentionConfiguration = MediaRetentionConfiguration()
     ctrl_c_shutdown: str = "auto"
+    local_console_enabled: bool = True
+    local_console_directory: Path | None = None
 
     @property
     def ctrl_c_shutdown_enabled(self) -> bool:
@@ -326,6 +330,7 @@ HISTORICAL_DEFAULTS = LaunchConfiguration(
 _RUNTIME_KEYS = {
     "profile", "hardware", "camera", "cognition", "vision", "mode", "timezone",
     "ctrl_c_shutdown",
+    "local_console_enabled", "local_console_directory",
 }
 _COGNITION_KEYS = {"model", "openai_compatible"}
 _COMPATIBLE_KEYS = {
@@ -571,6 +576,15 @@ def load_runtime_config(path: Path) -> RuntimeFileConfiguration:
 
     for key, value in runtime.items():
         name = f"runtime.{key}"
+        if key == "local_console_enabled":
+            if type(value) is not bool:
+                raise ConfigurationError(f"{name} must be boolean")
+            continue
+        if key == "local_console_directory":
+            if (not isinstance(value, str) or not value.strip()
+                    or not Path(value).is_absolute() or '..' in Path(value).parts):
+                raise ConfigurationError(f"{name} must be an absolute directory without '..'")
+            continue
         if not isinstance(value, str):
             raise ConfigurationError(f"{name} must be a string")
         choices = _ENUMS.get(name)
@@ -714,6 +728,8 @@ def resolve_launch_configuration(
         raise ConfigurationError("vision.backends requires vision = 'configured' or 'none'; --vision openai-responses cannot discard the configured chain")
     if vision == "configured" and not file_config.vision.backends:
         raise ConfigurationError("vision = 'configured' requires vision.backends")
+    local_console_directory = scalar(
+        "local_console_directory", runtime.local_console_directory, None)
     compatible = OpenAICompatibleConfig(**{
         name: scalar("compatible_" + name, getattr(cognition.openai_compatible, name), None)
         for name in _COMPATIBLE_KEYS
@@ -736,6 +752,9 @@ def resolve_launch_configuration(
         conversation_media=file_config.conversation_media,
         mode=mode,
         ctrl_c_shutdown=scalar("ctrl_c_shutdown", runtime.ctrl_c_shutdown, "auto"),
+        local_console_enabled=scalar("local_console_enabled", runtime.local_console_enabled, True),
+        local_console_directory=(Path(local_console_directory)
+                                 if local_console_directory is not None else None),
         timezone=runtime.timezone or HISTORICAL_DEFAULTS.timezone,
         interaction_environment=(interaction.environment
                                  or HISTORICAL_DEFAULTS.interaction_environment),

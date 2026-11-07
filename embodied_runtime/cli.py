@@ -25,6 +25,8 @@ from embodied_runtime.cognition.factory import (
 from embodied_runtime.conversation_history import SQLiteConversationHistoryStore
 from embodied_runtime.conversation_media import ConversationMediaStore, MediaRetentionConfiguration
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
+from embodied_runtime.console_protocol import ConsoleConnectionError
+from embodied_runtime.console_server import LocalConsoleServer
 from embodied_runtime.config import (
     ConfigurationError, LaunchConfiguration, load_runtime_config,
     resolve_launch_configuration,
@@ -142,6 +144,11 @@ def build_parser(*, explicit_configurable_values: bool = False) -> argparse.Argu
                         default=configurable_default("none"))
     parser.add_argument("--no-color", action="store_true",
                         help="disable ANSI colour in console and runtime logs")
+    parser.add_argument("--local-console", action=argparse.BooleanOptionalAction,
+                        dest="local_console_enabled", default=configurable_default(True),
+                        help="enable the separately attachable local Unix console (default enabled)")
+    parser.add_argument("--local-console-directory", type=Path,
+                        help="absolute private directory for instance-unique console sockets")
     parser.add_argument(
         "--ctrl-c-shutdown", choices=("auto", "enabled", "disabled"),
         default=configurable_default("auto"),
@@ -271,6 +278,8 @@ def parse_launch_arguments(
     except ConfigurationError as error:
         parser.error(str(error))
     args.profile = effective.profile
+    args.local_console_enabled = effective.local_console_enabled
+    args.local_console_directory = effective.local_console_directory
     args.hardware = effective.hardware
     args.camera = effective.camera
     args.cognition = effective.cognition
@@ -572,13 +581,16 @@ async def _run_console_application(
     message_channel: ConsoleOperatorMessageChannel | None,
     history_root: Path = DEFAULT_HISTORY_ROOT,
     *, cleanup_started: asyncio.Event | None = None,
+    local_console: LocalConsoleServer | None = None,
 ) -> int:
     """Own the console's interrupt and cleanup lifecycle in one boundary."""
     try:
         await application.start()
+        if local_console is not None:
+            await local_console.start()
         LOGGER.info("[CONSOLE] mode=local status=ready")
         await run_console_session(
-            RuntimeConsole(application, history_root=history_root),
+            local_console.console if local_console is not None else RuntimeConsole(application, history_root=history_root),
             terminal,
             message_channel,
         )
@@ -590,7 +602,11 @@ async def _run_console_application(
     finally:
         if cleanup_started is not None:
             cleanup_started.set()
-        await application.stop()
+        try:
+            if local_console is not None:
+                await local_console.close()
+        finally:
+            await application.stop()
     return 0
 
 
@@ -632,7 +648,8 @@ async def _run_application(
 
             sms_service = TwilioSmsService(settings, request_sms_cognition,
                 image_limits=args.vision_configuration.image_limits, media_store=media_store)
-        message_channel = ConsoleOperatorMessageChannel() if args.console else None
+        console_route_enabled = args.console or (args.local_console_enabled and not args.diagnostics)
+        message_channel = ConsoleOperatorMessageChannel() if console_route_enabled else None
         routes: list[OperatorDeliveryRoute] = []
         if message_channel is not None:
             routes.append(OperatorDeliveryRoute(
@@ -647,7 +664,9 @@ async def _run_application(
                 ), sms_service,
             ))
         delivery_routes = OperatorDeliveryRouteCatalog(routes)
-        notification_sink = message_channel or sms_service
+        # Preserve embedded-console routing and the existing headless SMS default.
+        # The local endpoint and its attachment state never displace that selection.
+        notification_sink = message_channel if args.console else (sms_service or message_channel)
         persistent_memory = build_persistent_memory_store(args)
         if persistent_memory is not None:
             composition_cleanup.callback(persistent_memory.close)
@@ -764,25 +783,45 @@ async def _run_application(
             await application.stop()
         return 0
 
+    local_console = LocalConsoleServer(
+        RuntimeConsole(application, history_root=history_root, process_owning=args.console), message_channel,
+        directory=args.local_console_directory, legacy=args.console,
+    ) if args.local_console_enabled else None
     if args.console:
         return await _run_console_application(
             application, terminal or AsyncLineTerminal(no_color=args.no_color), message_channel,
             history_root,
             cleanup_started=cleanup_started,
+            local_console=local_console,
         )
 
-    return await _run_headless_application(application, shutdown_requested)
+    return await _run_headless_application(application, shutdown_requested, local_console=local_console)
 
 
 async def _run_headless_application(
     application: RobotApplication,
     shutdown_requested: asyncio.Event | None = None,
+    *, local_console: LocalConsoleServer | None = None,
 ) -> int:
     """Run one headless application, including the daemon shutdown race."""
+    async def run():
+        if local_console is None:
+            await application.run()
+            return
+        try:
+            await application.start()
+            await local_console.start()
+            await application.wait_for_stop()
+        finally:
+            try:
+                await local_console.close()
+            finally:
+                await application.stop()
+
     if shutdown_requested is None:
-        await application.run()
+        await run()
         return 0
-    run_task = asyncio.create_task(application.run(), name="application-run")
+    run_task = asyncio.create_task(run(), name="application-run")
     signal_task = asyncio.create_task(shutdown_requested.wait(), name="sigterm-wait")
     try:
         done, _ = await asyncio.wait(
@@ -958,6 +997,7 @@ def main(
         PiperTTSUnavailableError,
         OpenAITTSUnavailableError,
         ElevenLabsTTSUnavailableError,
+        ConsoleConnectionError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         result = 2
@@ -1007,6 +1047,10 @@ def validate_launch_dependencies(args: argparse.Namespace) -> None:
         args.cognition, getattr(args, "cognition_model", None),
         getattr(args, "cognition_openai_compatible", OpenAICompatibleConfig()),
     )
+    if args.local_console_directory is not None and (
+        not args.local_console_directory.is_absolute() or '..' in args.local_console_directory.parts
+    ):
+        raise ConfigurationError('--local-console-directory must be absolute without ..')
     if args.initiative_platform_attention and not args.initiative:
         raise ConfigurationError("--initiative-platform-attention requires --initiative")
     if args.initiative_goal_closure and not args.initiative:
@@ -1015,10 +1059,10 @@ def validate_launch_dependencies(args: argparse.Namespace) -> None:
         raise ConfigurationError("--initiative-actions requires --initiative")
     if args.initiative_messages and not args.initiative:
         raise ConfigurationError("--initiative-messages requires --initiative")
-    if args.initiative_messages and not (args.console or args.sms_enabled):
+    if args.initiative_messages and not (args.console or args.local_console_enabled or args.sms_enabled):
         raise ConfigurationError(
             "--initiative-messages requires a configured operator delivery route "
-            "(--console or enabled SMS)"
+            "(enabled local console, --console, or enabled SMS)"
         )
     if args.initiative_continuation and not args.initiative:
         raise ConfigurationError("--initiative-continuation requires --initiative")

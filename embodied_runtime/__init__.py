@@ -1,8 +1,21 @@
 """Reusable runtime for embodied agents."""
 
-from embodied_runtime.app import ApplicationOptions, RobotApplication
-from embodied_runtime.profile import RobotProfile, load_profile
-from embodied_runtime.state import BodyState, LifecycleState, PresenceState, RuntimeState
+from importlib import import_module
+
+
+def __getattr__(name):
+    """Preserve public imports without initializing the runtime in console clients."""
+    modules = {
+        "ApplicationOptions": "app", "RobotApplication": "app",
+        "RobotProfile": "profile", "load_profile": "profile",
+        "BodyState": "state", "LifecycleState": "state",
+        "PresenceState": "state", "RuntimeState": "state",
+    }
+    if name not in modules:
+        raise AttributeError(name)
+    value = getattr(import_module(f"embodied_runtime.{modules[name]}"), name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "ApplicationOptions",

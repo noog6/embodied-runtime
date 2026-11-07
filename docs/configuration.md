@@ -108,6 +108,8 @@ vision = "openai-responses"
 mode = "console"
 ctrl_c_shutdown = "auto"
 timezone = "America/Toronto"
+local_console_enabled = true
+# local_console_directory = "/absolute/private/directory"
 
 [cognition]
 model = "gpt-5.6-luna"
@@ -205,6 +207,17 @@ python main.py --config config/mira-agentic.toml --mode run
 ```
 
 The compatibility shortcuts `--console` and `--diagnostics` remain available.
+
+Normal `run` mode exposes a separately attachable local console by default:
+`python console.py`. Under `[runtime]`, `local_console_enabled` is a strict
+boolean, default `true`; `--local-console` / `--no-local-console` override it.
+`local_console_directory` is an optional absolute private-directory path, also
+settable with `--local-console-directory`. The default is
+`/tmp/embodied-runtime-<effective-uid>`, independent of shell/service environment
+variables. Use client `--directory` to match an override or `--socket` for an
+exact endpoint. Diagnostics opens no listener. An enabled endpoint setup failure
+aborts startup with an actionable error. See [local endpoint policy, recovery,
+and delivery](console.md#endpoint-policy-and-troubleshooting).
 Mode selectors are mutually exclusive. An intended future supervised launch
 can therefore run the same robot configuration headlessly with configured SMS:
 
@@ -231,7 +244,9 @@ resets only the draft and history navigation, including repeated interrupts
 during a command; it does not cancel commands, cognition, or Jobs. An enabled
 interrupt during an executing console command cancels that command as part of
 ordinary lifecycle cleanup. Signal-requested graceful shutdown returns success.
-`exit`, `quit`, and console EOF still stop normally. See the
+`exit`, `quit`, and console EOF in the combined `main.py --console` mode still
+stop normally. In the detached `console.py` client they disconnect only that
+terminal; its Ctrl+C always resets input without stopping runtime work. See the
 [console editor and SSH acceptance checks](console.md#input-editing-and-interrupts).
 
 The initiative values, `voice.enabled`, and `voice.wake_word_enabled` must be
@@ -340,8 +355,13 @@ is inert unless voice and the physical Fusion HAT provider are available. See
 and intentionally excluded audio features.
 
 Dependencies are checked once against the final merged values. For example,
-initiative messages configured with `mode = "run"` become valid when the
-operator explicitly adds `--console`.
+initiative messages configured with `mode = "run"` select SMS when enabled,
+otherwise the enabled local-console route. The endpoint remains available for
+operator commands alongside SMS; attaching and detaching never changes the
+selected notification route. Embedded `--console` mode retains console selection.
+When console is selected, delivery fails truthfully while detached; delivery
+failure on either route never causes automatic fallback to the other. If the
+endpoint is disabled, initiative messages require legacy `--console` or enabled SMS.
 
 `runtime.vision` accepts `"none"` or `"openai-responses"`; the matching explicit
 CLI override is `--vision`. A final effective vision value other than `none`

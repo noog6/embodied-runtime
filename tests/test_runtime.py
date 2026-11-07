@@ -527,8 +527,8 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(task, 1), 0)
         self.assertTrue(finished.is_set())
 
-    async def test_headless_sms_composition_has_no_console_infrastructure(self):
-        _, args, _ = parse_launch_arguments(["--mode", "run", "--sms"])
+    async def test_headless_sms_can_explicitly_disable_console_infrastructure(self):
+        _, args, _ = parse_launch_arguments(["--mode", "run", "--sms", "--no-local-console"])
         application = mock.Mock()
         application.run = AsyncMock(return_value=None)
         environment = {
@@ -556,6 +556,37 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
             [("sms", "remote_text")],
         )
 
+    async def test_headless_default_composes_console_route_without_terminal(self):
+        from embodied_runtime.interaction import ConsoleOperatorMessageChannel
+        _, args, _ = parse_launch_arguments(["--mode", "run"])
+        application = mock.Mock()
+        with patch('embodied_runtime.cli.RobotApplication', return_value=application) as constructor, patch(
+            'embodied_runtime.cli._run_headless_application', new=AsyncMock(return_value=0),
+        ) as run, patch('embodied_runtime.cli.AsyncLineTerminal') as terminal:
+            self.assertEqual(await _run_application(args, RobotProfile('test', 'Test')), 0)
+        terminal.assert_not_called()
+        sink = constructor.call_args.kwargs['operator_message_sink']
+        self.assertIsInstance(sink, ConsoleOperatorMessageChannel)
+        self.assertFalse(sink.attached)
+        routes = constructor.call_args.kwargs['operator_delivery_routes']
+        self.assertIs(routes.resolve('console').sink, sink)
+        self.assertIs(run.await_args.kwargs['local_console'].messages, sink)
+
+    async def test_combined_console_keeps_console_notifications_with_sms_enabled(self):
+        from embodied_runtime.interaction import InteractionChannel
+        _, args, _ = parse_launch_arguments(['--console', '--sms'])
+        application = mock.Mock()
+        sms = mock.Mock(channel=InteractionChannel.REMOTE_TEXT)
+        with patch('embodied_runtime.cli.RobotApplication', return_value=application) as constructor, patch(
+            'embodied_runtime.cli.TwilioSmsSettings.from_environment', return_value=object(),
+        ), patch('embodied_runtime.cli.TwilioSmsService', return_value=sms), patch(
+            'embodied_runtime.cli._run_console_application', new=AsyncMock(return_value=0),
+        ), patch('embodied_runtime.cli.AsyncLineTerminal'):
+            self.assertEqual(await _run_application(args, RobotProfile('test', 'Test')), 0)
+        routes = constructor.call_args.kwargs['operator_delivery_routes']
+        self.assertIs(constructor.call_args.kwargs['operator_message_sink'], routes.resolve('console').sink)
+        self.assertIs(routes.resolve('sms').sink, sms)
+
     async def test_body_and_fusion_audio_composition_follow_resolved_backend(self):
         profile = RobotProfile("mira", "Mira")
         cases = (
@@ -566,7 +597,7 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
         for selection, backend_type, has_body, has_fusion_audio in cases:
             with self.subTest(selection=selection):
                 _, args, _ = parse_launch_arguments([
-                    "--mode", "run", "--hardware", selection, "--voice",
+                    "--mode", "run", "--hardware", selection, "--voice", "--no-local-console",
                 ])
                 application = mock.Mock()
                 application.run = AsyncMock(return_value=None)
@@ -590,7 +621,7 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_checked_in_mira_config_composes_on_bare_host_without_camera(self):
         _, args, _ = parse_launch_arguments([
-            "--config", "config/mira-agentic.toml", "--mode", "run",
+            "--config", "config/mira-agentic.toml", "--mode", "run", "--no-local-console",
         ])
         application = mock.Mock()
         application.run = AsyncMock(return_value=None)
@@ -624,7 +655,7 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fusion_and_available_auto_camera_compose_together(self):
         _, args, _ = parse_launch_arguments([
-            "--mode", "run", "--hardware", "fusion-hat", "--camera", "auto",
+            "--mode", "run", "--hardware", "fusion-hat", "--camera", "auto", "--no-local-console",
         ])
         camera = mock.Mock()
         camera.identifier = "picamera2"
@@ -820,27 +851,33 @@ class CliTests(unittest.TestCase):
             with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
                 main(argv)
 
-    def test_initiative_messages_requires_initiative_and_console(self) -> None:
+    def test_initiative_messages_requires_initiative_and_configured_route(self) -> None:
         for argv in (
             ["--initiative-messages", "--console"],
             ["--cognition", "openai-responses", "--initiative-messages", "--console"],
             ["--cognition", "openai-responses", "--initiative",
-             "--initiative-messages"],
+             "--initiative-messages", "--no-local-console"],
         ):
             with self.subTest(argv=argv), patch("sys.stderr"), self.assertRaises(SystemExit):
                 main(argv)
 
     def test_headless_initiative_messages_accept_configured_sms_route(self) -> None:
         argv = ["--mode", "run", "--sms", "--cognition", "openai-responses",
-                "--initiative", "--initiative-messages"]
+                "--initiative", "--initiative-messages", "--no-local-console"]
         with patch(
             "embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)
         ):
             self.assertEqual(main(argv), 0)
 
+    def test_headless_initiative_messages_accept_default_local_console(self) -> None:
+        with patch("embodied_runtime.cli._run_application", new=AsyncMock(return_value=0)) as run:
+            self.assertEqual(main(["--mode", "run", "--cognition", "openai-responses",
+                                   "--initiative", "--initiative-messages"]), 0)
+        self.assertTrue(run.await_args.args[0].local_console_enabled)
+
     def test_headless_initiative_messages_reject_missing_route(self) -> None:
         argv = ["--mode", "run", "--cognition", "openai-responses",
-                "--initiative", "--initiative-messages"]
+                "--initiative", "--initiative-messages", "--no-local-console"]
         with patch("sys.stderr"), self.assertRaises(SystemExit):
             main(argv)
 

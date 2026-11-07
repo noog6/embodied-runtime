@@ -133,6 +133,16 @@ A runtime session is one invocation of `embodied-runtime`. Its application
 lifecycle owns and coordinates runtime machinery such as the event bus, hardware
 adapters, attention, cognition infrastructure, and platform monitoring.
 
+The headless CLI lifecycle also owns a local Unix console endpoint by default.
+The separately launched `console.py` owns terminal interaction, while one
+runtime-side `RuntimeConsole` retains command semantics and request authority.
+Accepted console commands run in runtime-owned tasks independent of attachment;
+reconnect inspects their bounded transient state/results without replay. Neither
+attachment nor detachment creates a runtime session or resets conversation/Job
+identity. The combined `main.py --console` mode occupies the attachment slot and
+retains its process-owning exit behavior. See [the console contract](console.md)
+for protocol, endpoint safety, retention, and receipt boundaries.
+
 `ApplicationStarted` remains the established lifecycle announcement after the
 operational platform/power handoff. A distinct runtime-ready activation point
 runs later, after platform and power monitors, voice wake listening, Job

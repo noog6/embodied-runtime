@@ -131,15 +131,21 @@ The current eligibility matrix is deliberately small:
 | --- | --- | --- | --- | --- |
 | console | yes | yes | yes | yes |
 | voice | yes | — | no | no |
+| remote_text (configured SMS) | yes | — | yes, when selected | yes |
 
-Console is the only current autonomous notification route. Voice remains a
-fully supported operator-dialogue channel, but is not an autonomous notification
+Console and configured SMS are eligible autonomous notification routes. The CLI
+selects console in embedded `main.py --console` mode. Headless mode selects SMS
+when enabled, otherwise the configured local console. Enabling the local endpoint
+does not displace headless SMS notifications; attaching or detaching never changes
+the selection. Voice remains a fully supported operator-dialogue channel, but
+is not an autonomous notification
 route or outbound delivery destination. This phase adds no unsolicited TTS.
 
-The production delivery catalog contains only the semantic destination
-`console`, described as the `local plain-text console`. When that route exists,
+The production delivery catalog contains configured semantic destinations:
+`console`, described as the `local plain-text console`, and enabled `sms`,
+described as the `configured operator SMS`. When routes exist,
 operator dialogue cognition receives `deliver_message(destination, message)`
-with a runtime-generated enum containing only the catalog's authorized names.
+with a runtime-generated enum containing the catalog's authorized names.
 With no route, the tool and its separate **Available operator delivery
 destinations** grounding are absent. Availability is permission, not obligation;
 cognition, rather than lexical intent parsing, interprets the request.
@@ -207,8 +213,11 @@ its eligibility again, and requires its semantic route to match the captured
 route. A replacement sink on the same eligible channel may deliver the message;
 the stale sink object is not retained. If the sink disappears, changes channel,
 or becomes unsupported, delivery is rejected. There is no silent rerouting,
-fallback, retry, queue, or persistence policy. Multi-transport routing remains
-deferred until another real transport exists.
+fallback or automatic retry. A selected local-console notification route is
+independent of whether a terminal is attached: detached delivery rejects rather
+than switching to SMS. The console sink uses only the bounded transient
+attachment queue and receipt policy described in
+[the console contract](console.md#acceptance-reconnect-and-delivery).
 
 The supported console notification is asynchronous, self-contained plain text in
 the local terminal. It is not an operator dialogue response, does not create or
@@ -220,11 +229,13 @@ connecting power.
 
 Notification delivery does not request cognition, create operator attention,
 start voice interaction, or append a turn to `WorkingMemory`. It remains the
-output of the already-authorized autonomous episode. The existing console queue
-and notification presentation remain responsible for asynchronous display.
-Reply binding, notification persistence and history, acknowledgement tracking,
-voice notifications, model channel selection, fallback, and routing among
-multiple production channels remain deferred.
+output of the already-authorized autonomous episode. The console queue and
+notification presentation remain responsible for asynchronous display. Queue
+acceptance is not terminal output; the detached client reports `terminal_written`
+only after rendering/flushing. No receipt establishes human reading. Detached
+notifications are not retained for recovery. Notification persistence, human
+acknowledgement tracking, voice notifications, model channel selection, and
+fallback remain outside this feature.
 
 Console dialogue exposes `channel=console`, while voice dialogue exposes
 `channel=voice`; both expose the same dialogue mode, operator initiator, and
@@ -262,6 +273,9 @@ A valid Twilio webhook signature authenticates the provider request, not the hum
 sender. P1 maps exactly one configured number to operator authority and ignores
 all other senders before cognition.
 
-SMS dialogue replies directly answer the inbound interaction. SMS is not an
-autonomous notification, `address_operator`, `deliver_message`, or `deliver_report`
-route.
+SMS dialogue replies directly answer the inbound interaction. Separately, the
+configured SMS route can receive operator-directed deliveries and can be the
+selected initiative notification sink in headless mode even while a local-console
+endpoint is configured and a client is attached.
+That existing provider transport is independent of local Unix-console attachment;
+the local console adds no remote access or SMS fallback policy.

@@ -4477,6 +4477,10 @@ class RobotApplication:
         """Request an orderly stop from code running on the application loop."""
         self._stop_requested.set()
 
+    async def wait_for_stop(self) -> None:
+        """Wait for process-owned shutdown without transferring lifecycle ownership."""
+        await self._stop_requested.wait()
+
     def capture_camera_frame(self) -> CameraFrame:
         frame = self._capture_camera_frame_for_owner(CAMERA_CAPTURE_OWNER)
         LOGGER.info(

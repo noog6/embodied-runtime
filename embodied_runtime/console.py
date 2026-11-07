@@ -50,10 +50,12 @@ class RuntimeConsole:
         *,
         monotonic: Callable[[], float] = time.monotonic,
         history_root: Path = DEFAULT_HISTORY_ROOT,
+        process_owning: bool = True,
     ) -> None:
         self._application = application
         self._monotonic = monotonic
         self._history_root = history_root
+        self._process_owning = process_owning
 
     @property
     def prompt(self) -> str:
@@ -312,8 +314,8 @@ class RuntimeConsole:
             return self._presence(), False
         return self.execute(command)
 
-    @staticmethod
-    def _help() -> str:
+    def _help(self) -> str:
+        leave = "Stop the console and runtime" if self._process_owning else "Disconnect console; runtime continues"
         return "\n".join(
             (
                 "Commands",
@@ -377,8 +379,8 @@ class RuntimeConsole:
                 "  run show R<n>                  Show one recorded run",
                 "  run grep R<n> <text>           Search one run's runtime log",
                 "  help                           Show this help",
-                "  quit                           Stop the console and runtime",
-                "  exit                           Stop the console and runtime",
+                f"  quit                           {leave}",
+                f"  exit                           {leave}",
             )
         )
 
@@ -1509,8 +1511,13 @@ async def run_console_session(
 ) -> None:
     """Run until quit, exit, or EOF, keeping pending input across output."""
     activate = getattr(terminal, "activate", nullcontext)
-    with activate():
-        await _console_session(console, terminal, messages)
+    set_attached = getattr(messages, "set_attached", lambda _: None)
+    set_attached(True)
+    try:
+        with activate():
+            await _console_session(console, terminal, messages)
+    finally:
+        set_attached(False)
 
 
 async def _console_session(
