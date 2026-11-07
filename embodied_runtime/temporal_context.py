@@ -1,7 +1,7 @@
 """Provider-neutral wall-clock and monotonic grounding for cognition."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime, time, timedelta
 import json
 from zoneinfo import ZoneInfo
 
@@ -9,6 +9,35 @@ WEEKDAY_NAMES = (
     "Monday", "Tuesday", "Wednesday", "Thursday",
     "Friday", "Saturday", "Sunday",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDayWindow:
+    """One resolved review window shared by independent evidence readers."""
+
+    calendar_date: date
+    timezone_name: str
+    start: datetime
+    end: datetime
+    retrieved_at: datetime
+
+    @classmethod
+    def previous_day(cls, instant: datetime, timezone_name: str) -> "LocalDayWindow":
+        context = TemporalContext.from_instant(instant, timezone_name)
+        day = context.local_datetime.date() - timedelta(days=1)
+        zone = ZoneInfo(timezone_name)
+        return cls(
+            day, timezone_name,
+            datetime.combine(day, time.min, zone).astimezone(UTC),
+            datetime.combine(day + timedelta(days=1), time.min, zone).astimezone(UTC),
+            instant.astimezone(UTC),
+        )
+
+    def metadata(self) -> dict[str, str]:
+        return {"calendar_date": self.calendar_date.isoformat(),
+                "timezone": self.timezone_name, "utc_start": self.start.isoformat(),
+                "utc_end": self.end.isoformat(),
+                "retrieved_at": self.retrieved_at.isoformat()}
 
 
 @dataclass(frozen=True, slots=True)

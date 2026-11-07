@@ -210,8 +210,10 @@ Run's start date, so records from a Run spanning midnight are included and
 complete prior-day lines in the current active log are eligible. Overview
 aggregates category counts, run IDs, safe-line count, first 8 and last 16 lines
 across at most 20 safe Runs. Search returns at most 20 literal matches with Run
-ID and source line number. Both forms report `calendar_date`, `timezone`, and a
-truthful `truncated` flag.
+ID and source line number. Both forms report their resolved calendar/UTC window,
+log source coverage, omitted detail, and a conservative legacy `truncated` flag.
+See [Daily recorded Job activity](#daily-recorded-job-activity) for the
+application-composed database accounting and precise coverage semantics.
 
 An overview returns validated metadata, category counts, and at most the first
 8 plus last 16 model-safe operational lines, deduplicated in source order.
@@ -232,7 +234,8 @@ content-bearing fields such as `text=`, `message=`, `purpose=`, `description=`,
 **before** matching. Thus history is operational evidence, not a
 conversation replay or transcript archive. Tool-result and literal query bodies
 are not logged; bounded `[HISTORY]` records contain only episode, operation,
-selector, status, match count, and bounded reason.
+selector and status, operation-appropriate returned counts, bounded coverage
+metadata, and bounded reason. Overview telemetry does not report search matches.
 
 History uses the existing two-acquisition episode budget alongside
 `inspect_self`, `observe_scene`, and `recall_memory`; it gains no semantic-effect
@@ -248,3 +251,145 @@ shows. Persistent-memory evidence may independently support a memory claim.
 Current Runtime context remains authoritative,
 and a current `started` record is only a partial snapshot—not proof of final
 health, success, abandonment, or failure.
+
+## Daily recorded Job activity
+
+The application augments only `inspect_run_history(previous_day, null)` with
+`job_activity` from the configured Jobs store. The application resolves one
+`LocalDayWindow` using its effective timezone and aware wall clock, and passes
+that same window to both readers. `calendar_date`, `timezone`, `utc_start`,
+`utc_end`, and `retrieved_at` identify the review. The UTC interval is half-open
+`[utc_start, utc_end)`; its endpoints are separate local midnights, so Toronto
+spring/fall days contain 23/25 hours. Retrieval time identifies the read, not a
+historical status snapshot or an atomic snapshot across filesystem and database.
+
+Accounting is over timestamp-consistent retained `job_runs` rows in this one
+configured database, across Jobs regardless of current enablement or target.
+A qualifying row has a creation, recorded start, or terminal timestamp inside
+the interval, or was recorded open immediately before either endpoint. Counts
+are exact over that declared scope, independent of detail limits:
+
+- `records`: distinct qualifying rows.
+- `created`: admissions/record creations in the interval.
+- `started`: persisted transitions to `running` in the interval. These precede
+  bounded cognition and do not prove an episode or provider call executed.
+- `terminal_outcomes`: `completed`, `failed`, `stopped`, and `interrupted` rows
+  with `finished_at` in the interval. Episode completion is not counted here.
+- `statuses_at_retrieval`: current persisted states of qualifying rows, including
+  `pending` and `running`. A later completion is not assigned to the reviewed day.
+- `open_before_start` / `open_before_end`: rows created strictly before that
+  endpoint with no recorded finish before it. A finish exactly at an endpoint
+  remains open immediately before that endpoint. These are record-lifetime facts,
+  not claims about execution, uptime, pause/readiness state, or crash time. In
+  particular, startup reconciliation timestamps when interruption was recorded.
+
+These categories overlap: do not sum them as disjoint populations. For consistent
+rows, `open_before_end = open_before_start + created - sum(terminal_outcomes)`.
+Actual execution/readiness at a past midnight is unknown because it is not
+persisted as a transition history.
+
+Malformed/naive timestamps, missing required timestamps, lifecycle-inconsistent
+fields, reversed chronology, or timestamps later than retrieval are excluded
+from these counts. `coverage.unclassified_records` counts such rows across the
+entire retained table: their day membership is uncertain, even if an individual
+field appears outside the day. Coverage is then `partial`, not a zero-activity
+claim. A null start is valid for pending rows and for stopped/interrupted rows
+that never transitioned to running. Database unavailability returns
+`status=unavailable` with no zero totals.
+
+`totals` and each per-Job `counts` use the above names. `jobs` contains at most
+10 numeric-Job-ID-ordered groups. `runs` contains at most 20 operational metadata
+records: terminal non-completed outcomes in the day first, then records open
+before day end, then the remainder; each tier uses ascending Run ID. Details
+include only IDs, validated timestamps, current status and accounting flags.
+`omitted_jobs` and `omitted_runs` are exact counts of undisplayed groups/rows;
+they do not reduce aggregate completeness. No names, descriptions, summaries,
+errors, reports, Workspace material, or schedule data are selected.
+
+Aggregation and bounded detail selection share one SQLite statement/read
+snapshot, without a write transaction or schema migration. SQLite may materialize
+internal working sets; Python receives only the bounded result. The summary
+requires SQLite 3.35+ for materialized CTEs, avoiding repeated timestamp parsing
+and aggregation over the retained table. An older Python SQLite binding returns
+`sqlite_activity_aggregation_unsupported`; existing log evidence remains usable.
+The summary is operational metadata under existing history-inspection authority,
+including autonomous Job work with a live exact goal binding. It does not enable
+cross-Job authored-content reads or change `shared_reads_enabled`, tool schemas,
+episode budgets, persistence, scheduling, or Job descriptions. Interpretation
+and notification decisions remain with cognition.
+
+Log coverage is independent. Previous-day results expose `log_coverage` with
+discovery status, discovered/examined/omitted directory counts, readable-log count,
+and unavailable Run IDs. Only the newest 20 safe direct runtime directories are
+examined, before filtering lines by day; omitted directories might contain
+relevant evidence. An inaccessible root or no readable selected logs is
+`unavailable`, a readable empty root is empty accessible evidence, and a mix of
+readable and unavailable/omitted sources is `partial`. A read error after some
+eligible records preserves those records as partial evidence.
+`unclassified_timestamp_lines` counts otherwise model-safe lines whose malformed
+timestamps prevent day selection; it also makes coverage partial. Privacy
+filtering precedes that count. Counts describe only accessible complete model-safe
+records with valid timestamps read so far. `log_details` separately reports
+returned lines, exact accessible omitted lines (matching lines for search), and
+clipped lines among those returned. Omitted-line count is unknown when no source
+is accessible. Legacy `truncated` is conservative
+across log source limitations or log detail omissions; it must not be used as a
+database-completeness indicator. Privacy filtering is unchanged. No view can
+establish how many artifacts or database rows were deleted before inspection.
+
+An unavailable database preserves log evidence; unavailable logs preserve the
+database summary. Neither source establishes continuous uptime, correct/useful
+Job outputs, or fulfillment of scheduled obligations. Schedule definitions can
+change, admission can legitimately defer/coalesce, and schedule history is not
+stored here. Whole-runtime process counters are not daily counters.
+
+### Read-only deployment validation
+
+1. Request a previous-day overview through the normal operator path. Retain its
+   resolved window, retrieval time, source coverage and counts. Confirm the
+   effective timezone and configured database/history roots; do not substitute
+   a checkout's defaults. Check the service interpreter's SQLite version with
+   `python3.13 -c 'import sqlite3; print(sqlite3.sqlite_version)'` (3.35+).
+   This inspection changes no Job definition or schedule.
+2. Use `sqlite3 -readonly /configured/path/jobs.sqlite3` against that same database.
+   For example, Toronto November 6, 2026 has these UTC bounds. The direct query
+   below assumes the writer's canonical UTC microsecond strings (`...000000Z`).
+   Check that assumption and `unclassified_records=0` first; if legacy/noncanonical
+   or inconsistent rows exist, independently normalize/validate their aware
+   timestamps before comparing, rather than treating text order as time order.
+
+   ```sql
+   PRAGMA query_only=ON;
+   BEGIN;
+   WITH window AS (
+     SELECT '2026-11-06T05:00:00.000000Z' AS s,
+            '2026-11-07T05:00:00.000000Z' AS e
+   )
+   SELECT status, COUNT(*) AS records,
+          SUM(created_at >= s AND created_at < e) AS created,
+          SUM(COALESCE(started_at >= s AND started_at < e, 0)) AS started,
+          SUM(COALESCE(finished_at >= s AND finished_at < e, 0)) AS terminal_in_day,
+          SUM(created_at < s AND (finished_at IS NULL OR finished_at >= s)) AS open_before_start,
+          SUM(created_at < e AND (finished_at IS NULL OR finished_at >= e)) AS open_before_end
+   FROM job_runs, window
+   WHERE created_at < e AND (finished_at IS NULL OR finished_at >= s)
+   GROUP BY status ORDER BY status;
+   ROLLBACK;
+   ```
+
+   Sum the rows to compare aggregate admissions/starts and record counts; terminal
+   rows compare with the corresponding terminal-outcome bucket. The status groups
+   compare with retrieval-time status, allowing for updates between the two
+   independent snapshots. Inspect a few returned Run IDs directly with metadata-only
+   queries. Verify omitted-detail counts separately from aggregate completeness.
+3. Check a day with multiple runtime sessions, including a still-active session
+   without `summary.json`. Compare the reported accessible directories with the
+   retained history inventory. Missing/inaccessible/omitted sources must remain
+   explicit; deletion history and process uptime cannot be inferred from inventory.
+4. After the operator separately updates the deployed review instructions, inspect
+   the next nightly JobRun result and its referenced Workspace report using existing
+   result/Workspace reads. Confirm it used the summary, attributed limitations,
+   distinguished outcomes from usefulness, retained its report, and completed
+   without extra episodes or routine notification. This is deployment acceptance,
+   not evidence supplied by the offline tests. No instruction migration or live
+   configuration/service/database modification is part of this implementation.
