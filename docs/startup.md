@@ -186,7 +186,9 @@ The local Unix console listener is enabled by default in this headless workflow.
 The operator attaches independently as the service user with `python console.py`
 and leaves with `quit`, keeping the service running. The wizard/service rendering
 does not need a terminal or an SSH `XDG_RUNTIME_DIR` and changes no supervision
-policy for attachment. Configure `[runtime] local_console_enabled = false` to
+policy for attachment. With SMS enabled, headless autonomous notifications keep
+using SMS while the local console remains available; attach/detach never changes
+that selection. Configure `[runtime] local_console_enabled = false` to
 disable it, or set an absolute `local_console_directory` and matching client
 `--directory`. See [console endpoint policy](console.md#endpoint-policy-and-troubleshooting).
 

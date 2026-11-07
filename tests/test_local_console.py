@@ -12,11 +12,13 @@ import stat
 import struct
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from embodied_runtime.app import ApplicationOptions, RobotApplication
 from embodied_runtime.body.virtual import VirtualBodyBackend
+from embodied_runtime.cognition import CognitionToolCall
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.console_client import ConsoleClient, discover, handshake, run_attached_session
 from embodied_runtime.console_protocol import (
@@ -25,13 +27,14 @@ from embodied_runtime.console_protocol import (
 )
 from embodied_runtime.console_server import LocalConsoleServer, RETAIN_RESULTS, RETAIN_SECONDS
 from embodied_runtime.console_style import ConsoleStyle
-from embodied_runtime.cli import parse_launch_arguments
+from embodied_runtime.cli import _run_application, parse_launch_arguments, validate_launch_dependencies
 from embodied_runtime.conversation_history import SQLiteConversationHistoryStore
 from embodied_runtime.conversation_history.continuity import CURRENT_REQUEST
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.interaction import (
     CONSOLE_NOTIFICATION, ConsoleOperatorMessageChannel, InteractionChannel,
     OperatorMessage,
+    resolve_notification_route,
 )
 from embodied_runtime.jobs import SQLiteJobStore
 from embodied_runtime.profile import RobotProfile
@@ -81,6 +84,94 @@ class Terminal:
 
     async def read_line(self, prompt):
         return await self.lines.get()
+
+
+class NotificationCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_headless_sms_route_survives_console_attach_and_detach(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'sockets'
+            config = root / 'runtime.toml'
+            config.write_text('[conversation_media]\nenabled=false\n')
+            _, args, _ = parse_launch_arguments([
+                '--config', str(config), '--mode', 'run', '--sms',
+                '--hardware', 'virtual', '--cognition', 'openai-responses',
+                '--initiative', '--initiative-messages',
+                '--local-console-directory', str(directory),
+            ])
+            validate_launch_dependencies(args)
+            sms = SimpleNamespace(channel=InteractionChannel.REMOTE_TEXT,
+                                  start=AsyncMock(), stop=AsyncMock(), deliver=AsyncMock())
+            app = None
+
+            def compose(*positional, **kwargs):
+                nonlocal app
+                app = RobotApplication(*positional, **kwargs, platform_provider=Platform())
+                return app
+
+            shutdown = asyncio.Event()
+            with patch('embodied_runtime.cli.RobotApplication', side_effect=compose), patch(
+                'embodied_runtime.cli.TwilioSmsSettings.from_environment', return_value=object(),
+            ), patch('embodied_runtime.cli.TwilioSmsService', return_value=sms), patch(
+                'embodied_runtime.cli.build_cognition_backend', return_value=GateBackend(),
+            ):
+                runtime = asyncio.create_task(_run_application(
+                    args, RobotProfile('test', 'Test Robot'), root / 'runs',
+                    shutdown_requested=shutdown))
+                client = None
+                try:
+                    await until(lambda: runtime.done() or (
+                        directory.exists() and bool(list(directory.glob('*.sock')))))
+                    if runtime.done():
+                        await runtime
+                        self.fail('runtime exited before console attachment')
+                    self.assertIs(app._operator_message_sink, sms)
+                    app.set_goal('Report operational status to the operator')
+                    console = app._operator_delivery_routes.resolve('console').sink
+                    self.assertIs(app._operator_delivery_routes.resolve('sms').sink, sms)
+                    notification = resolve_notification_route(sms.channel)
+
+                    async def notify(text, expected='applied'):
+                        self.assertIs(app._operator_message_sink, sms)
+                        result = await app._execute_initiative_tool(
+                            CognitionToolCall('address_operator', json.dumps({'message': text})),
+                            notification_interaction=notification)
+                        self.assertEqual(json.loads(result.output)['status'], expected, result.output)
+                        message = sms.deliver.await_args.args[0]
+                        self.assertEqual(message.text, text)
+                        self.assertEqual(message.interaction, notification)
+                        self.assertTrue(console._messages.empty())
+
+                    self.assertFalse(console.attached)
+                    await notify('before attachment')
+                    reader, writer, hello = await handshake(
+                        next(directory.glob('*.sock')), purpose='attach')
+                    terminal = Terminal()
+                    client = ConsoleClient(reader, writer, hello, terminal)
+                    self.assertTrue(console.attached)
+                    await notify('while attached')
+                    accepted = await client.request({
+                        'type': 'command', 'id': 'sms-route-console-read', 'command': 'status'})
+                    self.assertEqual(accepted['type'], 'accepted')
+                    await client.result('sms-route-console-read')
+                    self.assertIn('Response sms-route-console-read', terminal.output)
+
+                    # Even a failed SMS delivery must not reroute to an attached console.
+                    sms.deliver.side_effect = RuntimeError('SMS unavailable')
+                    await notify('SMS failure while attached', expected='rejected')
+                    sms.deliver.side_effect = None
+                    await client.close()
+                    client = None
+                    await until(lambda: not console.attached)
+                    await notify('after detachment')
+                    self.assertEqual(sms.deliver.await_count, 4)
+                finally:
+                    if client is not None:
+                        await client.close()
+                    shutdown.set()
+                    await asyncio.wait_for(runtime, 5)
+            sms.start.assert_awaited_once()
+            sms.stop.assert_awaited_once()
 
 
 class LocalConsoleTests(unittest.IsolatedAsyncioTestCase):

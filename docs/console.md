@@ -177,8 +177,11 @@ available and the single bounded
 `orient_body` on a nonphysical body; and `--initiative-messages` permits
 `address_operator`. The latter requires a configured operator delivery route:
 the enabled local-console endpoint (default), legacy `--console`, or enabled SMS.
-If a local-console route is configured, detachment does not redirect its messages
-to SMS. Headless SMS operation is supported when that route is selected. No flag silently enables
+Headless mode preserves SMS notification selection when SMS is enabled, while
+keeping the local console available for operator commands. Otherwise it selects
+the configured console; embedded `--console` mode also retains console selection.
+Attachment, detachment, and delivery failure never switch the selected route.
+No flag silently enables
 another. With both effect permissions, both tools are offered but the runtime accepts
 only one semantic effect unless bounded continuation is explicitly enabled; the
 two read-only acquisition attempts have a separate budget. Goal

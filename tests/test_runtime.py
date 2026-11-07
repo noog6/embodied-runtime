@@ -572,6 +572,21 @@ class HeadlessLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(routes.resolve('console').sink, sink)
         self.assertIs(run.await_args.kwargs['local_console'].messages, sink)
 
+    async def test_combined_console_keeps_console_notifications_with_sms_enabled(self):
+        from embodied_runtime.interaction import InteractionChannel
+        _, args, _ = parse_launch_arguments(['--console', '--sms'])
+        application = mock.Mock()
+        sms = mock.Mock(channel=InteractionChannel.REMOTE_TEXT)
+        with patch('embodied_runtime.cli.RobotApplication', return_value=application) as constructor, patch(
+            'embodied_runtime.cli.TwilioSmsSettings.from_environment', return_value=object(),
+        ), patch('embodied_runtime.cli.TwilioSmsService', return_value=sms), patch(
+            'embodied_runtime.cli._run_console_application', new=AsyncMock(return_value=0),
+        ), patch('embodied_runtime.cli.AsyncLineTerminal'):
+            self.assertEqual(await _run_application(args, RobotProfile('test', 'Test')), 0)
+        routes = constructor.call_args.kwargs['operator_delivery_routes']
+        self.assertIs(constructor.call_args.kwargs['operator_message_sink'], routes.resolve('console').sink)
+        self.assertIs(routes.resolve('sms').sink, sms)
+
     async def test_body_and_fusion_audio_composition_follow_resolved_backend(self):
         profile = RobotProfile("mira", "Mira")
         cases = (

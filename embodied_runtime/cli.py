@@ -664,9 +664,9 @@ async def _run_application(
                 ), sms_service,
             ))
         delivery_routes = OperatorDeliveryRouteCatalog(routes)
-        # Route selection is configuration, never an attachment-dependent SMS
-        # fallback. A detached local console rejects delivery truthfully.
-        notification_sink = message_channel or sms_service
+        # Preserve embedded-console routing and the existing headless SMS default.
+        # The local endpoint and its attachment state never displace that selection.
+        notification_sink = message_channel if args.console else (sms_service or message_channel)
         persistent_memory = build_persistent_memory_store(args)
         if persistent_memory is not None:
             composition_cleanup.callback(persistent_memory.close)

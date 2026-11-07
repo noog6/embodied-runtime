@@ -355,11 +355,13 @@ is inert unless voice and the physical Fusion HAT provider are available. See
 and intentionally excluded audio features.
 
 Dependencies are checked once against the final merged values. For example,
-initiative messages configured with `mode = "run"` use the enabled local-console
-route without an attached terminal. Route configuration grants availability;
-delivery still fails truthfully while detached. If the endpoint is disabled,
-initiative messages require legacy `--console` or an enabled SMS route. A configured
-local console does not fall back to SMS merely because it is disconnected.
+initiative messages configured with `mode = "run"` select SMS when enabled,
+otherwise the enabled local-console route. The endpoint remains available for
+operator commands alongside SMS; attaching and detaching never changes the
+selected notification route. Embedded `--console` mode retains console selection.
+When console is selected, delivery fails truthfully while detached; delivery
+failure on either route never causes automatic fallback to the other. If the
+endpoint is disabled, initiative messages require legacy `--console` or enabled SMS.
 
 `runtime.vision` accepts `"none"` or `"openai-responses"`; the matching explicit
 CLI override is `--vision`. A final effective vision value other than `none`
