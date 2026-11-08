@@ -10,7 +10,7 @@ import struct
 import sys
 import termios
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 try:
     import pyte
@@ -18,10 +18,24 @@ except ImportError:
     pyte = None
 
 from embodied_runtime.console import run_console_session
+from embodied_runtime.console_client import ConsoleClient
 from embodied_runtime.terminal import AsyncLineTerminal, SessionHistory
 from embodied_runtime.interaction import (
     CONSOLE_NOTIFICATION, ConsoleOperatorMessageChannel, OperatorMessage,
 )
+
+
+def response_client(terminal, reply, page_ends):
+    """Keep the real result/receipt path; stub only the response transport."""
+    writer = Mock(wait_closed=AsyncMock())
+    client = ConsoleClient(asyncio.StreamReader(), writer, {}, terminal)
+    starts = (0, *page_ends[:-1])
+    client.request = AsyncMock(side_effect=[{'state': 'completed'}, *(
+        {'state': 'completed', 'text': reply[start:end], 'next': end, 'chars': len(reply)}
+        for start, end in zip(starts, page_ends)
+    )])
+    client._send = AsyncMock()
+    return client
 
 
 class HistoryTests(unittest.TestCase):
@@ -189,6 +203,57 @@ class EditorTests(unittest.IsolatedAsyncioTestCase):
             await self.text('recalled ' + command[:12] + 'X' + command[12:])
             await self.submit(task, 'recalled ' + command[:12] + 'X' + command[12:])
 
+    @unittest.skipUnless(pyte, 'requires the declared pyte test extra')
+    async def test_client_response_ending_and_draft_survive_prompt_redraw(self):
+        reply = ('A wrapped response must remain visible while input is active.\n' * 8
+                 + 'Hardware throttling status is not reported.')
+        for recovered in (False, True):
+            for paged in (False, True):
+                with self.subTest(recovered=recovered, paged=paged):
+                    self.resize(50, 24, notify=False)
+                    self.screen = pyte.Screen(50, 24)
+                    self.stream = pyte.ByteStream(self.screen)
+                    self.terminal.write('\x1b[2J\x1b[H')
+                    # Split both a wrapped line and the final word across pages.
+                    ends = (20, len(reply) - 3, len(reply)) if paged else (len(reply),)
+                    client = response_client(self.terminal, reply, ends)
+                    try:
+                        with self.terminal.activate():
+                            task = await self.prompt()
+                            try:
+                                self.send('unfinished\x1b[D\x1b[D')
+                                await self.text('unfinished', 8)
+
+                                async def receipt(message):
+                                    self.assertEqual(message, {
+                                        'type': 'receipt', 'id': 'rendered', 'status': 'terminal_written',
+                                    })
+                                    self.drain()
+                                    heading = 'Recovered response' if recovered else 'Response'
+                                    expected = pyte.Screen(50, 24)
+                                    pyte.Stream(expected).feed(
+                                        f'\r\n{heading} rendered (completed)\r\n'
+                                        + reply.replace('\n', '\r\n')
+                                        + '\r\n\r\nrobot> unfinished')
+                                    # Raw PTY bytes alone can contain text erased by
+                                    # the next prompt redraw. Compare rendered cells.
+                                    self.assertEqual(self.screen.display, expected.display)
+
+                                client._send.side_effect = receipt
+                                await client.result('rendered', recovered=recovered)
+                                client._send.assert_awaited_once()
+                                self.assertFalse(task.done())
+                                self.assertEqual((self.buffer.text, self.buffer.cursor_position),
+                                                 ('unfinished', 8))
+                                self.send('!')
+                                await self.text('unfinish!ed')
+                                await self.submit(task, 'unfinish!ed')
+                            finally:
+                                task.cancel()
+                                await asyncio.gather(task, return_exceptions=True)
+                    finally:
+                        await client.close()
+
     async def test_input_taller_than_screen_remains_one_command(self):
         with self.terminal.activate():
             task = await self.prompt()
@@ -345,6 +410,47 @@ class EditorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PipeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_plain_response_and_receipt_after_complete_output(self):
+        for reply in ('', 'one line without a newline', 'first\nlast', 'first\nlast\n'):
+            for recovered in (False, True):
+                with self.subTest(reply=reply, recovered=recovered):
+                    output = io.StringIO()
+                    terminal = AsyncLineTerminal(io.StringIO(), output)
+                    ends = tuple(range(1, len(reply) + 1)) or (0,)
+                    client = response_client(terminal, reply, ends)
+                    heading = 'Recovered response' if recovered else 'Response'
+
+                    async def receipt(message):
+                        self.assertEqual(message, {
+                            'type': 'receipt', 'id': 'plain', 'status': 'terminal_written',
+                        })
+                        self.assertEqual(output.getvalue(),
+                                         f'\n{heading} plain (completed)\n{reply}\n\n')
+
+                    client._send.side_effect = receipt
+                    try:
+                        await client.result('plain', recovered=recovered)
+                        client._send.assert_awaited_once()
+                    finally:
+                        await client.close()
+
+    async def test_client_output_failure_has_no_terminal_written_receipt(self):
+        output = io.StringIO()
+        terminal = AsyncLineTerminal(io.StringIO(), output)
+        client = response_client(terminal, 'first\nlast', (6, 10))
+
+        def failing_flush():
+            if output.getvalue().endswith('last\n\n'):
+                raise OSError('terminal output failed')
+
+        try:
+            with patch.object(output, 'flush', side_effect=failing_flush):
+                with self.assertRaisesRegex(OSError, 'terminal output failed'):
+                    await client.result('failed')
+            client._send.assert_not_awaited()
+        finally:
+            await client.close()
+
     async def test_pipe_partial_eof_exact_text_and_cancellation(self):
         read_fd, write_fd = os.pipe()
         reader = os.fdopen(read_fd, encoding='utf-8')
