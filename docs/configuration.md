@@ -1,5 +1,8 @@
 # Runtime startup configuration
 
+Startup configuration uses a strict TOML schema parsed by Python's built-in
+`tomllib`; no extra TOML dependency is required.
+
 When Jobs persistence is enabled, the runtime also constructs the Job Workspace
 store. Its root is not separately configurable: the sibling directory name is
 the Jobs database stem plus `-workspaces` (for example, `data/jobs.sqlite3`

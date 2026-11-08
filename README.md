@@ -1,129 +1,21 @@
 # embodied-runtime
 
-Reusable software runtime for embodied agents. Mira is the working name of the
-initial reference/demo robot built with the runtime.
+embodied-runtime gives robot builders reusable software for conversation,
+camera vision, and scheduled work. Mira is the robot we built to show it in
+action.
 
-The [cognitive work map](docs/cognitive-work.md) illustrates how Mira's bounded
-episodes connect Jobs, evidence, memory, durable artifacts, and communication.
+You can talk to your robot by voice or text, ask it what it sees, or set up a
+scheduled health check that leaves a report you can inspect later.
 
-Browse the [documentation guide](docs/README.md) for setup, operation,
-architecture, feature references, and validation guides.
+What works depends on the hardware and setup. Voice needs supported audio
+hardware; live camera questions need a camera and a configured vision service.
+AI features need a configured model provider. You can also run with virtual
+hardware for development.
 
-## Run the scaffold
-
-Python 3.13 or later is required. Install the checkout and the provider extras
-needed by your chosen configuration first:
-
-```console
-python scripts/setup_environment.py --config config/mira-agentic.toml
-source .venv/bin/activate
-```
-
-Use your robot's configuration path instead for a custom deployment. The command
-creates or reuses `.venv`, checks the selected provider imports, and never starts
-the runtime. See [environment setup](docs/startup.md#python-environment-setup)
-for Pi system packages, SMS, and read-only verification.
-Interactive setup can also collect a missing OpenAI key using protected local
-storage and offer automatic loading in future Bash terminals. Follow the printed
-`source` command for the current terminal; see [API key setup](docs/secrets.md).
-
-Then run:
-
-```console
-python main.py
-python main.py "Good morning, Mira."
-python main.py --diagnostics
-python main.py --console
-```
-
-For normal full-agentic Mira operation, persistent startup policy replaces the
-long development flag sequence:
-
-```console
-python main.py --config config/mira-agentic.toml
-```
-
-The strict, dependency-free TOML schema, historical defaults, and explicit CLI
-override rules are documented in [Runtime startup configuration](docs/configuration.md).
-Granular flags remain available for focused experiments and diagnostics.
-See [Mira deployment profiles](docs/mira-profiles.md) for explicit model
-alternatives, verification evidence, shared persistence, and the configurations
-under `config/experiments/`.
-
-Optional provider setup is documented in [OpenAI text cognition
-setup](docs/cognition-openai.md), including the linked [Secrets and API
-keys](docs/secrets.md) procedure for local credential storage and delivery.
-The same bounded Jobs can also use [OpenRouter via compatible Chat Completions](docs/cognition-compatible.md)
-with an explicitly configured endpoint, credential variable, and tool-capable model.
-
-Run continuously in the foreground, or use the existing systemd service workflow:
-
-```console
-python main.py --config config/mira-agentic.toml --mode run
-```
-
-In another local terminal, as the same user, attach independently:
-
-```console
-python console.py
-```
-
-Enter `help`, `status`, or `jobs`. Leave with `quit` or EOF; the runtime and
-ongoing Jobs continue. The client never starts another agent and needs no API
-credentials. With multiple agents, select `python console.py --agent INSTANCE_ID`
-using an identity printed by discovery. The migration mode `python main.py --console`
-still owns its process: its `quit` and EOF stop that runtime. See [Local runtime
-console](docs/console.md) for recovery, configuration, and troubleshooting.
-
-Diagnostics report both the selected robot hardware backend and a separate
-snapshot of the real host platform, including available identity and resource
-telemetry.
-
-The runtime loads the Mira robot profile independently of its embodiment. The
-checked-in deployment configuration automatically selects a ready SunFounder
-Fusion HAT+ or falls back to a physical host-only backend, while the historical
-no-argument development default remains virtual. Physical launches do not
-invent a semantic body; the virtual backend intentionally provides the
-simulated body used in development. See [the hardware
-notes](docs/hardware/fusion-hat-plus.md) and [architecture
-notes](docs/architecture.md).
-
-The default demo also includes one deterministic local reflex: a transition to
-semantic presence centers body yaw and pitch through the application body API.
-It is source-independent, owns no state, and involves no AI or cognition. See
-[Local reflexes](docs/reflexes.md).
-
-Runtime log records use local ISO-8601 wall-clock timestamps with an explicit
-timezone offset. A healthy run remains quiet between low-frequency heartbeats:
-
-```text
-2026-08-30T20:05:01.103-04:00 [APP] running profile=mira
-2026-08-30T20:05:01.104-04:00 [PULSE] monitor=platform interval_s=5.0 heartbeat_s=60.0 status=ready
-2026-08-30T20:06:01.205-04:00 [PULSE] heartbeat samples=12 cpu_temp_c=42.8 memory_available_mb=263 memory_available_pct=63.4 thermal=normal memory=normal
-```
-
-Monitor cadence uses monotonic time, independently of wall-clock timestamps.
-The explicit `[DIAG]` and detailed `[PLATFORM]` report lines remain stable,
-untimestamped structured snapshot output; surrounding runtime logs are timestamped.
-Validated launches also create a local, sequential [run history](docs/run-history.md)
-under `data/runs/`; this records runtime-owned logs, not a terminal transcript.
-
-Development examples of useful durable Job compositions are collected in
-[Tested Job patterns](docs/tested-jobs.md). They are patterns exercised while
-developing Mira, not Jobs installed by the generic runtime.
-
-## Bounded delayed initiative
-
-When initiative is enabled, cognition may spend one semantic-effect slot to
-schedule one session-local relative follow-up. When due, it creates fresh
-same-goal attention rather than preserving an old decision or provider session.
-See [bounded temporal follow-up](docs/temporal-followup.md).
-
-The current autonomy budgets and episode grammar are summarized in
-[architecture](docs/architecture.md#current-bounded-autonomy-episode-grammar).
-A due temporal commitment waits in one goal-bound slot when cognition is busy;
-it does not interrupt cognition or reserve an action.
-
-Joint image analysis and durable operator image recall are documented in
-[conversation images](docs/conversation-images.md), including retention defaults,
-resource limits, deletion and physical acceptance checks.
+- **[What you can do with Mira](docs/tested-jobs.md)** — for now, explore
+  **Tested Job patterns**, examples exercised during Mira development. These
+  examples are not installed automatically.
+- **[Run it on your robot](docs/startup.md#quick-start)** — prepare Python,
+  choose your robot's configuration, and launch the runtime.
+- **[Browse the technical docs](docs/README.md)** — find setup, operation,
+  hardware support, architecture, and feature references.

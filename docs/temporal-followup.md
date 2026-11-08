@@ -1,5 +1,12 @@
 # Bounded temporal follow-up
 
+When initiative is enabled, cognition may spend one semantic-effect slot to
+schedule one session-local relative follow-up. When due, it creates fresh
+same-goal attention rather than preserving an old decision or provider session.
+A due commitment waits in one goal-bound slot when cognition is busy; it does
+not interrupt cognition or reserve an action. See the
+[current autonomy budgets and episode grammar](architecture.md#current-bounded-autonomy-episode-grammar).
+
 > **Future intent is not a temporal commitment. A temporal commitment exists
 > only when authoritative runtime temporal state says it exists.**
 

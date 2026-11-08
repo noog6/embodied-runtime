@@ -1,4 +1,4 @@
-# Startup Wizard and systemd
+# Startup and deployment
 
 The runtime remains an ordinary foreground Python process. `--mode run` waits
 for work, handles systemd's normal `SIGTERM`, shuts down gracefully, and exits
@@ -6,17 +6,79 @@ zero. Console and diagnostics modes remain operator-facing alternatives. The
 **Startup Wizard** only deploys and manages that process; the runtime does not
 know that systemd is its parent.
 
-## Python environment setup
+## Quick start
 
-The service wizard does not install Python dependencies. Before deploying a
-service, prepare the environment from the checkout with Python 3.13 or later:
+Python 3.13 or later is required. From the checkout root, install the package
+and provider extras selected by your configuration, then activate the environment:
 
 ```sh
-python3.13 scripts/setup_environment.py --config config/mira-agentic.toml
+python scripts/setup_environment.py --config config/mira-agentic.toml
 source .venv/bin/activate
 ```
 
-Replace the config path with the file for your robot (for example,
+Use your robot's configuration path for a custom deployment. Setup never starts
+the runtime. It can also collect missing provider keys using protected local
+storage and offer automatic loading in future Bash terminals. Run the exact
+`source` commands it prints for the current terminal before launching; see
+[credential setup](secrets.md#set-up-local-storage-and-delivery). For Pi system
+packages, SMS extras, and read-only verification, see
+[Python environment setup](#python-environment-setup).
+
+For normal Mira operation, launch with its persistent configuration:
+
+```sh
+python main.py --config config/mira-agentic.toml
+```
+
+The [configuration reference](configuration.md) documents the strict TOML
+schema, historical defaults, and explicit CLI override rules. Granular flags
+remain available for focused experiments and diagnostics.
+The [Mira deployment profiles guide](mira-profiles.md) covers model alternatives,
+verification evidence, shared persistence, and the configurations under
+`config/experiments/`. For provider setup, see [OpenAI text cognition](cognition-openai.md)
+or [compatible cognition and OpenRouter](cognition-compatible.md); OpenRouter
+requires an explicitly configured endpoint, credential variable, and tool-capable
+model.
+
+These separate launch alternatives use the historical development defaults,
+including virtual hardware, when no configuration is supplied:
+
+```sh
+python main.py
+python main.py "Good morning, Mira."
+python main.py --diagnostics
+python main.py --console
+```
+
+See the [console reference](console.md) for operator commands and shutdown,
+and [command-line diagnostics](runtime-diagnostics.md#command-line-diagnostics)
+for what the diagnostic reports describe. The default demo's presence-centering
+reaction is documented in [Local reflexes](reflexes.md).
+
+For hardware choices and the distinction between a robot profile, physical
+hardware, and the virtual development body, see
+[hardware selection](hardware/fusion-hat-plus.md#runtime-selection) and
+[architecture](architecture.md).
+
+For continuous foreground operation, use:
+
+```sh
+python main.py --config config/mira-agentic.toml --mode run
+```
+
+To connect from another local terminal as the same user, follow
+[Attach to a running agent](console.md#attach-to-a-running-agent). That client
+needs no API credentials and leaves the runtime and ongoing Jobs running when
+you disconnect. The console guide also covers discovery, selecting among
+multiple agents, recovery, and the combined console mode's shutdown behavior.
+
+For a systemd service, continue with [installation discovery and review](#discover-and-review-an-installation).
+
+## Python environment setup
+
+The service wizard does not install Python dependencies. Prepare the environment
+with the setup command in the [quick start](#quick-start) before deploying a
+service. For another robot, use its configuration file (for example,
 `config/theo-agentic.toml` with its matching `profiles/theo.toml`). The helper
 creates `.venv` if absent and reuses an existing venv without clearing it.
 `--venv PATH` selects a different environment. Config paths are relative to the
