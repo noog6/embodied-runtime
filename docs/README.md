@@ -6,8 +6,9 @@ or choose a reading path for the task at hand.
 
 ## Start here
 
-- **Run a first instance:** follow the [repository quick start](../README.md),
-  then [startup and environment setup](startup.md) and [secrets](secrets.md).
+- **Run a first instance:** follow the [quick start](startup.md#quick-start),
+  then the detailed [environment setup](startup.md#python-environment-setup)
+  and [secrets](secrets.md) guides as needed.
 - **Configure or deploy Mira:** read [configuration](configuration.md),
   [Mira profiles](mira-profiles.md), and the [startup/systemd guide](startup.md).
 - **Understand the runtime:** begin with [design principles](design-principles.md),

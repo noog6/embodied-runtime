@@ -52,3 +52,16 @@ commands, read arbitrary files or logs, access the network, capture new media, m
 configuration or Jobs, control the body, manage processes/services/packages, or read
 secrets. Future Job workspaces/files and any future process execution are separate,
 separately authorized capabilities; neither is part of diagnostics.
+
+## Command-line diagnostics
+
+The `--diagnostics` launch mode reports both the selected robot hardware backend
+and a separate snapshot of the real host platform, including available identity
+and resource telemetry. A virtual robot backend does not make the host platform
+snapshot simulated. See the [quick start](startup.md#quick-start) for launch
+commands and [hardware selection](hardware/fusion-hat-plus.md#runtime-selection)
+for backend selection rules.
+
+The explicit `[DIAG]` and detailed `[PLATFORM]` report lines remain stable,
+untimestamped structured snapshot output; surrounding runtime logs are
+timestamped. See [runtime log format](run-history.md#runtime-log-format).

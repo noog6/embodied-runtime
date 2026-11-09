@@ -1,5 +1,11 @@
 # Local runtime console
 
+The local console shows the running runtime's current state and provides
+explicit operator controls for cognition, Jobs, memory, and diagnostics.
+Enter `status`, `body`, or `presence` at the profile-derived prompt to inspect
+state. In the attached client, `quit` disconnects this terminal; in combined
+`main.py --console` mode, it stops that runtime.
+
 ## Attach to a running agent
 
 Start through the existing foreground or systemd workflow. The checked-in Mira
