@@ -55,12 +55,30 @@ class ProcedureTrialStore:
             raise ValueError('trial retention/admission limit reached for this Job')
         return None
 
+    def queue_operator_procedure_trial(self, job_id, configuration):
+        """Queue through the same admission path, without inventing a source Run."""
+        self._connection.execute('BEGIN IMMEDIATE')
+        try:
+            _, _, pair = self._trial_pair(job_id)
+            versions = dict(active=pair[0]['version'], pending=pair[1]['version'])
+            decision = self._request_procedure_trial(job_id, versions, configuration, None)
+            self._connection.commit()
+            return decision
+        except BaseException:
+            self._connection.rollback()
+            raise
+
     def _request_procedure_trial(self, job_id, versions, configuration, source_run_id):
         job, definition, pair = self.validate_procedure_trial_request(job_id, versions)
         identity = digest(dict(job_id=job_id, definition=definition, pair=pair))
         existing = self._connection.execute('SELECT id FROM procedure_trials WHERE identity=?', (identity,)).fetchone()
         if existing:
-            return existing[0]  # One campaign per exact pair; no repeated cherry-picking.
+            if source_run_id is None:
+                trial = self.get_procedure_trial(existing[0])
+                trial.setdefault('operator_requested_at', self._now().isoformat())
+                self._save_trial(trial)
+            return dict(disposition='already_exists', trial_id=existing[0],
+                        active_version=versions['active'], pending_version=versions['pending'])
         record = dict(job_id=job_id, definition_identity=definition,
                       job=dict(id=job.id, name=job.name, description=job.description,
                                target_kind=job.target.kind if job.target else None,
@@ -68,11 +86,33 @@ class ProcedureTrialStore:
                       active=pair[0], pending=pair[1], configuration=configuration,
                       cases=deepcopy(CASES), rubric=deepcopy(RUBRIC),
                       created_at=self._now().isoformat(),
-                      source_run_id=source_run_id, state='queued', report=None,
+                      source_run_id=source_run_id, requested_by='operator' if source_run_id is None else 'model',
+                      state='queued', report=None,
                       notification='unclaimed', promotion=None)
+        if source_run_id is None:
+            record['operator_requested_at'] = record['created_at']
         cursor = self._connection.execute('INSERT INTO procedure_trials(job_id,identity,record_json) VALUES(?,?,?)',
                                          (job_id, identity, json.dumps(record)))
-        return cursor.lastrowid
+        return dict(disposition='queued', trial_id=cursor.lastrowid,
+                    active_version=versions['active'], pending_version=versions['pending'])
+
+    def record_procedure_trial_decision(self, run_id, decision):
+        """Bounded runtime facts, independent of feedback and terminal model prose.
+
+        Retain the first rejected attempt plus the latest resolution. Queued facts
+        are written only inside the transaction that persists the campaign.
+        """
+        evidence = self.get_run_procedure(run_id)
+        if evidence is None:
+            return
+        record = evidence['trial_request'] or {}
+        if decision['disposition'] == 'rejected':
+            record.setdefault('rejection', decision)
+            record.pop('resolution', None)
+        else:
+            record['resolution'] = decision
+        self._connection.execute('UPDATE job_run_procedures SET trial_request_json=? WHERE run_id=?',
+                                 (json.dumps(record), run_id))
 
     def is_procedure_trial_run(self, run_id):
         return self._connection.execute('SELECT 1 FROM procedure_trial_attempts WHERE run_id=?', (run_id,)).fetchone() is not None
@@ -121,6 +161,12 @@ class ProcedureTrialStore:
         except ValueError:
             return False
         return definition == trial['definition_identity'] and pair == [trial['active'], trial['pending']]
+
+    def procedure_trial_activation_eligible(self, trial):
+        return (trial['state'] == 'complete' and trial['report']['recommendation'] == 'candidate'
+                and self.procedure_trial_current(trial) and not self._connection.execute(
+                    "SELECT 1 FROM job_runs WHERE job_id=? AND status IN ('pending','running') LIMIT 1",
+                    (trial['job_id'],)).fetchone())
 
     def begin_procedure_trial_attempt(self, trial_id, configuration):
         """Allocate a fresh catalog Run and charge budget atomically before work."""
@@ -192,9 +238,12 @@ class ProcedureTrialStore:
                 (status.value, now.isoformat(), terminal.result_report, terminal.outcome_summary, run.id))
             self._reserve_procedure_evidence(run.job_id)
             evidence = result['procedure_evidence']
-            self._connection.execute('INSERT INTO job_run_procedures VALUES(?,?,?,?,?,?,?)',
+            self._connection.execute('''INSERT INTO job_run_procedures
+                (run_id,job_id,definition_identity,snapshot_json,supplied,feedback_json,candidate_disposition,trial_request_json)
+                VALUES(?,?,?,?,?,?,?,?)''',
                 (run.id, run.job_id, evidence['definition_identity'], json.dumps(evidence['snapshot']),
-                 int(evidence['supplied']), json.dumps(evidence['feedback']) if evidence['feedback'] else None, None))
+                 int(evidence['supplied']), json.dumps(evidence['feedback']) if evidence['feedback'] else None, None,
+                 json.dumps(evidence['trial_request']) if evidence.get('trial_request') else None))
             attempt = dict(attempt, state='finished', result=result)
             self._save_trial_attempt(trial_id, attempt)
             self._connection.commit()

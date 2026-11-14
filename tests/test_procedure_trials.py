@@ -101,7 +101,7 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = harness.JobFocusTests.asyncTearDown
     app = harness.JobFocusTests.app
 
-    async def setup_trial(self, backend=None, *, actions=False, scheduled=False):
+    async def setup_trial(self, backend=None, *, actions=False, scheduled=False, request=True):
         backend = backend or RequestBackend()
         # Catalog identities are deliberately not JOB19; versions come from the store.
         self.store.create_job('Unrelated existing Job')
@@ -119,6 +119,8 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
                 await app.start()
         else:
             await app.start()
+        if not request:
+            return app, job, backend, None
         binding = app.start_job_run(job.id)
         await app.work_current_job_once()
         self.assertEqual(self.store.get_run(binding.run.id).status, JobRunStatus.COMPLETED)
@@ -131,6 +133,168 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
             if trial['state'] not in ('running', 'queued'):
                 return trial
         self.fail('bounded trial did not settle')
+
+    async def test_operator_queues_without_source_run_and_model_reuses_campaign(self):
+        app, job, backend, _ = await self.setup_trial(request=False)
+        console = RuntimeConsole(app)
+        shown = console.execute(f'job procedure compare JOB{job.id}')[0]
+        trial = self.store.list_procedure_trials(job.id)[0]
+        self.assertIn(f'JOB{job.id} incumbent PROC1; candidate PROC2: queued as TRIAL{trial["id"]}', shown)
+        self.assertIn('operator requested; persisted', shown)
+        self.assertEqual(self.store.list_runs(job.id), ())
+        self.assertEqual(trial['requested_by'], 'operator')
+        self.assertIsNone(trial['source_run_id'])
+        self.assertEqual(trial['configuration'], trial_configuration(app))
+        self.assertEqual(trial['state'], 'queued')
+        self.assertEqual(trial['active'], self.store.get_procedure(job.id, 'active'))
+        self.assertEqual(trial['pending'], self.store.get_procedure(job.id, 'pending'))
+        with patch('embodied_runtime.jobs.trial_store.MAX_TRIALS_PER_JOB', 1):
+            duplicate = console.execute(f'job procedure compare JOB{job.id}')[0]
+            self.assertIn(f'already exists as TRIAL{trial["id"]}', duplicate)
+            ordinary = app.start_job_run(job.id)
+            shown, _ = await console.execute_async(f'job work RUN{ordinary.run.id}')
+        self.assertIn(f'already exists as TRIAL{trial["id"]}', shown)
+        self.assertIn('captured PROC1; supplied=true', shown)
+        self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
+        evidence = self.store.get_run_procedure(ordinary.run.id)
+        self.assertEqual(evidence['trial_request']['resolution']['trial_id'], trial['id'])
+        self.assertEqual(self.store.get_procedure(job.id, 'active')['version'], 1)
+        # The existing coordinator executes the operator's campaign normally.
+        await app.advance_procedure_trials_once()
+        self.assertEqual(len(self.store.procedure_trial_attempts(trial['id'])), 1)
+
+    async def test_operator_reuses_model_campaign_at_capacity_and_preserves_source(self):
+        app, job, backend, trial = await self.setup_trial()
+        with patch('embodied_runtime.jobs.trial_store.MAX_TRIALS_PER_JOB', 1):
+            console = RuntimeConsole(app)
+            for _ in range(2):
+                shown = console.execute(f'job procedure compare JOB{job.id}')[0]
+                self.assertIn(f'already exists as TRIAL{trial["id"]}', shown)
+        retained = self.store.get_procedure_trial(trial['id'])
+        self.assertEqual(retained['source_run_id'], trial['source_run_id'])
+        self.assertEqual(retained['requested_by'], 'model')
+        self.assertIn('operator_requested_at', retained)
+        self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
+
+    async def test_operator_resolves_later_catalog_versions_and_rejects_invalid_pairs(self):
+        app, job, backend, _ = await self.setup_trial(request=False)
+        console = RuntimeConsole(app)
+        self.store.review_procedure(job.id, 2, activate=False)
+        self.assertIn('compatible exact active and pending', console.execute(f'job procedure compare JOB{job.id}')[0])
+        self.store.seed_procedure(job.id, ProcedureProposal(**candidate(name='Revision three')))
+        self.store.set_job_description(job.id, 'Incompatible definition')
+        self.assertIn('compatible exact active and pending', console.execute(f'job procedure compare JOB{job.id}')[0])
+        self.store.set_job_description(job.id, job.description)
+        self.store.set_job_enabled(job.id, False)
+        self.assertIn('enabled setup-created experiment', console.execute(f'job procedure compare JOB{job.id}')[0])
+        self.store.set_job_enabled(job.id, True)
+        self.store.set_procedure_enabled(job.id, False)
+        self.assertIn('Unable to administer', console.execute(f'job procedure compare JOB{job.id}')[0])
+        self.store.set_procedure_enabled(job.id, True)
+        self.assertEqual(self.store.list_procedure_trials(job.id), ())
+        shown = console.execute(f'job procedure compare JOB{job.id}')[0]
+        self.assertIn('incumbent PROC1; candidate PROC3: queued', shown)
+        ordinary = self.store.create_job('Ordinary opted-in Job')
+        self.store.set_procedure_enabled(ordinary.id, True)
+        self.assertIn('setup-created experiment', console.execute(f'job procedure compare JOB{ordinary.id}')[0])
+        empty = self.store.create_procedure_experiment()
+        self.store.set_job_enabled(empty.id, True)
+        self.store.seed_procedure(empty.id, ProcedureProposal(**candidate(name='Only pending')))
+        self.assertIn('compatible exact active and pending', console.execute(f'job procedure compare JOB{empty.id}')[0])
+        with patch.object(app, '_cognition_backend', ProcedureBackend()):
+            self.assertIn('backend does not support', console.execute(f'job procedure compare JOB{job.id}')[0])
+        for versions in ({'active': 1, 'pending': 2}, {'active': True, 'pending': 3}, {'pending': 3}):
+            with self.assertRaises(ValueError):
+                self.store.validate_procedure_trial_request(job.id, versions)
+
+    async def test_operator_persistence_failure_does_not_acknowledge_queue(self):
+        app, job, backend, _ = await self.setup_trial(request=False)
+        self.store._connection.execute("CREATE TEMP TRIGGER block_trial BEFORE INSERT ON procedure_trials BEGIN SELECT RAISE(ABORT,'injected'); END")
+        shown = RuntimeConsole(app).execute(f'job procedure compare JOB{job.id}')[0]
+        self.assertIn('persistence operation failed', shown)
+        self.assertNotIn('queued as TRIAL', shown)
+        self.assertEqual(self.store.list_procedure_trials(job.id), ())
+        self.assertEqual(self.store.list_runs(job.id), ())
+
+    async def test_rejected_request_then_corrected_queue_retains_both_runtime_facts(self):
+        app, job, backend, _ = await self.setup_trial(request=False)
+        backend.versions = {'active': 1, 'pending': 999}
+        backend.feedback = dict(version=1, response='followed', reason=None, improvement=None)
+        source = app.start_job_run(job.id)
+        respond = backend.respond
+
+        async def correct_pair(message, **kwargs):
+            response = await respond(message, **kwargs)
+            if message == JOB_OUTCOME_EVALUATION_REQUEST:
+                evidence = self.store.get_run_procedure(source.run.id)
+                self.assertEqual(evidence['trial_request']['rejection']['disposition'], 'rejected')
+                self.assertEqual(self.store.list_procedure_trials(job.id), ())
+                backend.versions = {'active': 1, 'pending': 2}
+                backend.results.append(await kwargs['tool_executor'](backend.call()))
+                # Acceptance stages a request; it cannot claim a queued trial yet.
+                self.assertNotIn('resolution', self.store.get_run_procedure(source.run.id)['trial_request'])
+            return response
+
+        backend.respond = correct_pair
+        console = RuntimeConsole(app)
+        shown, _ = await console.execute_async(f'job work RUN{source.run.id}')
+        trial = self.store.list_procedure_trials(job.id)[0]
+        self.assertIn('disposition:   completed', shown)
+        self.assertIn('rejected (expected exact current active and pending versions); requested PROC999', shown)
+        self.assertNotIn('pending PROC999', shown)
+        self.assertIn(f'queued as TRIAL{trial["id"]}; pending PROC2', shown)
+        self.assertIn('procedure feedback (model):', shown)
+        self.assertIn('"response": "followed"', shown)
+        self.assertEqual(trial['source_run_id'], source.run.id)
+        evidence = self.store.get_run_procedure(source.run.id)
+        await app.stop()
+        self.store = SQLiteJobStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.store.get_run_procedure(source.run.id), evidence)
+        app2 = self.app(RequestBackend())
+        await app2.start()
+        retained = RuntimeConsole(app2).execute(f'job procedure snapshot RUN{source.run.id}')[0]
+        self.assertIn('rejected (expected exact current', retained)
+        self.assertIn('requested PROC999', retained)
+        self.assertNotIn('pending PROC999', retained)
+        self.assertIn(f'queued as TRIAL{trial["id"]}', retained)
+
+    async def test_omitted_request_is_recorded_with_pending_version(self):
+        app, job, backend, _ = await self.setup_trial(request=False)
+        backend.versions = None
+        source = app.start_job_run(job.id)
+        shown, _ = await RuntimeConsole(app).execute_async(f'job work RUN{source.run.id}')
+        self.assertIn('trial request: not requested; pending PROC2', shown)
+        self.assertIn('captured PROC1; supplied=true', shown)
+        self.assertEqual(self.store.list_procedure_trials(job.id), ())
+
+    async def test_schema_13_legacy_decisions_are_not_recorded_and_migration_is_atomic(self):
+        app, job, backend, trial = await self.setup_trial()
+        await app.stop()
+        self.store.close()
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.executescript('''ALTER TABLE job_run_procedures DROP COLUMN trial_request_json;
+                PRAGMA user_version=13;''')
+        connect = sqlite3.connect
+        class BrokenMigration(sqlite3.Connection):
+            def execute(self, statement, *args, **kwargs):
+                if statement == 'PRAGMA user_version=14':
+                    raise sqlite3.OperationalError('injected')
+                return super().execute(statement, *args, **kwargs)
+        with patch('embodied_runtime.jobs.sqlite_store.sqlite3.connect',
+                   side_effect=lambda *a, **kw: connect(*a, factory=BrokenMigration, **kw)):
+            with self.assertRaises(sqlite3.OperationalError):
+                SQLiteJobStore(self.path)
+        with closing(connect(self.path)) as connection:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 13)
+            self.assertNotIn('trial_request_json', [r[1] for r in connection.execute('PRAGMA table_info(job_run_procedures)')])
+        self.store = SQLiteJobStore(self.path, clock=lambda: self.now)
+        app2 = self.app(RequestBackend())
+        await app2.start()
+        shown = RuntimeConsole(app2).execute(f'job procedure snapshot RUN{trial["source_run_id"]}')[0]
+        self.assertIn('trial request: not recorded', shown)
+        self.assertNotIn('trial request: not requested', shown)
+        self.assertIn('captured PROC1; supplied=true', shown)
+        self.assertEqual(self.store.get_procedure_trial(trial['id']), trial)
 
     async def test_winner_inspection_approval_fresh_run_and_recoverable_incumbent(self):
         app, job, backend, trial = await self.setup_trial(RequestBackend(usage=True))
@@ -150,7 +314,23 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
         console = RuntimeConsole(app)
         shown = console.execute(f'job procedure trial TRIAL{trial["id"]}')[0]
         self.assertIn('candidate', shown)
-        self.assertIn('current_evidence', shown)
+        self.assertTrue(shown.startswith('Recommendation: candidate.'))
+        self.assertIn('Score delta (candidate - incumbent): +', shown)
+        self.assertIn('Protected regressions: none recorded', shown)
+        self.assertIn('12/12 attempts scored', shown)
+        self.assertNotIn('budget consumed:', shown)
+        self.assertNotIn('current_evidence', shown)
+        self.assertNotIn('"trace"', shown)
+        detailed = console.execute(f'job procedure trial TRIAL{trial["id"]} --details')[0]
+        self.assertIn('current_evidence', detailed)
+        self.assertIn('"trace"', detailed)
+        self.assertIn('"instructions"', detailed)
+        self.assertIn('case / variant / procedure / Run / attempt / score', detailed)
+        self.assertIn(f'job procedure activate JOB{job.id} PROC2', shown)
+        ordinary = app.start_job_run(job.id)
+        self.assertNotIn('To approve:', console.execute(f'job procedure trial TRIAL{trial["id"]}')[0])
+        self.assertEqual(self.store.get_run_procedure(ordinary.run.id)['snapshot']['version'], 1)
+        app.finish_job_run(JobRunStatus.STOPPED, 'Ready for explicit approval')
         self.assertIn('TRIAL', console.execute(f'job procedure trials JOB{job.id}')[0])
         self.assertIn('activated; persisted', console.execute(f'job procedure activate JOB{job.id} PROC2')[0])
         promoted = self.store.get_procedure_trial(trial['id'])
@@ -223,6 +403,8 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
         app2 = self.app(RequestBackend())
         await app2.start()
         self.assertEqual(self.store.get_run(unfinished['run_id']).status, JobRunStatus.INTERRUPTED)
+        progress = RuntimeConsole(app2).execute(f'job procedure trials JOB{job.id}')[0]
+        self.assertIn('1/12 attempts scored; budget consumed: 2/14 attempts', progress)
         result = await self.finish(app2, trial['id'])
         attempts = self.store.procedure_trial_attempts(trial['id'])
         self.assertEqual(attempts[0], first)
@@ -230,6 +412,8 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts[1]['case_id'], attempts[2]['case_id'])
         self.assertNotEqual(attempts[1]['run_id'], attempts[2]['run_id'])
         self.assertEqual(len(attempts), 13)
+        shown = RuntimeConsole(app2).execute(f'job procedure trial TRIAL{trial["id"]}')[0]
+        self.assertIn('12/12 attempts scored; budget consumed: 13/14 attempts', shown)
         self.assertEqual(result['report']['recommendation'], 'candidate')
         await app2.stop()
         self.store = SQLiteJobStore(self.path, clock=lambda: self.now)
@@ -297,6 +481,9 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
             self.store.review_procedure(job.id, 2, activate=False)
             self.store.seed_procedure(job.id, ProcedureProposal(**candidate(name='New candidate')))
+            direct = RuntimeConsole(app).execute(f'job procedure compare JOB{job.id}')[0]
+            self.assertIn('trial retention/admission limit', direct)
+            self.assertNotIn('queued as TRIAL', direct)
             backend.versions = {'active': 1, 'pending': 3}
             source = app.start_job_run(job.id)
             respond = backend.respond
@@ -316,7 +503,16 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
                 return response
 
             backend.respond = correct_optional_request
-            await app.work_current_job_once()
+            console = RuntimeConsole(app)
+            shown, _ = await console.execute_async(f'job work RUN{source.run.id}')
+            self.assertIn('disposition:   completed', shown)
+            self.assertIn('captured PROC1; supplied=true', shown)
+            self.assertIn('rejected (campaign capacity reached)', shown)
+            self.assertIn('pending PROC3', shown)
+            self.assertIn('not requested', shown)
+            retained = console.execute(f'job procedure snapshot RUN{source.run.id}')[0]
+            self.assertIn('rejected (campaign capacity reached)', retained)
+            self.assertIn('not requested', retained)
             self.assertEqual(json.loads(backend.results[-1].output)['status'], 'accepted')
             self.assertEqual(self.store.get_run(source.run.id).status, JobRunStatus.COMPLETED)
             self.assertFalse(app.job_execution_contexts)
@@ -516,6 +712,7 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
         self.assertEqual(self.store.get_run(run.run.id).status, JobRunStatus.RUNNING)
         self.assertIsNone(self.store.get_run(run.run.id).result_report)
+        self.assertIsNone(self.store.get_run_procedure(run.run.id)['trial_request'])
 
     async def test_shutdown_cancels_owned_trial_and_preserves_interrupted_attempt(self):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -543,7 +740,9 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         with closing(sqlite3.connect(self.path)) as connection:
             connection.executescript('''DROP TABLE procedure_trial_attempts;
-                DROP TABLE procedure_trials; PRAGMA user_version=12;''')
+                DROP TABLE procedure_trials;
+                ALTER TABLE job_run_procedures DROP COLUMN trial_request_json;
+                PRAGMA user_version=12;''')
         connect = sqlite3.connect
         class BrokenMigration(sqlite3.Connection):
             def execute(self, statement, *args, **kwargs):
@@ -590,6 +789,14 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TrialScoringTests(unittest.TestCase):
+    def test_trial_rejections_never_copy_arbitrary_exception_text_or_unbounded_versions(self):
+        from embodied_runtime.jobs.trial import trial_rejection
+        decision = trial_rejection({'active': True, 'pending': 10**100}, ValueError('private model-authored text'))
+        self.assertEqual(decision['reason'], 'comparison proposal was not accepted')
+        self.assertIsNone(decision['active_version'])
+        self.assertIsNone(decision['pending_version'])
+        self.assertNotIn('private', json.dumps(decision))
+
     def test_authoritative_scope_can_support_declining_without_irrelevant_acquisition(self):
         report = dict(assessment='not_applicable', evidence={}, limitation='outside_scope',
                       next_diagnostic='operator_scope_clarification', applicability='decline')

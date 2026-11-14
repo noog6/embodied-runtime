@@ -263,6 +263,7 @@ class RuntimeConsole:
                 f"  summary:       {outcome.summary or 'none'}",
                 f"  auto_continuation: {self._job_continuation_state(continuation)}",
                 f"  auto_steps:    {self._job_continuation_steps(continuation)}",
+                *self._job_procedure_summary(outcome.run_id),
             )), False
         if lowered[:2] == ["camera", "capture"]:
             if len(words) != 3:
@@ -347,8 +348,9 @@ class RuntimeConsole:
                 "  job procedure show|enable|disable JOB<n>",
                 "  job procedure activate|reject JOB<n> PROC<version>",
                 "  job procedure snapshot RUN<n>  Inspect retained snapshot and feedback",
+                "  job procedure compare JOB<n>   Queue exact active/pending comparison",
                 "  job procedure trials JOB<n>    List bounded comparisons",
-                "  job procedure trial TRIAL<n>   Inspect comparison, attempts and promotion",
+                "  job procedure trial TRIAL<n> [--details]  Inspect recommendation or full evidence",
                 "  job procedure seed JOB<n> --name <text> --purpose <text> --applicability <text> --required-capabilities <text> --steps <text> --verification <text> --stopping-conditions <text> [--source RUN<n>]",
                 "  job focus show|enable|disable JOB<n>",
                 "  job focus seed JOB<n> RUN<n> --question <text> [--status open|blocked] [--blocker <text>]",
@@ -811,11 +813,26 @@ class RuntimeConsole:
             self._application.discard_pending_job_activations(job_id)
         return f"JOB{job.id} {'enabled' if enabled else 'disabled'}."
 
+    def _job_procedure_summary(self, run_id: int) -> list[str]:
+        from embodied_runtime.jobs.trial import render_trial_request
+        store = self._application.jobs
+        evidence = store.get_run_procedure(run_id) if store else None
+        snapshot = evidence['snapshot'] if evidence else None
+        captured = f"PROC{snapshot['version']}" if snapshot else 'none' if evidence else 'not recorded'
+        supplied = str(evidence['supplied']).lower() if evidence else 'not recorded'
+        lines = [f'  procedure:     captured {captured}; supplied={supplied}',
+                 f'  trial request: {render_trial_request(evidence)}']
+        if evidence and evidence['feedback']:
+            lines.append('  procedure feedback (model): ' + json.dumps(evidence['feedback'], ensure_ascii=True))
+        if evidence and evidence['candidate_disposition']:
+            lines.append(f"  procedure candidate: {evidence['candidate_disposition']}")
+        return lines
+
     def _job_procedure(self, words: list[str]) -> str:
         usage = ('Usage: job procedure experiment; job procedure show|enable|disable JOB<n>; '
                  'job procedure activate|reject JOB<n> PROC<version>; '
-                 'job procedure snapshot RUN<n>; job procedure trials JOB<n>; '
-                 'job procedure trial TRIAL<n>; job procedure seed JOB<n> '
+                 'job procedure snapshot RUN<n>; job procedure compare JOB<n>; job procedure trials JOB<n>; '
+                 'job procedure trial TRIAL<n> [--details]; job procedure seed JOB<n> '
                  '--name <text> --purpose <text> --applicability <text> '
                  '--required-capabilities <text> --steps <text> --verification <text> '
                  '--stopping-conditions <text> [--source RUN<n>].')
@@ -834,23 +851,24 @@ class RuntimeConsole:
                         'procedure policy enabled for this exact new Job. No Run started.')
             if len(words) < 4:
                 return usage
-            if action == 'trial' and len(words) == 4:
+            if action == 'trial' and (len(words) == 4 or len(words) == 5 and words[4] == '--details'):
                 trial_id = _catalog_id(words[3], 'TRIAL')
                 trial = store.get_procedure_trial(trial_id) if trial_id else None
                 if trial is None:
                     return 'Trial not found.'
                 from embodied_runtime.jobs.trial import render_comparison
                 attempts = store.procedure_trial_attempts(trial_id)
-                return '\n'.join((render_comparison(trial, attempts, current=store.procedure_trial_current(trial)),
-                    json.dumps(dict(trial=trial, attempts=attempts),
-                               ensure_ascii=True, sort_keys=True)))
+                return render_comparison(trial, attempts, current=store.procedure_trial_current(trial),
+                    eligible=store.procedure_trial_activation_eligible(trial), details=len(words) == 5)
             if action == 'trials' and len(words) == 4:
                 job_id = _catalog_id(words[3], 'JOB')
                 if job_id is None:
                     return usage
                 trials = store.list_procedure_trials(job_id)
+                from embodied_runtime.jobs.trial import trial_progress
                 return '\n'.join(f'TRIAL{t["id"]} JOB{job_id} {t["state"]} '
-                                 f'PROC{t["active"]["version"]} vs PROC{t["pending"]["version"]}' for t in trials) or 'No trials.'
+                                 f'PROC{t["active"]["version"]} vs PROC{t["pending"]["version"]}; '
+                                 f'{trial_progress(t, store.procedure_trial_attempts(t["id"]))}' for t in trials) or 'No trials.'
             if action == 'snapshot':
                 run_id = _catalog_id(words[3], 'RUN')
                 if len(words) != 4 or run_id is None:
@@ -860,20 +878,28 @@ class RuntimeConsole:
                     return f'Run not found: RUN{run_id}.'
                 evidence = store.get_run_procedure(run_id)
                 if evidence is None:
-                    return 'No retained procedure evidence: not opted in or outside the retention window.'
+                    return '\n'.join(('No retained procedure evidence: not opted in or outside the retention window.',
+                                      *self._job_procedure_summary(run_id)))
                 job = store.get_job(run.job_id)
                 applicable = (job is not None and job.procedure_enabled and
                               evidence['definition_identity'] == store.focus_definition_identity(job.id))
                 return '\n'.join((f'RUN{run_id} JOB{run.job_id} independently accepted status={run.status.value}',
+                    *self._job_procedure_summary(run_id),
                     f'Guidance currently permitted={str(applicable).lower()}; captured version is immutable.',
                     'supplied records runtime projection; feedback is a cognition report, not verified use or effectiveness.',
                     json.dumps(evidence, ensure_ascii=True, sort_keys=True)))
             job_id = _catalog_id(words[3], 'JOB')
-            if job_id is None or action not in ('show', 'enable', 'disable', 'seed', 'activate', 'reject'):
+            if job_id is None or action not in ('show', 'enable', 'disable', 'seed', 'activate', 'reject', 'compare'):
                 return usage
             job = store.get_job(job_id)
             if job is None:
                 return f'Job not found: JOB{job_id}.'
+            if action == 'compare' and len(words) == 4:
+                decision = app.queue_procedure_comparison(job_id)
+                disposition = decision['disposition'].replace('_', ' ')
+                return (f'JOB{job_id} incumbent PROC{decision["active_version"]}; '
+                        f'candidate PROC{decision["pending_version"]}: {disposition} as TRIAL{decision["trial_id"]}; '
+                        'operator requested; persisted.')
             if action == 'show' and len(words) == 4:
                 active, pending = store.get_procedure(job_id, 'active'), store.get_procedure(job_id, 'pending')
                 return '\n'.join((f'JOB{job_id} procedure enabled={str(job.procedure_enabled).lower()}',

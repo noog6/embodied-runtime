@@ -464,3 +464,11 @@ provenance rules, and the manual JOB15/RUN391 pilot.
 Procedure administration and the exact `job procedure` command grammar, including
 explicit experimental Job setup and retained Run inspection, are documented in
 [Job procedures](job-procedures.md).
+`job procedure compare JOB<n>` queues the setup-created experiment's exact
+active/pending comparison and returns its trial ID; repeating it reuses the same
+campaign. `job work` and `job procedure snapshot RUN<n>` show captured/supplied
+guidance and runtime comparison decisions, preserving rejections through outcome
+correction and showing `not recorded` for legacy evidence. `job procedure trials
+JOB<n>` includes scored progress and any distinct consumed budget. `job procedure
+trial TRIAL<n>` shows a concise recommendation; add `--details` for full snapshots,
+attempts and tool traces. Activation remains an explicit operator command.
