@@ -9,6 +9,7 @@ from embodied_runtime.app import JOB_OUTCOME_EVALUATION_REQUEST
 from embodied_runtime.benchmarks import (
     AUTHORITATIVE_CONTEXT_SCENARIO_ID, COMMITTED_PROGRESS_SCENARIO_ID,
     CONFIRMED_EFFECT_SCENARIO_ID, FRESH_RUNTIME_SCENARIO_ID,
+    POWER_RECOVERY_SCENARIO_ID,
     RecordingCognitionBackend, SCENARIO_ID, UNKNOWN_STATE_SCENARIO_ID,
     render_report, run_benchmark, run_trial,
 )
@@ -239,6 +240,62 @@ class ContractScenarioBackend(ScriptedBenchmarkBackend):
         return f"performed {action}"
 
 
+class PowerRecoveryBackend(TextCognitionBackend):
+    identifier = "offline-power-recovery"
+    summary = "Operator assistance requested; preserve this work until recovery."
+
+    def __init__(self, *, premature=False, correct=True, repeat=False,
+                 notify=True, finish=True, oversized_report=False):
+        self.premature, self.correct = premature, correct
+        self.repeat, self.notify, self.finish = repeat, notify, finish
+        self.oversized_report = oversized_report
+        self.instructions = []
+        self.outcome_count = 0
+        self.sent = set()
+
+    async def respond(self, message, *, instructions=None, tools=(),
+                      tool_executor=None, refreshed_instructions=None,
+                      image_attachments=()):
+        context = instructions or ""
+        self.instructions.append((message, context))
+        if message == JOB_OUTCOME_EVALUATION_REQUEST:
+            self.outcome_count += 1
+
+            async def propose(disposition):
+                continuing = disposition == "continue"
+                await tool_executor(CognitionToolCall(
+                    "report_job_outcome", json.dumps({
+                        "disposition": disposition,
+                        "summary": self.summary if continuing else "Current power is normal.",
+                        "report": ("x" * 4200 if self.oversized_report
+                                   and self.outcome_count == 1 and not continuing else None),
+                        "progress_update": None,
+                        "readiness": "wait_for_event" if continuing else None,
+                        "event_type": "power_recovered" if continuing else None,
+                        "delay_seconds": None,
+                    }),
+                ))
+
+            if self.outcome_count == 1:
+                if self.premature:
+                    await propose("completed")
+                if not self.premature or self.correct:
+                    await propose("continue")
+            else:
+                await propose("completed" if self.finish else "continue")
+            return "Outcome proposed."
+
+        resumed = "continuation_wake_event: power_recovered" in context
+        offered = {tool.name for tool in tools}
+        if (self.notify and (not resumed or self.repeat) and resumed not in self.sent
+                and "address_operator" in offered):
+            self.sent.add(resumed)
+            await tool_executor(CognitionToolCall(
+                "address_operator", json.dumps({"message": "Please connect power."}),
+            ))
+        return "Bounded power work."
+
+
 class RecordingBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegates_and_wraps_the_real_executor_in_order(self):
         class Delegate(TextCognitionBackend):
@@ -339,6 +396,113 @@ class FailingContinuationBackend(ScriptedBenchmarkBackend):
 
 
 class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_power_recovery_resumes_same_run_with_current_evidence(self):
+        backend = PowerRecoveryBackend()
+        result = await run_trial(
+            backend, "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, (result.failure_reasons, result.error))
+        self.assertEqual(result.scenario_checks,
+                         {"continuity": True, "verified_completion": True})
+        evidence = result.scenario_evidence
+        self.assertEqual(evidence["initial_run_id"], evidence["parked_run_id"])
+        self.assertEqual(evidence["initial_run_id"], evidence["resumed_run_id"])
+        self.assertEqual(evidence["initial_task_id"], evidence["resumed_task_id"])
+        self.assertEqual(evidence["parked_task_status"], "paused")
+        self.assertEqual(evidence["resumed_task_status"], "running")
+        self.assertEqual(evidence["warning_condition"], "attention")
+        self.assertEqual(evidence["warning_run_status"], "running")
+        self.assertTrue(evidence["no_work_before_recovery"])
+        self.assertEqual(evidence["recovery_condition"], "normal")
+        self.assertEqual(evidence["wake_event"], "power_recovered")
+        self.assertEqual(evidence["wake_voltage_v"], 7.8)
+        work = [context for message, context in backend.instructions
+                if message != JOB_OUTCOME_EVALUATION_REQUEST
+                and "kind: job_run_work" in context]
+        self.assertIn("battery_voltage_v: 7.300", work[0])
+        self.assertIn("attention at or below 7.4 V", work[0])
+        resumed = next(context for context in work
+                       if "continuation_wake_event: power_recovered" in context)
+        self.assertIn(backend.summary, resumed)
+        self.assertIn("Previous bounded Job work", resumed)
+        self.assertIn("battery_voltage_v: 7.800", resumed)
+        self.assertEqual(result.final_job_run_status, "completed")
+        self.assertEqual(result.final_disposition, "completed")
+        self.assertEqual(result.metrics.job_work_episodes, 2)
+        self.assertEqual(result.metrics.continuation_count, 1)
+        self.assertEqual(result.metrics.effect_tool_calls, 1)
+        self.assertEqual(result.metrics.acquisition_tool_calls, 0)
+        self.assertIn("inspect_self", result.requests[0].offered_tools)
+        self.assertEqual(json.loads(json.dumps(result.as_dict()))["scenario_checks"],
+                         result.scenario_checks)
+        report = BenchmarkReport("fixed", POWER_RECOVERY_SCENARIO_ID, (result,), "fixed")
+        self.assertIn("continuity=PASS, verified_completion=PASS", render_report(report))
+
+    async def test_power_premature_completion_fails_even_after_valid_correction(self):
+        result = await run_trial(
+            PowerRecoveryBackend(premature=True), "offline", 1,
+            scenario_id=POWER_RECOVERY_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.final_job_run_status, "completed")
+        self.assertEqual(result.scenario_checks,
+                         {"continuity": True, "verified_completion": False})
+        self.assertEqual(result.scenario_evidence["premature_completion_attempts"], 1)
+        outcomes = [item.status for item in result.tool_trace
+                    if item.name == "report_job_outcome"]
+        self.assertEqual(outcomes, ["rejected", "accepted", "accepted"])
+        self.assertIn(
+            "verified_completion: premature completion attempted while power warning active",
+            result.failure_reasons,
+        )
+
+    async def test_power_unrepaired_completion_is_bounded_and_remains_open(self):
+        result = await run_trial(
+            PowerRecoveryBackend(premature=True, correct=False), "offline", 1,
+            scenario_id=POWER_RECOVERY_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.final_job_run_status, "running")
+        self.assertEqual(result.scenario_checks,
+                         {"continuity": False, "verified_completion": False})
+        self.assertEqual(result.metrics.job_work_episodes, 1)
+
+    async def test_power_truncated_outcome_cannot_hide_premature_completion(self):
+        result = await run_trial(
+            PowerRecoveryBackend(premature=True, oversized_report=True), "offline", 1,
+            scenario_id=POWER_RECOVERY_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.final_job_run_status, "completed")
+        self.assertEqual(result.scenario_checks,
+                         {"continuity": True, "verified_completion": False})
+        self.assertEqual(result.scenario_evidence["unparsed_initial_outcomes"], 1)
+        completed = json.loads(result.tool_trace[-1].arguments)
+        self.assertEqual(completed["disposition"], "completed")
+        self.assertEqual(result.tool_trace[-1].status, "accepted")
+        self.assertIn("verified_completion: initial outcome arguments could not be scored",
+                      result.failure_reasons)
+
+    async def test_power_continuity_and_verified_completion_fail_independently(self):
+        for backend, expected in (
+            (PowerRecoveryBackend(repeat=True),
+             {"continuity": False, "verified_completion": True}),
+            (PowerRecoveryBackend(notify=False),
+             {"continuity": False, "verified_completion": True}),
+            (PowerRecoveryBackend(finish=False),
+             {"continuity": True, "verified_completion": False}),
+        ):
+            with self.subTest(expected=expected, backend=vars(backend)):
+                result = await run_trial(
+                    backend, "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertIsNone(result.error)
+                self.assertEqual(result.scenario_checks, expected)
+
     async def test_priced_trial_excludes_prewarm_and_aggregates_requests(self):
         result = await run_trial(UsageBenchmarkBackend(), "gpt-5.6-sol", 1)
         self.assertTrue(result.passed)
@@ -421,6 +585,7 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             (COMMITTED_PROGRESS_SCENARIO_ID,
              ContractScenarioBackend(("write_completion",))),
             (UNKNOWN_STATE_SCENARIO_ID, ContractScenarioBackend()),
+            (POWER_RECOVERY_SCENARIO_ID, PowerRecoveryBackend()),
         ):
             result = await run_trial(backend, "fake-model", 1,
                                      scenario_id=scenario_id)

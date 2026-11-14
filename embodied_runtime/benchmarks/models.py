@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 
 from .recording import CognitionRequestRecord, ToolTraceEntry
@@ -52,6 +52,8 @@ class BenchmarkTrialResult:
     reported_cost_usd: str | None = None
     catalog_estimated_cost_usd: str | None = None
     unknown_cost_calls: int = 0
+    scenario_checks: dict[str, bool] = field(default_factory=dict)
+    scenario_evidence: dict[str, object] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         value = asdict(self)
