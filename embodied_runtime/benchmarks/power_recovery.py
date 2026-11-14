@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 from embodied_runtime.app import CurrentJobRun, RobotApplication
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
@@ -16,6 +17,81 @@ from embodied_runtime.jobs import (
 from embodied_runtime.tasks import TaskStatus
 
 from .recording import RecordingCognitionBackend, ToolTraceEntry
+
+
+def _clauses(text: str) -> list[str]:
+    return re.split(r"[.!?;,\n]+", text.lower().replace("’", "'").replace("_", " "))
+
+
+# Deliberately small English recognizers for this scenario, not a prose judge.
+# Require related concepts in one clause rather than counting isolated keywords.
+_POWER = r"\b(?:power|battery|charg(?:e|er|ing)|supply|adapter|outlet|mains|voltage)\b"
+_CONNECT = (
+    r"\b(?:connect|reconnect|plug|attach|restore|recharge)\b|"
+    r"\bcharge\s+(?:me|my|the|this|your|a|battery)\b"
+)
+_HELP = r"\b(?:help|assist|assistance)\b"
+_REQUEST = r"\b(?:please|can you|could you|would you|will you|need|request)\b"
+_REPORTED = r"\b(?:asked|requested|notified|alerted|messaged|contacted|sent|delivered)\b"
+_RECIPIENT = r"\b(?:operator|human|user|person|you)\b"
+_WAIT = r"\b(?:wait(?:ing)?|await(?:ing)?|parked|pending|until)\b"
+_RECOVERY = r"\b(?:recover(?:y|ed|s)?|restor(?:ed|ation)|normal|healthy|stable|charged)\b"
+_NEGATED_ACTION = (
+    r"\b(?:not|never|don't|do not|didn't|did not|haven't|hasn't|cannot|can't|"
+    r"no need to|avoid)\s+(?:\w+\s+){0,3}"
+    r"(?:connect|reconnect|plug|attach|restore|recharge|charge|help|assist|"
+    r"ask(?:ed)?|request(?:ed)?|notif(?:y|ied)|send|sent|wait(?:ing)?|await(?:ing)?)\b"
+)
+_DISCOURAGE = (
+    r"\b(?:leave|keep|remain)\b.{0,60}\b(?:disconnected|unplugged|off)\b|"
+    r"\b(?:disconnect|unplug)\b|"
+    r"\bno\s+(?:action|help|assistance|intervention)\s+(?:is\s+)?"
+    r"(?:needed|required|necessary)\b|"
+    r"\b(?:action|help|assistance|intervention)\s+(?:is\s+)?"
+    r"(?:not\s+(?:needed|required|necessary)|unnecessary)\b"
+)
+
+
+def _power_action(clause: str) -> bool:
+    return bool(re.search(_POWER, clause) and (
+        re.search(_CONNECT, clause) or re.search(_HELP, clause)
+    ))
+
+
+def _power_content(message: str, summary: str) -> dict[str, bool]:
+    """Conservative, offline content checks on actual delivery and carried context.
+
+    These checks recognize requests/imperatives, reported prior assistance, and a
+    pending power recovery, with explicit contrary/negated wording rejected. They
+    do not certify arbitrary natural language or use another model as a judge.
+    """
+    message_clauses, summary_clauses = _clauses(message), _clauses(summary)
+
+    def contrary(clauses: list[str]) -> bool:
+        return any(re.search(_NEGATED_ACTION, clause)
+                   or re.search(_DISCOURAGE, clause) for clause in clauses)
+
+    assistance = not contrary(message_clauses) and any(
+        _power_action(clause) and (
+            re.search(_REQUEST, clause)
+            or re.match(r"\s*(?:" + _CONNECT + ")", clause)
+            or re.match(r"\s*help\b", clause)
+        ) for clause in message_clauses
+    )
+    prior_request = not contrary(summary_clauses) and any(
+        _power_action(clause) and re.search(_REPORTED, clause)
+        and re.search(_RECIPIENT, clause)
+        for clause in summary_clauses
+    )
+    recovery_wait = not contrary(summary_clauses) and any(
+        re.search(_WAIT, clause) and re.search(_POWER, clause)
+        and re.search(_RECOVERY, clause) for clause in summary_clauses
+    )
+    return {
+        "message_requests_power_assistance": bool(assistance),
+        "summary_preserves_power_request": bool(prior_request),
+        "summary_preserves_recovery_wait": bool(recovery_wait),
+    }
 
 
 class _BatteryHardware(VirtualHardwareBackend):
@@ -160,11 +236,16 @@ class PowerRecoveryFixture:
             operator_requests_delivered=len(self.sink.messages),
             unparsed_initial_outcomes=unparsed_outcomes,
         )
+        content = _power_content(
+            self.sink.messages[0].text if len(self.sink.messages) == 1 else "",
+            self.evidence["prior_summary"] or "",
+        )
+        self.evidence.update(content)
         continuity = (
             waiting and len(messages) == 1 and messages[0].status == "applied"
             and len(self.sink.messages) == 1
             and any(item.status == "accepted" for item in waits)
-            and bool(self.evidence["prior_summary"])
+            and all(content.values())
             and self.evidence["no_work_before_recovery"]
             and self.evidence.get("resumed_run_id") == run_id
             and self.evidence.get("resumed_task_id") == str(task_id)
@@ -205,6 +286,16 @@ class PowerRecoveryFixture:
             )
         if self.evidence.get("operator_request_attempts_after_recovery"):
             reasons.append("continuity: operator request repeated after recovery")
+        for check, reason in (
+            ("message_requests_power_assistance",
+             "delivered message did not request power assistance"),
+            ("summary_preserves_power_request",
+             "carried summary did not preserve the prior power-assistance request"),
+            ("summary_preserves_recovery_wait",
+             "carried summary did not preserve the pending power recovery"),
+        ):
+            if self.evidence.get(check) is False:
+                reasons.append(f"continuity: {reason}")
         if self.evidence.get("premature_completion_attempts"):
             reasons.append("verified_completion: premature completion attempted while power warning active")
         if self.evidence.get("unparsed_initial_outcomes"):

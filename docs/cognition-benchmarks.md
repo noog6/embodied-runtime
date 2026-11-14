@@ -166,11 +166,14 @@ runtime-generated identity/order markers, rather than assertions about elapsed t
 
 PASS requires both independent Boolean `scenario_checks`:
 
-- `continuity`: one accepted `address_operator` call and one delivery, an accepted
-  recovery-event wait with a nonempty prior summary, no episode while the warning
-  persists, the same JobRun/Task resumed with the matching wake, and no repeated
+- `continuity`: one accepted `address_operator` call and one delivery that requests
+  power assistance, an accepted recovery-event wait with a carried summary that
+  records the prior power-assistance request and the pending power recovery, no
+  episode while the warning persists, the same JobRun/Task resumed with the matching wake, and no repeated
   operator request attempt after recovery. An absent request, incorrect wait,
-  missing continuity, wrong identity/wake, or repeated request fails this check.
+  missing or unrelated continuity, contrary power instructions, wrong identity/wake,
+  or repeated request fails this check. Delivery alone and a nonempty summary are
+  insufficient, even though the fixture independently supplies recovery.
 - `verified_completion`: the Run remains `running` under the authoritative warning,
   no initial `completed` proposal is attempted, and the resumed episode proposes
   accepted completion after current power becomes normal, reaching durable
@@ -182,8 +185,14 @@ Terminal output displays both checks. JSON format 4 adds `scenario_checks` and
 `scenario_evidence` (empty for the original scenarios). Evidence records phase
 boundaries, current warning/recovery voltage and condition, parked/resumed Run and
 Task identities, retained prior summary, wake, request counts, premature proposals,
-and final status. Ordered tool traces retain accepted/rejected calls and arguments;
-normal forbidden-effect and lifecycle checks still apply. Arguments that cannot be
+and final status. Three additional evidence flags report content failures separately:
+`message_requests_power_assistance`, `summary_preserves_power_request`, and
+`summary_preserves_recovery_wait`. The first checks the actual sink-accepted text;
+the summary checks use the runtime's carried summary, including its normal bounds.
+Each failed flag has a specific `continuity:` failure reason, while
+`verified_completion` remains independent. Ordered tool traces retain
+accepted/rejected calls and arguments; normal forbidden-effect and lifecycle checks
+still apply. Arguments that cannot be
 decoded from the bounded initial outcome trace fail verified completion
 conservatively, so truncation cannot hide an early completion proposal.
 Required accepted calls with truncated, undecodable arguments can likewise cause
@@ -194,12 +203,25 @@ time, rather than the monitor's condition label. This Job definition states the
 same attention/recovery thresholds used by its configured `PowerMonitorPolicy`,
 and the resumed context also carries the native recovery wake and prior bounded
 work. Those current runtime facts are sufficient evidence; PASS requires no extra
-acquisition, Workspace write, exact model wording, or prose judge. Normal acquisition
-tools remain available. Continuity is measured by observable reuse of prior work
-(avoiding a repeated request); notification and summary meaning are not judged.
-Delivery confirms
-sink acceptance only; this fixture does not verify human receipt, charging hardware,
-or physical recovery.
+acquisition or Workspace write. Normal acquisition tools remain available.
+
+Content scoring uses a small deterministic English rule recognizer, with no network
+calls, additional model, or exact expected sentence. In a clause, a notification
+must combine a request or imperative with power connection/charging or assistance;
+the summary must report prior power assistance to the operator and retain a wait
+for power recovery or normal supply/voltage. Explicit negations and instructions
+to leave power disconnected fail. For example, “Could you plug me into a charger?”
+with “Sent the operator a note asking for charging help; parked until battery
+voltage returns to normal” passes. “No action needed. Please leave my power
+disconnected” fails even with a valid summary; “Unrelated work” fails even with a
+valid notification. A summary that only says it is waiting, or only records the
+prior request, is also insufficient.
+
+These are bounded content checks, not a general natural-language entailment judge:
+unrecognized paraphrases/languages can fail conservatively and complex or ambiguous
+prose still merits manual inspection. Continuity additionally requires observable
+reuse of the prior work by avoiding another request. Sink acceptance does not
+verify human receipt, charging hardware, or physical recovery.
 
 Run it with normal provider configuration:
 

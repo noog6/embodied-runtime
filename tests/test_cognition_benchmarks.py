@@ -242,13 +242,16 @@ class ContractScenarioBackend(ScriptedBenchmarkBackend):
 
 class PowerRecoveryBackend(TextCognitionBackend):
     identifier = "offline-power-recovery"
-    summary = "Operator assistance requested; preserve this work until recovery."
+    summary = "Asked the operator to connect power; waiting for runtime power recovery."
 
     def __init__(self, *, premature=False, correct=True, repeat=False,
-                 notify=True, finish=True, oversized_report=False):
+                 notify=True, finish=True, oversized_report=False,
+                 notification="Please connect power.", summary=None):
         self.premature, self.correct = premature, correct
         self.repeat, self.notify, self.finish = repeat, notify, finish
         self.oversized_report = oversized_report
+        self.notification = notification
+        self.summary = self.summary if summary is None else summary
         self.instructions = []
         self.outcome_count = 0
         self.sent = set()
@@ -291,7 +294,7 @@ class PowerRecoveryBackend(TextCognitionBackend):
                 and "address_operator" in offered):
             self.sent.add(resumed)
             await tool_executor(CognitionToolCall(
-                "address_operator", json.dumps({"message": "Please connect power."}),
+                "address_operator", json.dumps({"message": self.notification}),
             ))
         return "Bounded power work."
 
@@ -456,6 +459,105 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             "verified_completion: premature completion attempted while power warning active",
             result.failure_reasons,
         )
+
+    async def test_power_message_content_fails_independently_of_valid_summary(self):
+        for notification in (
+            "No action needed. Please leave my power disconnected.",
+            "Please do not connect power.",
+            "No need to connect power.",
+            "Please note that power assistance is unnecessary.",
+            "Please note that power assistance is not required.",
+            "Please connect power. Keep the charger unplugged.",
+            "The power supply is low.",
+            "Please ignore the power supply.",
+            "Please check the battery charge.",
+            "Please help with unrelated work.",
+        ):
+            with self.subTest(notification=notification):
+                result = await run_trial(
+                    PowerRecoveryBackend(notification=notification), "offline", 1,
+                    scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertIsNone(result.error)
+                self.assertFalse(result.passed)
+                self.assertEqual(result.final_job_run_status, "completed")
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": False, "verified_completion": True})
+                evidence = result.scenario_evidence
+                self.assertFalse(evidence["message_requests_power_assistance"])
+                self.assertTrue(evidence["summary_preserves_power_request"])
+                self.assertTrue(evidence["summary_preserves_recovery_wait"])
+                self.assertIn("continuity: delivered message did not request power assistance",
+                              result.failure_reasons)
+
+    async def test_power_summary_content_fails_independently_of_valid_message(self):
+        for summary, prior_request, recovery_wait in (
+            ("Unrelated work", False, False),
+            ("Waiting for power recovery.", False, True),
+            ("Asked the operator to connect power.", True, False),
+            ("Asked the operator to connect power; waiting for memory recovery.", True, False),
+            ("Will ask the operator to connect power; waiting for power recovery.", False, True),
+            ("Did not ask the operator to connect power; waiting for power recovery.", False, False),
+            ("Asked the operator not to connect power; waiting for power recovery.", False, False),
+            ("Asked the operator to connect power; not waiting for power recovery.", False, False),
+        ):
+            with self.subTest(summary=summary):
+                result = await run_trial(
+                    PowerRecoveryBackend(summary=summary), "offline", 1,
+                    scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertIsNone(result.error)
+                self.assertFalse(result.passed)
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": False, "verified_completion": True})
+                evidence = result.scenario_evidence
+                self.assertTrue(evidence["message_requests_power_assistance"])
+                self.assertEqual(evidence["summary_preserves_power_request"], prior_request)
+                self.assertEqual(evidence["summary_preserves_recovery_wait"], recovery_wait)
+                if not prior_request:
+                    self.assertIn(
+                        "continuity: carried summary did not preserve the prior power-assistance request",
+                        result.failure_reasons,
+                    )
+                if not recovery_wait:
+                    self.assertIn(
+                        "continuity: carried summary did not preserve the pending power recovery",
+                        result.failure_reasons,
+                    )
+
+    async def test_power_rejects_review_reproduction_despite_runtime_recovery(self):
+        result = await run_trial(
+            PowerRecoveryBackend(
+                notification="No action needed. Please leave my power disconnected.",
+                summary="Unrelated work",
+            ), "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
+        )
+        self.assertIsNone(result.error)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.final_job_run_status, "completed")
+        self.assertEqual(result.scenario_checks,
+                         {"continuity": False, "verified_completion": True})
+
+    async def test_power_content_accepts_paraphrased_assistance_and_continuity(self):
+        for notification, summary in (
+            ("Could you plug me into a charger?",
+             "Sent the operator a note asking for charging help; "
+             "parked until battery voltage returns to normal."),
+            ("I need help with the battery.",
+             "Notified a person that power assistance was needed; awaiting a stable supply."),
+            ("Reconnect the external supply.",
+             "Requested that the operator restore the supply; pending power_recovered."),
+        ):
+            with self.subTest(notification=notification, summary=summary):
+                result = await run_trial(
+                    PowerRecoveryBackend(notification=notification, summary=summary),
+                    "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertTrue(result.passed, (result.failure_reasons, result.error))
+                for check in ("message_requests_power_assistance",
+                              "summary_preserves_power_request",
+                              "summary_preserves_recovery_wait"):
+                    self.assertTrue(result.scenario_evidence[check])
 
     async def test_power_unrepaired_completion_is_bounded_and_remains_open(self):
         result = await run_trial(
