@@ -155,7 +155,11 @@ Retention is explicit:
   limit, capture fails closed. Opted-out Runs allocate no procedure record.
 - Each Run retains one snapshot/metadata JSON (at most 24,000 characters), supplied
   flag, optional feedback JSON (at most 8,000 characters after escaping), and one
-  candidate disposition. No full prompts or payloads are retained. Existing result
+  candidate disposition. Schema **14** adds a nullable comparison-decision JSON
+  (at most 2,000 characters), retaining the first rejected request and latest
+  resolution within the same 100-Run evidence window. Migration from schema 13
+  is transactional; historical decisions remain absent, never backfilled from
+  reports or trial existence. No full prompts or payloads are retained. Existing result
   report retention is independent. After pruning, inspection explicitly reports no
   retained procedure evidence rather than inventing a version or use history.
 - Disablement retains existing records. Restart retains historical inspection and
@@ -175,8 +179,9 @@ job procedure show JOB<n>
 job procedure activate JOB<n> PROC<version>
 job procedure reject JOB<n> PROC<version>
 job procedure snapshot RUN<n>
+job procedure compare JOB<n>
 job procedure trials JOB<n>
-job procedure trial TRIAL<n>
+job procedure trial TRIAL<n> [--details]
 job procedure seed JOB<n> --name "Name" --purpose "Purpose" --applicability "Conditions" --required-capabilities "Existing tools" --steps "Suggested checks; conditional branches" --verification "How to verify" --stopping-conditions "When to stop or defer" [--source RUN<n>]
 ```
 
@@ -190,7 +195,18 @@ No model tool exposes administration or activation.
 
 `show` inspects active/pending provenance and compatibility. `snapshot` inspects
 persisted capture, supplied flag, feedback, candidate disposition and independently
-accepted Run status, including after restart. These administrative reads remain
+accepted Run status, including after restart. Both `job work` and `snapshot` show
+the captured procedure, runtime `supplied` flag, comparison's pending version when
+known, and runtime trial disposition: `not requested`, `rejected` with a bounded
+runtime-authored reason, `queued as TRIAL<n>`, or `already exists as TRIAL<n>`.
+A rejected attempt survives a corrected outcome, including a subsequent queued
+comparison; both facts are displayed separately from Job outcome and procedure
+feedback. Rejections are recorded at the runtime decision, independently of
+candidate/feedback publication or later terminal completion. A queue disposition
+commits with the campaign and source result, never
+merely on callback acceptance. Historical Runs lacking these decisions display
+`not recorded`. A missing/pruned evidence record also explicitly reports this
+absence. These administrative reads remain
 available while disabled. Mutations acknowledge persistence only after success;
 storage errors do not echo authored text. Experiment creation and manual start
 use existing console request provenance (`definition_created` and `run_started`)
@@ -313,6 +329,25 @@ callbacks, opted-out occurrences, other Jobs, mismatched IDs and simultaneous
 candidate nominations cannot create a trial. A terminal persistence retry does
 not resurrect a lost request. This is not operator dialogue or activation.
 
+The operator can instead queue the comparison directly:
+
+```text
+job procedure compare JOB<n>
+```
+
+This resolves the exact current incumbent and pending versions from the catalog,
+then uses the same admission rules, configuration snapshot, capacity and campaign
+identity as a model request. It does not start an ordinary source Run. The reply
+names the Job, both versions and exact trial ID with `queued` or `already exists`;
+repetition reuses that ID even at capacity. The normal background coordinator
+executes it within the existing bounds. New operator campaigns record
+`requested_by=operator`, `operator_requested_at` and `source_run_id=null`. A
+model-created campaign retains its genuine completed source Run; an operator
+request reusing it adds the operator marker without changing that provenance.
+Conversely, a model request reusing an operator campaign records its exact trial
+ID on that model's source Run without inventing a source for the original direct
+request. Ordinary work continues to capture the incumbent until explicit activation.
+
 Admission snapshots the Job definition identity and text, complete active and
 pending records, model/backend/protocol/endpoint and nonsecret provider settings,
 profile and startup instructions, timezone, fixed fixture clock, isolation
@@ -430,13 +465,19 @@ improvement.
 
 1. Resolve the actual Job and procedure IDs in the running catalog. Review or
    develop the pending method through the existing nomination/seed workflow;
-   leave the incumbent active. Work a fresh ordinary experiment Run so Mira can
-   request the bounded comparison. A trial is optional, not automatically created
-   merely because a pending method exists.
+   leave the incumbent active. Queue with `job procedure compare JOB<n>`, or work
+   a fresh ordinary experiment Run so Mira can optionally request the comparison.
+   A trial is not automatically created merely because a pending method exists.
 2. Inspect `job procedure trials JOB<n>` and `job procedure trial TRIAL<n>`.
-   The latter shows recommendation/reason, score totals and regressions, every
-   attempt's Run ID, both exact snapshots, fixed inputs/rubric/budget, tool
-   evidence, feedback and cost. `job result RUN<n>` and `job procedure snapshot
+   The list shows each exact version pair, state and scored progress, such as
+   `4/12 attempts scored`. Budget consumed appears separately when running,
+   interrupted or replacement attempts make it differ from scored progress.
+   The single-trial summary leads with recommendation/reason, candidate-minus-
+   incumbent score delta, protected regressions, and the exact activation command
+   only when the recommendation is currently eligible (including an idle Job).
+   Use `job procedure trial TRIAL<n> --details` for every attempt's Run ID, both
+   exact snapshots, fixed inputs/rubric/budget, tool traces, feedback and cost.
+   `job result RUN<n>` and `job procedure snapshot
    RUN<n>` also inspect retained attempt evidence. The full comparison retains
    evidence even beyond the ordinary 100-snapshot window.
 3. A winner can request approval through the existing configured autonomous
@@ -485,6 +526,17 @@ git diff --check
 Fake providers, virtual backends and temporary SQLite databases exercise the full
 cycle and failure paths without physical hardware or live providers. This validates
 mechanism and boundaries, not learned-method quality or effectiveness.
+
+Operator-command and visibility validation: the offline suite ran **1,893 tests**
+with **18 skips** and the same two compatible-provider benchmark subtest failures
+for `power_recovery_continuity` (`disable` and `omit` modes), reproduced separately
+on untouched `main` at `bee953f`. Procedure/trial, console, outcome, persistence,
+scheduling and concurrency checks passed. Added coverage includes direct queuing,
+operator/model campaign reuse at capacity, exact/incompatible pairs, rejection
+followed by completion or successful correction, atomic persistence and schema-13
+migration, legacy `not recorded`, separate scored/consumed progress, and concise
+versus detailed inspection. Compileall and whitespace checks passed. No deployed
+catalog, live provider or physical hardware was exercised.
 
 Comparison-extension validation: 287 focused regression tests passed across
 procedures/trials, exact/shared reads, retained reports, Job persistence/scheduling

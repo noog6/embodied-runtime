@@ -216,26 +216,82 @@ def compare(trial, attempts):
                 evidence_limits='Small synthetic evaluation, not deployed health or causal proof; no model judge.')
 
 
-def render_comparison(trial, attempts, *, current):
-    lines = [f"TRIAL{trial['id']} JOB{trial['job_id']} {trial['state']}",
-             f"Incumbent PROC{trial['active']['version']}; candidate PROC{trial['pending']['version']}",
-             f"Tested versions still current={str(current).lower()}; notification={trial['notification']}"]
+def trial_rejection(versions, error):
+    """Never retain model text or an arbitrary exception as an operator reason."""
+    reasons = {
+        'trial retention/admission limit reached for this Job': 'campaign capacity reached',
+        'trial must name the exact current active and pending versions': 'expected exact current active and pending versions',
+        'trial requires compatible exact active and pending versions': 'compatible active and pending versions required',
+        'trial requires an enabled setup-created experiment Job': 'enabled setup-created experiment required',
+        'trial request requires completed work and an existing pending candidate': 'completed work and an existing pending candidate required',
+        'trial Runs cannot nominate procedures or request trials': 'synthetic trial Runs cannot request comparisons',
+        'cognition backend does not support isolated procedure trials': 'backend does not support isolated trials',
+    }
+    def version(key):
+        value = versions.get(key) if isinstance(versions, dict) else None
+        return value if type(value) is int and 0 < value < 2**63 else None
+    return dict(disposition='rejected', reason=reasons.get(str(error), 'comparison proposal was not accepted'),
+                active_version=version('active'), pending_version=version('pending'))
+
+
+def render_trial_request(evidence):
+    record = evidence.get('trial_request') if evidence else None
+    if not record:
+        return 'not recorded'
+    facts = []
+    for key in ('rejection', 'resolution'):
+        decision = record.get(key)
+        if decision is None:
+            continue
+        disposition = decision['disposition']
+        if disposition == 'rejected':
+            fact = f"rejected ({decision['reason']})"
+        elif disposition in ('queued', 'already_exists'):
+            fact = f"{disposition.replace('_', ' ')} as TRIAL{decision['trial_id']}"
+        else:
+            fact = 'not requested'
+        if decision.get('pending_version') is not None:
+            fact += f"; pending PROC{decision['pending_version']}"
+        facts.append(fact)
+    return ' | '.join(facts)
+
+
+def trial_progress(trial, attempts):
+    scored = len({(a['case_id'], a['variant']) for a in attempts
+                  if a['state'] == 'finished' and a['result'] and a['result'].get('score') is not None})
+    progress = f"{scored}/{len(trial['cases']) * 2} attempts scored"
+    if len(attempts) != scored:
+        progress += f"; budget consumed: {len(attempts)}/{trial['configuration']['budget']['attempts']} attempts"
+    return progress
+
+
+def render_comparison(trial, attempts, *, current, eligible, details=False):
     report = trial['report']
-    if report:
-        lines.extend((f"Recorded recommendation: {report['recommendation']}", report['reason']))
-        if 'scores' in report:
-            lines.append(f"Total scores: incumbent={report['scores']['active']}; candidate={report['scores']['pending']}")
-        lines.extend(report.get('regressions', []))
-    lines.append('case / variant / procedure / Run / attempt / score')
-    for attempt in attempts:
-        score = attempt['result']['score']['total'] if attempt['result'] else 'unavailable'
-        lines.append(f"{attempt['case_id']} / {attempt['variant']} / PROC{attempt['procedure_version']} / "
-                     f"RUN{attempt['run_id']} / {attempt['state']} / {score}")
-    if report and report['recommendation'] == 'candidate' and current:
+    lines = ([f"Recommendation: {report['recommendation']}. {report['reason']}"] if report else
+             ['Recommendation: pending. Comparison has not completed.'])
+    scores = report.get('scores') if report else None
+    lines.append(f"Score delta (candidate - incumbent): {scores['pending'] - scores['active']:+d} "
+                 f"({scores['pending']} vs {scores['active']})" if scores else 'Score delta: unavailable')
+    lines.append('Protected regressions: ' + ('; '.join(report.get('regressions', [])) or 'none recorded')
+                 if report else 'Protected regressions: not yet recorded')
+    if eligible:
         lines.append(f"To approve: job procedure activate JOB{trial['job_id']} PROC{trial['pending']['version']}")
+    lines.extend([f"TRIAL{trial['id']} JOB{trial['job_id']} {trial['state']}",
+             f"Incumbent PROC{trial['active']['version']}; candidate PROC{trial['pending']['version']}",
+             trial_progress(trial, attempts),
+             f"Tested versions still current={str(current).lower()}; notification={trial['notification']}"])
+    if details:
+        lines.append('case / variant / procedure / Run / attempt / score')
+        for attempt in attempts:
+            score = attempt['result']['score']['total'] if attempt['result'] else 'unavailable'
+            lines.append(f"{attempt['case_id']} / {attempt['variant']} / PROC{attempt['procedure_version']} / "
+                         f"RUN{attempt['run_id']} / {attempt['state']} / {score}")
     if trial['promotion']:
-        lines.append('Promotion retains the exact previous method and provenance below. '
+        lines.append('Promotion retains the exact previous method and provenance in --details. '
                      'To roll back, seed its instructions as a new version and explicitly activate it.')
-    lines.append('Synthetic evidence only; feedback is supporting context. Console approval is required. '
-                 'Full pinned contract, snapshots, scores, trace and usage:')
+    lines.append('Synthetic evidence only; explicit console approval is required.')
+    if details:
+        lines.append(json.dumps(dict(trial=trial, attempts=attempts), ensure_ascii=True, sort_keys=True))
+    else:
+        lines.append(f"Full evidence: job procedure trial TRIAL{trial['id']} --details")
     return '\n'.join(lines)

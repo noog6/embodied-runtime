@@ -23,7 +23,8 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
+_TRIAL_DECISION_SCHEMA = "ALTER TABLE job_run_procedures ADD COLUMN trial_request_json TEXT CHECK(trial_request_json IS NULL OR length(trial_request_json)<=2000)"
 _SCHEDULES_SCHEMA = """CREATE TABLE job_schedules (
        job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
@@ -106,6 +107,7 @@ _SCHEMA = (
     _HOURLY_ACTIVATION_SCHEMA,
     *_PROCEDURE_SCHEMA,
     *TRIAL_SCHEMA,
+    _TRIAL_DECISION_SCHEMA,
 )
 
 
@@ -130,6 +132,16 @@ class SQLiteJobStore(ProcedureTrialStore):
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
+        if version == 13:
+            self._connection.execute('BEGIN IMMEDIATE')
+            try:
+                self._connection.execute(_TRIAL_DECISION_SCHEMA)
+                self._connection.execute('PRAGMA user_version=14')
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+            return
         if version == 12:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -140,6 +152,7 @@ class SQLiteJobStore(ProcedureTrialStore):
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version == 11:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -617,7 +630,8 @@ class SQLiteJobStore(ProcedureTrialStore):
                        procedure_job_id: int | None = None,
                        procedure_task_id: str | None = None,
                        procedure_episode_id: int | None = None,
-                       procedure_trial_request: dict | None = None) -> JobRun:
+                       procedure_trial_request: dict | None = None,
+                       procedure_trial_decision: dict | None = None) -> JobRun:
         _id(run_id, "job run")
         if not isinstance(status, JobRunStatus):
             raise TypeError("status must be a JobRunStatus")
@@ -688,8 +702,11 @@ class SQLiteJobStore(ProcedureTrialStore):
                 if evidence is None or evidence['definition_identity'] != procedure_definition:
                     raise ValueError('trial source occurrence was not opted in')
                 self.validate_procedure_policy(current.job_id, procedure_definition)
-                self._request_procedure_trial(current.job_id, procedure_trial_request['versions'],
+                decision = self._request_procedure_trial(current.job_id, procedure_trial_request['versions'],
                                               procedure_trial_request['configuration'], run_id)
+                self.record_procedure_trial_decision(run_id, decision)
+            elif procedure_trial_decision is not None:
+                self.record_procedure_trial_decision(run_id, procedure_trial_decision)
             self._connection.commit()
             return next_run
         except BaseException:
@@ -953,7 +970,8 @@ class SQLiteJobStore(ProcedureTrialStore):
                     snapshot=json.loads(row['snapshot_json']) if row['snapshot_json'] else None,
                     supplied=bool(row['supplied']),
                     feedback=json.loads(row['feedback_json']) if row['feedback_json'] else None,
-                    candidate_disposition=row['candidate_disposition'])
+                    candidate_disposition=row['candidate_disposition'],
+                    trial_request=json.loads(row['trial_request_json']) if row['trial_request_json'] else None)
 
     def mark_procedure_supplied(self, run_id: int) -> None:
         # A projection is a runtime fact, never a claim of use or effectiveness.

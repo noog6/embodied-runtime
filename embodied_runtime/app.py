@@ -2366,6 +2366,7 @@ class RobotApplication:
         procedure_feedback: ProcedureFeedback | None = None,
         procedure_episode_id: int | None = None,
         procedure_trial_request: dict | None = None,
+        procedure_trial_decision: dict | None = None,
     ) -> CurrentJobRun:
         """Apply a validated terminal decision to one exact context only."""
         binding = context.binding
@@ -2426,6 +2427,8 @@ class RobotApplication:
                           procedure_definition=context.procedure_snapshot.definition_identity,
                           procedure_job_id=context.job_id, procedure_task_id=str(context.task_id),
                           procedure_episode_id=procedure_episode_id)
+        if procedure_trial_decision is not None:
+            kwargs['procedure_trial_decision'] = procedure_trial_decision
         run = self.jobs.transition_run(
             binding.run.id, status, result_report=result_report, **kwargs
         )
@@ -3427,6 +3430,7 @@ class RobotApplication:
         proposed_progress_update: JobProgressUpdate | None = None
         proposed_focus_update: JobFocusProposal | None = None
         proposed_trial_request: dict | None = None
+        proposed_trial_decision: dict | None = None
         proposed_procedure: ProcedureProposal | None = None
         proposed_feedback: ProcedureFeedback | None = None
         procedure_disposition: str | None = None
@@ -3497,16 +3501,20 @@ class RobotApplication:
             nonlocal proposed_event_type
             nonlocal proposed_progress_update, proposed_focus_update, attempts
             nonlocal proposed_procedure, proposed_feedback, procedure_disposition, proposed_trial_request
+            nonlocal proposed_trial_decision
             if consumed:
                 return self._rejected_tool(call.name, "Job outcome request already consumed",
                                            log_prefix="JOBS")
             attempts += 1
+            trial_versions = None
             try:
                 if call.name != REPORT_JOB_OUTCOME_TOOL.name:
                     raise RuntimeError("tool is not available")
                 # event_type is schema-required. Accept its omission from older
                 # provider/test clients as the equivalent null for non-event modes.
                 arguments = json.loads(call.arguments)
+                if isinstance(arguments, dict):
+                    trial_versions = arguments.get('procedure_trial')
                 required = {"disposition", "summary", "report", "readiness", "delay_seconds"}
                 optional = {"event_type", "progress_update", "focus_update", "procedure_candidate", "procedure_feedback", "procedure_trial"}
                 if (not isinstance(arguments, dict)
@@ -3617,9 +3625,17 @@ class RobotApplication:
                 proposed_progress_update = progress_update
                 proposed_focus_update = focus_update
                 proposed_trial_request = trial_request
+                context = self._context_for_run(binding.run.id)
+                if context is not None and context.procedure_snapshot is not None:
+                    pending = self.jobs.get_procedure(binding.job.id, 'pending')
+                    proposed_trial_decision = dict(disposition='not_requested',
+                                                  pending_version=pending['version'] if pending else None)
                 proposed_procedure, proposed_feedback = candidate, feedback
                 procedure_disposition = candidate_disposition
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as error:
+                if trial_versions is not None and self._job_work_binding_matches(binding, task_binding, goal):
+                    from embodied_runtime.jobs.trial import trial_rejection
+                    self.jobs.record_procedure_trial_decision(binding.run.id, trial_rejection(trial_versions, error))
                 if attempts >= 2:
                     consumed = True
                 return self._rejected_tool(call.name, str(error), log_prefix="JOBS")
@@ -3710,7 +3726,8 @@ class RobotApplication:
                 self._validate_job_focus_policy(binding)
             if proposed_procedure is not None or proposed_feedback is not None or proposed_trial_request is not None:
                 self._validate_job_procedure_policy(binding)
-            if proposed_focus_update is None and proposed_procedure is None and proposed_feedback is None and proposed_trial_request is None:
+            if (proposed_focus_update is None and proposed_procedure is None and proposed_feedback is None
+                    and proposed_trial_request is None and proposed_trial_decision is None):
                 self.finish_job_run(terminal, proposed_summary, result_report=proposed_report)
             else:
                 self._finish_job_run_context(
@@ -3718,8 +3735,12 @@ class RobotApplication:
                     focus_update=proposed_focus_update, focus_episode_id=episode.id,
                     procedure_candidate=proposed_procedure, procedure_feedback=proposed_feedback,
                     procedure_episode_id=episode.id, procedure_trial_request=proposed_trial_request,
+                    procedure_trial_decision=proposed_trial_decision,
                 )
-        elif proposed_progress_update is not None:
+        elif proposed_trial_decision is not None:
+            if self._job_work_binding_matches(binding, task_binding, goal):
+                self.jobs.record_procedure_trial_decision(binding.run.id, proposed_trial_decision)
+        if proposed_disposition is JobWorkDisposition.CONTINUE and proposed_progress_update is not None:
             if not self._job_work_binding_matches(binding, task_binding, goal):
                 self._clear_stale_job_progress(binding)
                 return JobWorkDisposition.CONTINUE, None, None, None, None, None, None
@@ -4300,6 +4321,15 @@ class RobotApplication:
         if self.jobs is not None and not getattr(self.jobs, 'readonly_trial', False):
             self._procedure_trial_task = asyncio.create_task(self._coordinate_procedure_trials(),
                                                             name='procedure-trial-coordinator')
+
+    def queue_procedure_comparison(self, job_id: int) -> dict:
+        """An operator queues the ordinary bounded coordinator, never a source Run."""
+        from embodied_runtime.jobs.trial import trial_configuration
+        from embodied_runtime.jobs.trial_runner import validate_trial_backend
+        if self.jobs is None:
+            raise ValueError('Jobs persistence is disabled')
+        validate_trial_backend(self._cognition_backend)
+        return self.jobs.queue_operator_procedure_trial(job_id, trial_configuration(self))
 
     async def _coordinate_procedure_trials(self):
         while True:

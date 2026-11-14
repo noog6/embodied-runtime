@@ -476,7 +476,7 @@ class JobProcedureTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.get_job(job.id).procedure_enabled)
         self.assertIsNone(self.store.get_procedure(job.id, 'active'))
         self.assertIsNone(self.store.get_run_procedure(source.id))
-        self.assertEqual(self.store._connection.execute('PRAGMA user_version').fetchone()[0], 13)
+        self.assertEqual(self.store._connection.execute('PRAGMA user_version').fetchone()[0], 14)
 
     async def test_snapshot_through_two_acquisitions_and_effect_continuation(self):
         job = self.job()
