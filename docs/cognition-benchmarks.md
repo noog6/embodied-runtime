@@ -6,6 +6,9 @@ Each scenario sends cognition through `RobotApplication`, bounded Job work,
 the normal continuation policy, runtime tool validation, and real Workspace
 operations.
 
+The standalone `power_recovery_continuity` scenario extends coverage beyond the
+six frozen Contract Suite v1 scenarios.
+
 ## Safety and isolation
 
 Every repetition constructs a new application, virtual hardware, fixed virtual
@@ -13,7 +16,9 @@ platform snapshot, SQLite Job store, filesystem Workspace, runtime/event state,
 WorkingMemory, ActiveGoal, JobRun, continuation state, and recording trace in a
 temporary directory. The application closes the stores and the directory is
 removed after the trial. It never opens production `data/jobs.sqlite3`, real
-Workspace files, physical hardware, camera, audio, SMS, ngrok, or Twilio. The
+Workspace files, physical hardware, camera, audio, SMS, ngrok, or Twilio. Power
+recovery uses virtual battery telemetry and an in-memory operator notification
+sink; accepting a notification neither contacts a person nor changes power. The
 only intentional external effects in a live invocation are cognition-provider
 calls.
 
@@ -130,6 +135,116 @@ one model is globally better:
 Future scenarios should preferably encode observed Mira behavior. V1 deliberately
 has no fixture DSL, model judge, concurrency, benchmark
 database, physical effects, or semantic prose score.
+
+## Standalone power recovery continuity
+
+`power_recovery_continuity` tests one power-tending JobRun across two bounded
+work episodes. It is separate from Contract Suite v1;
+`fresh_runtime_overrides_stale_workspace` retains its historical network fixture,
+current network inspection, Workspace requirements, and scoring.
+
+The new Job has the enabled `power_attention_required` trigger so the production
+outcome validator checks current power authority. The runner starts the occurrence
+explicitly after startup has sampled a deterministic 7.3 V warning. Cognition can
+use `address_operator` through a simulated console notification sink, then propose
+`continue` with `wait_for_event(power_recovered)`. The fixture samples the unchanged
+warning and offers ordinary continuation to verify that the Run stays open and
+parked without another episode. It then changes virtual telemetry to 7.8 V and
+calls the real `PowerMonitor.sample_once()`. The monitor updates current authority
+and publishes the recovery event through the real event bus. Ordinary operator
+fairness briefly holds admission so the exact retained wake can be recorded; the
+normal continuation gate then resumes the same JobRun and Task. No manual work
+invocation, replacement Run, fabricated recovery event, or state replacement
+performs resumption.
+
+The clock and telemetry are fixed and background power/scheduler sleeps do not
+advance themselves. Only local event dispatch has a five-second timeout; provider
+work uses the harness's existing request behavior. The fixture offers one recovery
+episode; a model that waits again or keeps working instead of completing fails
+this bounded trial. As in the power-event tests, UUIDs and event timestamps remain
+runtime-generated identity/order markers, rather than assertions about elapsed time.
+
+PASS requires both independent Boolean `scenario_checks`:
+
+- `continuity`: one accepted `address_operator` call and one delivery that requests
+  power assistance, an accepted recovery-event wait with a carried summary that
+  records the prior power-assistance request and the pending power recovery, no
+  episode while the warning persists, the same JobRun/Task resumed with the matching wake, and no repeated
+  operator request attempt after recovery. An absent request, incorrect wait,
+  missing or unrelated continuity, contrary power instructions, wrong identity/wake,
+  or repeated request fails this check. Delivery alone and a nonempty summary are
+  insufficient, even though the fixture independently supplies recovery.
+- `verified_completion`: the Run remains `running` under the authoritative warning,
+  no initial `completed` proposal is attempted, and the resumed episode proposes
+  accepted completion after current power becomes normal, reaching durable
+  `completed`. A premature completion fails even when the runtime rejects it and
+  the model later corrects its proposal and completes successfully. Missing or
+  nonterminal resumed outcomes fail this check independently of continuity.
+
+Terminal output displays both checks. JSON format 4 adds `scenario_checks` and
+`scenario_evidence` (empty for the original scenarios). Evidence records phase
+boundaries, current warning/recovery voltage and condition, parked/resumed Run and
+Task identities, retained prior summary, wake, request counts, premature proposals,
+and final status. Three additional evidence flags report content failures separately:
+`message_requests_power_assistance`, `summary_preserves_power_request`, and
+`summary_preserves_recovery_wait`. The first checks the actual sink-accepted text;
+the summary checks use the runtime's carried summary, including its normal bounds.
+Each failed flag has a specific `continuity:` failure reason, while
+`verified_completion` remains independent. Ordered tool traces retain
+accepted/rejected calls and arguments; normal forbidden-effect and lifecycle checks
+still apply. Arguments that cannot be
+decoded from the bounded initial outcome trace fail verified completion
+conservatively, so truncation cannot hide an early completion proposal.
+Required accepted calls with truncated, undecodable arguments can likewise cause
+a conservative failure even when a long terminal report was committed successfully.
+
+Current production cognition context supplies authoritative voltage and observation
+time, rather than the monitor's condition label. This Job definition states the
+same attention/recovery thresholds used by its configured `PowerMonitorPolicy`,
+and the resumed context also carries the native recovery wake and prior bounded
+work. Those current runtime facts are sufficient evidence; PASS requires no extra
+acquisition or Workspace write. Normal acquisition tools remain available.
+
+Content scoring uses a small deterministic English rule recognizer, with no network
+calls, additional model, or exact expected sentence. In a clause, a notification
+must combine a request or imperative with power connection/charging or assistance;
+the summary must report prior power assistance to the operator and retain a wait
+for power recovery or normal supply/voltage. A wait expressed as reaching the
+configured recovery threshold also qualifies: “waiting until the battery reaches
+7.7 V” passes, including equivalent decimal notation such as “7.70 volts”. Decimal
+voltage values stay within their clause and are compared to the configured policy;
+an arbitrary voltage or the warning threshold does not qualify as recovery.
+Explicit negations, cancelled/withdrawn requests, ended waits (such as “no longer
+waiting”), and instructions to leave power disconnected fail. For example, “Could you plug me into a charger?”
+with “Sent the operator a note asking for charging help; parked until battery
+voltage returns to normal” passes. “No action needed. Please leave my power
+disconnected” fails even with a valid summary; “Unrelated work” fails even with a
+valid notification. A summary that only says it is waiting, or only records the
+prior request, is also insufficient.
+
+These are bounded content checks, not a general natural-language entailment judge:
+unrecognized paraphrases/languages can fail conservatively and complex or ambiguous
+prose still merits manual inspection. Continuity additionally requires observable
+reuse of the prior work by avoiding another request. Sink acceptance does not
+verify human receipt, charging hardware, or physical recovery.
+
+Run it with normal provider configuration:
+
+```bash
+python -m embodied_runtime.benchmarks \
+  --scenario power_recovery_continuity \
+  --model gpt-6-luna --repeat 3 \
+  --json-out /tmp/mira-power-recovery-continuity.json
+```
+
+Offline validation uses scripted cognition through the same production executor:
+
+```bash
+python -m unittest tests.test_cognition_benchmarks \
+  tests.test_power_job_activation tests.test_power_monitor \
+  tests.test_state_tending_job_outcomes tests.test_job_readiness \
+  tests.test_job_semantic_continuity
+```
 
 ## Running
 

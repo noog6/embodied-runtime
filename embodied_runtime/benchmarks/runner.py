@@ -16,7 +16,7 @@ from embodied_runtime.cognition import TextCognitionBackend
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.jobs import (
     FilesystemJobWorkspaceStore, JobContinuation, JobProgressUpdate, JobRunStatus,
-    SQLiteJobStore,
+    SQLiteJobStore, JobTriggerType,
 )
 from embodied_runtime.monetary import add_usd, usd_string
 from embodied_runtime.platform import PlatformSnapshot
@@ -26,7 +26,11 @@ from embodied_runtime.profile import RobotProfile
 
 from .models import BenchmarkReport, BenchmarkTrialResult, TrialMetrics
 from .recording import RecordingCognitionBackend
-from .scenario import ACQUISITION_TOOL_NAMES, SCENARIO_ID, get_scenario
+from .power_recovery import PowerRecoveryFixture
+from .scenario import (
+    ACQUISITION_TOOL_NAMES, SCENARIO_ID, POWER_RECOVERY_SCENARIO_ID,
+    POWER_RECOVERY_POLICY, get_scenario,
+)
 
 
 class _FixedPlatform:
@@ -125,6 +129,7 @@ async def run_trial(
     scenario = get_scenario(scenario_id)
     started = perf_counter()
     recorder = RecordingCognitionBackend(backend)
+    power = PowerRecoveryFixture() if scenario_id == POWER_RECOVERY_SCENARIO_ID else None
     heartbeat = _Heartbeat()
     app: RobotApplication | None = None
     status = disposition = continuation_state = None
@@ -145,11 +150,13 @@ async def run_trial(
         workspaces = FilesystemJobWorkspaceStore(root / "workspaces")
         observability = RunObservability(pricing=BUILT_IN_PRICING)
         app = RobotApplication(
-            RobotProfile("mira-benchmark", "Mira"), VirtualHardwareBackend(),
+            RobotProfile("mira-benchmark", "Mira"),
+            VirtualHardwareBackend() if power is None else power.hardware,
             ApplicationOptions(
                 initiative_enabled=True, initiative_goal_closure_enabled=True,
                 jobs_auto_continue=True, jobs_heartbeat_seconds=1,
                 jobs_max_auto_steps=3,
+                initiative_messages_enabled=power is not None,
             ),
             platform_provider=_FixedPlatform(), cognition_backend=recorder,
             self_inspector=(
@@ -158,6 +165,13 @@ async def run_trial(
             ),
             job_store=jobs, job_workspace_store=workspaces,
             job_continuation_sleep=heartbeat.sleep,
+            **({
+                "operator_message_sink": power.sink,
+                "power_monitor_sleep": _Heartbeat().sleep,
+                "power_monitor_policy": POWER_RECOVERY_POLICY,
+                "job_scheduler_sleep": _Heartbeat().sleep,
+                "monotonic_clock": lambda: 100.0,
+            } if power is not None else {}),
             wall_clock=lambda: datetime(2026, 10, 4, 12, tzinfo=UTC),
             observability=observability,
         )
@@ -165,6 +179,10 @@ async def run_trial(
         try:
             await app.start()
             job = jobs.create_job(scenario.job_title, scenario.description)
+            if power is not None:
+                # This trigger makes production outcome validation consult current
+                # authoritative power state, even for this explicitly started Run.
+                jobs.set_trigger(job.id, JobTriggerType.POWER_ATTENTION_REQUIRED)
             if scenario.historical_baseline is not None:
                 seeded_baseline = workspaces.write(
                     job.id, "communication_baseline.txt", "create",
@@ -192,7 +210,12 @@ async def run_trial(
             episodes = 1
             outcome = await app.work_current_job_once()
             disposition = outcome.disposition.value
-            while True:
+            if power is not None:
+                resumed = await power.resume(app, binding, recorder)
+                episodes += resumed
+                continuation_count += resumed
+                reasons.extend(power.failure_reasons())
+            while power is None:
                 durable = jobs.get_run(run_id)
                 if durable is None or durable.status not in (
                     JobRunStatus.PENDING, JobRunStatus.RUNNING,
@@ -221,13 +244,16 @@ async def run_trial(
                     reasons.append("continuation budget exhausted")
                 else:
                     reasons.append("Job remained awaiting_operator")
+            permitted = {
+                "workspace_list", "workspace_read", "workspace_write",
+                "inspect_self", "search_findings", "publish_finding",
+                "report_job_outcome",
+            }
+            if power is not None:
+                permitted.add("address_operator")
             forbidden = [
                 item.name for item in recorder.tool_trace
-                if item.name not in {
-                    "workspace_list", "workspace_read", "workspace_write",
-                    "inspect_self", "search_findings", "publish_finding",
-                    "report_job_outcome",
-                }
+                if item.name not in permitted
             ]
             if forbidden:
                 reasons.append("forbidden effect occurred: " + ", ".join(forbidden))
@@ -279,7 +305,10 @@ async def run_trial(
             break
     names = [item.name for item in recorder.tool_trace]
     acquisitions = sum(name in ACQUISITION_TOOL_NAMES for name in names)
-    effects = sum(name in {"workspace_write", "publish_finding"} for name in names)
+    effect_names = {"workspace_write", "publish_finding"}
+    if power is not None:
+        effect_names.add("address_operator")
+    effects = sum(name in effect_names for name in names)
     calls = after.get("provider_calls", [])[call_baseline:]
     if failure_category is None:
         failure_category = next((call["failure_category"] for call in reversed(calls)
@@ -313,6 +342,8 @@ async def run_trial(
         returned_models=tuple(dict.fromkeys(call["returned_model"] for call in calls
                                           if call.get("returned_model"))),
         provider_calls=tuple(calls), failure_category=failure_category, **scenario_cost,
+        scenario_checks={} if power is None else power.checks,
+        scenario_evidence={} if power is None else power.evidence,
     )
 
 
@@ -382,6 +413,11 @@ def render_report(report: BenchmarkReport) -> str:
                 f"{trial.cost_basis or 'estimated':<11} "
                 f"{trial.wall_duration_seconds:.1f}s"
             )
+            if trial.scenario_checks:
+                lines.append("  checks: " + ", ".join(
+                    f"{name}={'PASS' if passed else 'FAIL'}"
+                    for name, passed in trial.scenario_checks.items()
+                ))
         lines.append(_total_label("model", trials))
         failures = [trial for trial in trials if not trial.passed]
         if failures:

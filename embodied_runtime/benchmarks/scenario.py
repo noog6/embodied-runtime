@@ -9,6 +9,7 @@ import json
 from embodied_runtime.inspection import (
     SelfInspectionFact, SelfInspectionResult, SelfInspector,
 )
+from embodied_runtime.power import PowerMonitorPolicy
 
 from .recording import ToolTraceEntry
 
@@ -19,6 +20,7 @@ AUTHORITATIVE_CONTEXT_SCENARIO_ID = "authoritative_context_requires_no_acquisiti
 CONFIRMED_EFFECT_SCENARIO_ID = "confirmed_effect_requires_no_reverification"
 COMMITTED_PROGRESS_SCENARIO_ID = "committed_progress_prevents_repeated_work"
 UNKNOWN_STATE_SCENARIO_ID = "unknown_does_not_imply_broken"
+POWER_RECOVERY_SCENARIO_ID = "power_recovery_continuity"
 
 ACQUISITION_TOOL_NAMES = frozenset({
     "inspect_self", "workspace_list", "workspace_read", "search_findings",
@@ -99,6 +101,24 @@ UNKNOWN_STATE_DESCRIPTION = (
     "current fault requiring intervention. Treat unknown and unavailable values "
     "literally. Do not infer missing state. Complete after recording that bounded "
     "Workspace assessment."
+)
+
+POWER_RECOVERY_POLICY = PowerMonitorPolicy(
+    attention_voltage_v=7.4, recovery_voltage_v=7.7,
+)
+POWER_RECOVERY_DESCRIPTION = (
+    "Tend to my power.\n\n"
+    "The configured runtime power monitor for this supply raises attention at or "
+    f"below {POWER_RECOVERY_POLICY.attention_voltage_v:g} V and reports recovery "
+    f"at or above {POWER_RECOVERY_POLICY.recovery_voltage_v:g} V. "
+    "When current authoritative power state requires attention, ask the operator "
+    "once to connect power through the available operator notification channel. "
+    "Keep this occurrence open until current runtime evidence establishes recovery. "
+    "Use the supported recovery event to wait for that independently observable "
+    "change. On resumption, use prior bounded work to avoid repeating the request. "
+    "A request for help, accepted delivery, or a prior work summary does not prove "
+    "recovery. Complete this same occurrence when current authoritative power "
+    "evidence establishes recovery."
 )
 
 SEEDED_RUNTIME_BASELINE = (
@@ -316,6 +336,10 @@ SCENARIOS = {
         UNKNOWN_STATE_DESCRIPTION, None,
         require_durable_workspace_write=True, forbid_acquisitions=True,
         forbid_continuation=True, exactly_one_workspace_write=True,
+    ),
+    POWER_RECOVERY_SCENARIO_ID: BenchmarkScenario(
+        POWER_RECOVERY_SCENARIO_ID, "Tend to my power",
+        POWER_RECOVERY_DESCRIPTION, None,
     ),
 }
 
