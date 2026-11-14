@@ -347,6 +347,8 @@ class RuntimeConsole:
                 "  job procedure show|enable|disable JOB<n>",
                 "  job procedure activate|reject JOB<n> PROC<version>",
                 "  job procedure snapshot RUN<n>  Inspect retained snapshot and feedback",
+                "  job procedure trials JOB<n>    List bounded comparisons",
+                "  job procedure trial TRIAL<n>   Inspect comparison, attempts and promotion",
                 "  job procedure seed JOB<n> --name <text> --purpose <text> --applicability <text> --required-capabilities <text> --steps <text> --verification <text> --stopping-conditions <text> [--source RUN<n>]",
                 "  job focus show|enable|disable JOB<n>",
                 "  job focus seed JOB<n> RUN<n> --question <text> [--status open|blocked] [--blocker <text>]",
@@ -551,11 +553,13 @@ class RuntimeConsole:
             run.error_summary
             if run.status is JobRunStatus.FAILED else run.outcome_summary
         )
+        trial = store.get_procedure_trial_run(run.id)
         return "\n".join((
             "Job result", f"  job:           JOB{job.id} ({job.name})",
             f"  run:           RUN{run.id}", f"  status:        {run.status.value}",
             f"  started_at:    {run.started_at.isoformat() if run.started_at else 'none'}",
             f"  finished_at:   {run.finished_at.isoformat() if run.finished_at else 'none'}",
+            *((f"  evidence:      {trial.render()}",) if trial is not None else ()),
             f"  summary:       {summary or 'none'}",
             f"  report:        {run.result_report or 'none'}",
         ))
@@ -810,7 +814,8 @@ class RuntimeConsole:
     def _job_procedure(self, words: list[str]) -> str:
         usage = ('Usage: job procedure experiment; job procedure show|enable|disable JOB<n>; '
                  'job procedure activate|reject JOB<n> PROC<version>; '
-                 'job procedure snapshot RUN<n>; job procedure seed JOB<n> '
+                 'job procedure snapshot RUN<n>; job procedure trials JOB<n>; '
+                 'job procedure trial TRIAL<n>; job procedure seed JOB<n> '
                  '--name <text> --purpose <text> --applicability <text> '
                  '--required-capabilities <text> --steps <text> --verification <text> '
                  '--stopping-conditions <text> [--source RUN<n>].')
@@ -829,6 +834,23 @@ class RuntimeConsole:
                         'procedure policy enabled for this exact new Job. No Run started.')
             if len(words) < 4:
                 return usage
+            if action == 'trial' and len(words) == 4:
+                trial_id = _catalog_id(words[3], 'TRIAL')
+                trial = store.get_procedure_trial(trial_id) if trial_id else None
+                if trial is None:
+                    return 'Trial not found.'
+                from embodied_runtime.jobs.trial import render_comparison
+                attempts = store.procedure_trial_attempts(trial_id)
+                return '\n'.join((render_comparison(trial, attempts, current=store.procedure_trial_current(trial)),
+                    json.dumps(dict(trial=trial, attempts=attempts),
+                               ensure_ascii=True, sort_keys=True)))
+            if action == 'trials' and len(words) == 4:
+                job_id = _catalog_id(words[3], 'JOB')
+                if job_id is None:
+                    return usage
+                trials = store.list_procedure_trials(job_id)
+                return '\n'.join(f'TRIAL{t["id"]} JOB{job_id} {t["state"]} '
+                                 f'PROC{t["active"]["version"]} vs PROC{t["pending"]["version"]}' for t in trials) or 'No trials.'
             if action == 'snapshot':
                 run_id = _catalog_id(words[3], 'RUN')
                 if len(words) != 4 or run_id is None:

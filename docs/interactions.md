@@ -68,6 +68,11 @@ the `delivery` interaction identity (`initiator=operator`,
 `response_expected=false`). The originating dialogue source remains `console` or
 `voice`; delivering to console does not change a voice conversation's identity.
 
+Retained procedure-trial results expose explicit synthetic fixture provenance
+when retrieved. Their episode-local snapshot also captures that marker, and
+delivery adds a runtime-authored fixture label around the unchanged report body;
+it does not present the trial as an assessment of the deployed robot.
+
 The authorized destination set is captured for the episode, while execution
 re-resolves the current route. Removed or channel-incompatible routes reject without
 fallback; a compatible replacement route is used. Report delivery shares the one
@@ -236,6 +241,14 @@ only after rendering/flushing. No receipt establishes human reading. Detached
 notifications are not retained for recovery. Notification persistence, human
 acknowledgement tracking, voice notifications, model channel selection, and
 fallback remain outside this feature.
+
+The opt-in Job procedure experiment can send one runtime-authored approval
+request through this same configured notification path after a winning bounded
+comparison. It references an inspectable `TRIAL<n>` and exact console activation
+command; it opens no dialogue turn and never interprets a reply as approval.
+Its comparison-specific durable delivery claim prevents repeat notification
+attempts after restart, including when delivery fails. A claim is not proof of
+delivery or operator acknowledgement. See [procedure comparisons](job-procedures.md#bounded-activepending-comparison).
 
 Console dialogue exposes `channel=console`, while voice dialogue exposes
 `channel=voice`; both expose the same dialogue mode, operator initiator, and
