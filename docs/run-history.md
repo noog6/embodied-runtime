@@ -283,6 +283,9 @@ historical status snapshot or an atomic snapshot across filesystem and database.
 
 Accounting is over timestamp-consistent retained `job_runs` rows in this one
 configured database, across Jobs regardless of current enablement or target.
+Synthetic procedure-trial Runs are excluded from these ordinary activity counts
+(`excluded_record_kinds` identifies that exclusion); their Run IDs, attempts and
+comparisons remain available through Job procedure inspection.
 A qualifying row has a creation, recorded start, or terminal timestamp inside
 the interval, or was recorded open immediately before either endpoint. Counts
 are exact over that declared scope, independent of detail limits:

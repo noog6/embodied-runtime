@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from .activity import summarize_activity, timestamp_us
 from .focus import JobFocus, JobFocusProposal
+from .trial_store import ProcedureTrialStore, TRIAL_SCHEMA
 from .procedure import (ProcedureProposal, ProcedureFeedback, MAX_PROCEDURE_RUNS,
                         EXPERIMENT_DESCRIPTION, render_procedure)
 from .model import (
@@ -22,7 +23,7 @@ from .model import (
     RUN_TRANSITIONS, TERMINAL_RUN_STATUSES,
 )
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 _SCHEDULES_SCHEMA = """CREATE TABLE job_schedules (
        job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
@@ -104,10 +105,11 @@ _SCHEMA = (
     _FOCUS_SCHEMA,
     _HOURLY_ACTIVATION_SCHEMA,
     *_PROCEDURE_SCHEMA,
+    *TRIAL_SCHEMA,
 )
 
 
-class SQLiteJobStore:
+class SQLiteJobStore(ProcedureTrialStore):
     """A process-local connection to one globally visible Job catalog."""
 
     def __init__(self, path: str | Path, *,
@@ -128,6 +130,17 @@ class SQLiteJobStore:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
+        if version == 12:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                for statement in TRIAL_SCHEMA:
+                    self._connection.execute(statement)
+                self._connection.execute("PRAGMA user_version=13")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+            return
         if version == 11:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -141,6 +154,7 @@ class SQLiteJobStore:
             except BaseException:
                 self._connection.rollback()
                 raise
+            self._initialize_schema()
             return
         if version == 10:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -448,7 +462,8 @@ class SQLiteJobStore:
                 self._connection.rollback()
                 return None
             active = self._connection.execute(
-                "SELECT id FROM job_runs WHERE job_id=? AND status IN ('pending','running') LIMIT 1",
+                "SELECT id FROM job_runs WHERE job_id=? AND status IN ('pending','running') "
+                "AND id NOT IN (SELECT run_id FROM procedure_trial_attempts) LIMIT 1",
                 (job_id,)).fetchone()
             if active is not None:
                 self._connection.rollback()
@@ -478,7 +493,8 @@ class SQLiteJobStore:
             schedule = self.get_schedule(job_id)
             job = self.get_job(job_id)
             active = self._connection.execute(
-                "SELECT id FROM job_runs WHERE job_id=? AND status IN ('pending','running') LIMIT 1",
+                "SELECT id FROM job_runs WHERE job_id=? AND status IN ('pending','running') "
+                "AND id NOT IN (SELECT run_id FROM procedure_trial_attempts) LIMIT 1",
                 (job_id,)).fetchone()
             if (schedule is None or not schedule.enabled or job is None or not job.enabled
                     or active is not None
@@ -545,6 +561,7 @@ class SQLiteJobStore:
         _id(job_id, "job")
         row = self._connection.execute(
             """SELECT * FROM job_runs WHERE job_id = ? AND status = 'completed'
+               AND id NOT IN (SELECT run_id FROM procedure_trial_attempts)
                ORDER BY id DESC LIMIT 1""", (job_id,)
         ).fetchone()
         return _run(row) if row is not None else None
@@ -569,6 +586,8 @@ class SQLiteJobStore:
             )
             if cursor.rowcount != len(rows):
                 raise InvalidJobRunTransitionError("job runs changed concurrently")
+            for row in rows:
+                self._mark_trial_attempt_interrupted(row['id'])
             interrupted = tuple(
                 JobRun(
                     row["id"], row["job_id"], JobRunStatus.INTERRUPTED,
@@ -597,7 +616,8 @@ class SQLiteJobStore:
                        procedure_definition: str | None = None,
                        procedure_job_id: int | None = None,
                        procedure_task_id: str | None = None,
-                       procedure_episode_id: int | None = None) -> JobRun:
+                       procedure_episode_id: int | None = None,
+                       procedure_trial_request: dict | None = None) -> JobRun:
         _id(run_id, "job run")
         if not isinstance(status, JobRunStatus):
             raise TypeError("status must be a JobRunStatus")
@@ -628,6 +648,8 @@ class SQLiteJobStore:
             )
             if cursor.rowcount != 1:
                 raise InvalidJobRunTransitionError("job run changed concurrently")
+            if status is JobRunStatus.INTERRUPTED:
+                self._mark_trial_attempt_interrupted(run_id)
             if focus_update is not None:
                 if status is not JobRunStatus.COMPLETED or current.job_id != focus_job_id:
                     raise ValueError("focus requires exact completed Job ownership")
@@ -659,6 +681,15 @@ class SQLiteJobStore:
                         raise ValueError("feedback requires the exact supplied procedure version")
                     self._connection.execute("UPDATE job_run_procedures SET feedback_json=? WHERE run_id=?",
                         (json.dumps(asdict(procedure_feedback)), run_id))
+            if procedure_trial_request is not None:
+                if status is not JobRunStatus.COMPLETED or current.job_id != procedure_job_id:
+                    raise ValueError('trial request requires exact completed Job ownership')
+                evidence = self.get_run_procedure(run_id)
+                if evidence is None or evidence['definition_identity'] != procedure_definition:
+                    raise ValueError('trial source occurrence was not opted in')
+                self.validate_procedure_policy(current.job_id, procedure_definition)
+                self._request_procedure_trial(current.job_id, procedure_trial_request['versions'],
+                                              procedure_trial_request['configuration'], run_id)
             self._connection.commit()
             return next_run
         except BaseException:
@@ -860,6 +891,7 @@ class SQLiteJobStore:
                 raise ValueError('exact pending procedure version does not match')
             if activate:
                 self.validate_procedure_policy(job_id, pending['definition_identity'])
+                self._validate_trial_activation(job_id, version)
                 pending['activated_at'] = _format(self._now())
                 render_procedure(pending)
                 self._connection.execute("DELETE FROM job_procedures WHERE job_id=? AND state='active'", (job_id,))
@@ -887,14 +919,7 @@ class SQLiteJobStore:
             if active is not None:
                 active['snapshot_at'] = _format(self._now())
                 render_procedure(active)
-            # Retain a fixed per-Job window including this Run. Never delete live evidence.
-            self._connection.execute('''DELETE FROM job_run_procedures WHERE run_id IN (
-                SELECT p.run_id FROM job_run_procedures p JOIN job_runs r ON r.id=p.run_id
-                WHERE p.job_id=? AND r.status NOT IN ('pending','running')
-                ORDER BY p.run_id DESC LIMIT -1 OFFSET ?)''', (job_id, MAX_PROCEDURE_RUNS - 1))
-            count = self._connection.execute('SELECT count(*) FROM job_run_procedures WHERE job_id=?', (job_id,)).fetchone()[0]
-            if count >= MAX_PROCEDURE_RUNS:
-                raise ValueError('procedure Run retention limit reached by live occurrences')
+            self._reserve_procedure_evidence(job_id)
             self._connection.execute('''INSERT INTO job_run_procedures
                 (run_id,job_id,definition_identity,snapshot_json) VALUES (?,?,?,?)''',
                 (run_id, job_id, definition, json.dumps(active) if active else None))
@@ -904,6 +929,20 @@ class SQLiteJobStore:
         except BaseException:
             self._connection.rollback()
             raise
+
+    def _reserve_procedure_evidence(self, job_id: int) -> None:
+        # Called inside capture/import transactions. Reserve one new row while
+        # retaining every live capture and the newest terminal evidence.
+        live = self._connection.execute('''SELECT count(*) FROM job_run_procedures p
+            JOIN job_runs r ON r.id=p.run_id WHERE p.job_id=?
+            AND r.status IN ('pending','running')''', (job_id,)).fetchone()[0]
+        if live >= MAX_PROCEDURE_RUNS:
+            raise ValueError('procedure Run retention limit reached by live occurrences')
+        self._connection.execute('''DELETE FROM job_run_procedures WHERE run_id IN (
+            SELECT p.run_id FROM job_run_procedures p JOIN job_runs r ON r.id=p.run_id
+            WHERE p.job_id=? AND r.status NOT IN ('pending','running')
+            ORDER BY p.run_id DESC LIMIT -1 OFFSET ?)''',
+            (job_id, MAX_PROCEDURE_RUNS - live - 1))
 
     def get_run_procedure(self, run_id: int) -> dict | None:
         _id(run_id, 'run')

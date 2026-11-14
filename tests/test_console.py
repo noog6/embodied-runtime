@@ -299,6 +299,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  job procedure show|enable|disable JOB<n>\n"
             "  job procedure activate|reject JOB<n> PROC<version>\n"
             "  job procedure snapshot RUN<n>  Inspect retained snapshot and feedback\n"
+            "  job procedure trials JOB<n>    List bounded comparisons\n"
+            "  job procedure trial TRIAL<n>   Inspect comparison, attempts and promotion\n"
             "  job procedure seed JOB<n> --name <text> --purpose <text> --applicability <text> --required-capabilities <text> --steps <text> --verification <text> --stopping-conditions <text> [--source RUN<n>]\n"
             "  job focus show|enable|disable JOB<n>\n"
             "  job focus seed JOB<n> RUN<n> --question <text> [--status open|blocked] [--blocker <text>]\n"

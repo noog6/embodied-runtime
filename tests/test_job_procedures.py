@@ -463,7 +463,9 @@ class JobProcedureTests(unittest.IsolatedAsyncioTestCase):
         expected = (self.store.list_jobs(), self.store.list_runs(job.id), self.store.list_schedules(), self.store.list_triggers())
         self.store.close()
         with closing(sqlite3.connect(self.path)) as connection:
-            connection.executescript('''DROP TABLE job_run_procedures;
+            connection.executescript('''DROP TABLE procedure_trial_attempts;
+                DROP TABLE procedure_trials;
+                DROP TABLE job_run_procedures;
                 DROP TABLE job_procedures;
                 ALTER TABLE jobs DROP COLUMN procedure_enabled;
                 ALTER TABLE jobs DROP COLUMN procedure_experiment;
@@ -474,7 +476,7 @@ class JobProcedureTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.get_job(job.id).procedure_enabled)
         self.assertIsNone(self.store.get_procedure(job.id, 'active'))
         self.assertIsNone(self.store.get_run_procedure(source.id))
-        self.assertEqual(self.store._connection.execute('PRAGMA user_version').fetchone()[0], 12)
+        self.assertEqual(self.store._connection.execute('PRAGMA user_version').fetchone()[0], 13)
 
     async def test_snapshot_through_two_acquisitions_and_effect_continuation(self):
         job = self.job()
@@ -611,7 +613,9 @@ class JobProcedureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_jobs(), ())
         self.store.close()
         with closing(sqlite3.connect(self.path)) as connection:
-            connection.executescript('''DROP TABLE job_run_procedures;
+            connection.executescript('''DROP TABLE procedure_trial_attempts;
+                DROP TABLE procedure_trials;
+                DROP TABLE job_run_procedures;
                 DROP TABLE job_procedures;
                 ALTER TABLE jobs DROP COLUMN procedure_enabled;
                 ALTER TABLE jobs DROP COLUMN procedure_experiment;

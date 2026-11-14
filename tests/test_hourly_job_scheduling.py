@@ -191,6 +191,8 @@ class HourlyScheduleStoreTests(unittest.TestCase):
                     self.store.get_schedule(self.job.id), focus)
         # Rebuild only the schedule table as the actual v10 shape.
         self.store._connection.executescript("""
+            DROP TABLE procedure_trial_attempts;
+            DROP TABLE procedure_trials;
             DROP TABLE job_run_procedures;
             DROP TABLE job_procedures;
             ALTER TABLE jobs DROP COLUMN procedure_enabled;

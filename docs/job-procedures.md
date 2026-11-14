@@ -8,6 +8,8 @@ schedule, reservation, or execution budget. No global search or cross-Job proced
 access is offered. Existing Jobs, including the nightly reviewer, remain opted out.
 
 The cycle is **propose → operator review → enable → use → evaluate → revise**.
+The setup-created read-only experiment can also compare an active and pending
+version before requesting explicit console approval. It never promotes itself.
 Completion establishes a candidate's source, not its correctness. Operator review
 is a runtime fact; it does not establish current-world truth. Plumbing tests do not
 demonstrate improved effectiveness.
@@ -145,7 +147,8 @@ Retention is explicit:
 
 - At most two current version records per Job: active and pending. Reject deletes
   pending; replacement deletes the old active record. The version counter never
-  reuses an identity. There is no unbounded review/edit ledger.
+  reuses an identity. Trial comparisons separately retain their tested snapshots
+  and promotion's former method; there is no unbounded review/edit ledger.
 - At most **100** opted-in Run evidence records per Job, including live captures.
   On capture, the oldest terminal records outside the window are pruned
   transactionally. Live evidence is never pruned; if live records occupy the
@@ -156,7 +159,9 @@ Retention is explicit:
   report retention is independent. After pruning, inspection explicitly reports no
   retained procedure evidence rather than inventing a version or use history.
 - Disablement retains existing records. Restart retains historical inspection and
-  follows existing interruption reconciliation; it does not resume work.
+  follows existing interruption reconciliation; it does not resume a Run.
+  The trial coordinator can allocate new attempts for remaining trial work as
+  described below.
 
 ## Console commands
 
@@ -170,6 +175,8 @@ job procedure show JOB<n>
 job procedure activate JOB<n> PROC<version>
 job procedure reject JOB<n> PROC<version>
 job procedure snapshot RUN<n>
+job procedure trials JOB<n>
+job procedure trial TRIAL<n>
 job procedure seed JOB<n> --name "Name" --purpose "Purpose" --applicability "Conditions" --required-capabilities "Existing tools" --steps "Suggested checks; conditional branches" --verification "How to verify" --stopping-conditions "When to stop or defer" [--source RUN<n>]
 ```
 
@@ -203,8 +210,8 @@ python3.13 main.py --config config/experiments/procedure-experiment.toml
 ```
 
 The configuration selects virtual hardware, disables actions/messages/earcons and
-automatic continuation, and sets `database_path = "../work/procedure-experiment.sqlite3"`.
-That relative path resolves from `config/` to the isolated catalog under `work/`.
+automatic continuation, and sets `database_path = "../../work/procedure-experiment.sqlite3"`.
+That relative path resolves from `config/experiments/` to the isolated catalog under `work/`.
 This does not seed, enable or modify the nightly reviewer or any existing Job.
 Do not point this pilot at a deployment catalog. The explicit experiment command
 allocates a new **Procedure Learning Experiment** Job disabled and unscheduled,
@@ -282,12 +289,180 @@ without a method. Virtual hardware observations describe only this virtual runti
    `job procedure reject JOB<n> PROC<version>`, or activate its exact version while
    idle. Inspect the previous Run again to verify its old version remains intact.
    For cleanup, run `job procedure disable JOB<n>` and `job disable JOB<n>`.
-   There is no schedule to remove and no new notifications or retries.
+   There is no schedule to remove. A separately requested comparison may have
+   remaining coordination work and one approval notification, as described below.
+
+## Bounded active/pending comparison
+
+This first comparison contract is only for the **setup-created runtime-health
+experiment**, not every Job with procedure policy enabled. `JOB19` and `PROC2`
+are reference examples, not stable configuration values: use `jobs`, `job show
+JOB<n>` and `job procedure show JOB<n>` against the running catalog to resolve
+the actual experiment, incumbent and pending IDs. Startup creates neither an
+experiment nor a candidate. This checkout does not include the deployed Jobs
+catalog and cannot establish which versions those example IDs currently denote.
+
+When a compatible incumbent and pending candidate exist, the experiment's normal
+outcome schema offers nullable `procedure_trial`, with exact integer `active` and
+`pending` versions. For example, **only if those are the versions shown by the
+catalog**, Mira may submit `{"active":1,"pending":2}`. The existing outcome
+request must complete successfully, the exact live binding must remain valid,
+and the source Run must accept a completed outcome. Request and source result
+commit in the same terminal transaction. Failed providers, cancelled/late
+callbacks, opted-out occurrences, other Jobs, mismatched IDs and simultaneous
+candidate nominations cannot create a trial. A terminal persistence retry does
+not resurrect a lost request. This is not operator dialogue or activation.
+
+Admission snapshots the Job definition identity and text, complete active and
+pending records, model/backend/protocol/endpoint and nonsecret provider settings,
+profile and startup instructions, timezone, fixed fixture clock, isolation
+settings, cases, rubric and budget. Provider credentials are never copied.
+There is one campaign per exact pair and definition, including after an
+inconclusive result; repeatedly requesting it returns the existing comparison.
+At most ten campaigns are admitted per Job, with no automatic pruning. A new
+campaign requires a new pending version. These bounds prevent repeated sampling
+until a candidate happens to win.
+
+The background coordinator offers **one attempt at a time**, at the existing
+configured Job scheduler polling interval. This coordination is independent of
+`jobs.auto_continue`: it starts new isolated attempts, never revives a Task or
+continues an interrupted Run. The budget is **14 attempts**, **one ordinary
+bounded Job episode per attempt**, and **60 seconds per attempt**, including
+startup/provider work. Six cases require twelve attempts; the remaining two
+opportunities cover interruptions. Every replacement consumes another attempt
+and receives a new catalog Run ID. Provider errors or noncompletion produce a
+failed scored attempt; they are not retried for a better answer.
+
+Each attempt uses a fresh virtual `RobotApplication` and private in-memory
+catalog, the pinned original Job and variant, fixed platform observations and
+diagnostic responses, and isolated historical working memory. The private
+catalog preserves the canonical Job/Run IDs. The normal Task/Job executor and
+procedure projection supply the selected variant; setting the candidate active
+inside this disposable catalog never changes production selection. The supported
+OpenAI adapters use independent request/observability state with their ordinary
+HTTP client; custom backends must explicitly implement a trial fork. This is a
+runtime capability boundary, not an OS sandbox for arbitrary executable code.
+
+This avoids toggling application-wide effect policy and avoids borrowing the
+production Job's single live occurrence. The experiment capability restriction
+still projects only `inspect_self`; the private application has no production
+Workspace, persistent memory, delivery sink, camera, body, earcon output, shared
+event bus or resources. All effect calls and procedure nominations/recursive
+trial requests are rejected at execution. Candidate feedback remains a separate
+exact-version self-report. Ordinary manual, scheduled and triggered occurrences
+continue to capture the incumbent and retain their single-live-occurrence rule;
+isolated trial Run rows do not participate in their admission, latest-completed
+result selection or ordinary daily Job activity totals. `job runs` includes trial
+IDs; the comparison identifies their
+case, version and disposition.
+
+The catalog persists an attempt before provider work, then imports its terminal
+result, projection evidence, bounded tool trace, scores, provider calls and cost
+accounting atomically. A crash between execution and import leaves an interrupted
+attempt, not fabricated completion. Startup's ordinary reconciliation interrupts
+orphaned Runs. Coordination preserves completed attempts and allocates a new Run
+only for remaining work within budget. A changed Job, either changed snapshot,
+model/configuration or trial contract stops remaining coordination as stale.
+Completed comparisons and their reports remain inspectable after restart.
+
+### Fixed evaluation and evidence limits
+
+`runtime-health-v1` fixes these cases before work:
+
+| Case | Independent expected behavior |
+| --- | --- |
+| Normal runtime diagnostics | Describe bounded normal diagnostics; leave physical health unverified |
+| Missing diagnostics | Preserve unknowns and request a runtime diagnostic sample |
+| Stale normal history, current memory pressure | Use the acquired current pressure observation and suggest a memory sample |
+| Physical calibration request outside runtime-health scope | Decline procedure applicability and request scope clarification |
+| Evaluation-only recovery | Prefer current normal diagnostics over old pressure claims |
+| Evaluation-only missing diagnostics | Preserve unknowns despite an old overall-health claim |
+
+The last two cases are held out from the runtime's nomination/development context;
+their inputs first enter cognition in evaluation attempts. They are fixed fixtures
+in source, not a secret or statistically independent population after repeated
+operator examination. Do not tune candidates against their reported answers and
+then describe subsequent evidence as held out.
+
+Both variants receive identical case input values, history, instructions, clock,
+platform and diagnostic tool behavior. Their procedure, Run and Task identities
+necessarily differ. The trial asks for a structured JSON **result report** with
+assessment, exact acquired evidence, limitation, next diagnostic and applicability.
+It scores that work artifact against the pinned case oracle and independently
+recorded acquisition results, not feedback's claims of following the method.
+Free-text summaries and intermediate model commentary are supporting context,
+not independently graded health reports. Malformed/absent structured work or
+unacquired citations are inconclusive; this intentionally narrow format is not a
+general semantic evaluator of arbitrary health prose.
+
+Current-evidence use scores 0–2, useful next diagnostic 0–2, and applicability 0–1.
+For an outside-scope request the authoritative case scope can justify declining
+without an irrelevant diagnostic acquisition; empty evidence is valid there.
+The next diagnostic has a fixed case-specific best choice and useful alternative;
+other recognized suggestions earn zero. Every candidate case **and criterion**
+must avoid regression, all independent evidence must be valid, and the candidate
+must gain at least two total points. Unsupported health conclusions, stale claims
+presented as current, missing protected limitations and incorrect applicability
+block promotion. Invalid or incomplete evidence yields **inconclusive**; equal or
+insufficient improvement retains the **incumbent**. No model judge or reported
+procedure-following score can override these gates. Calls, provider-reported
+usage and reported/estimated cost are inspectable when supplied; missing cost
+remains unavailable, not zero. Provider variability, finite case coverage and the
+constrained report format limit these results. A win demonstrates this synthetic
+contract, not actual deployed health, general procedure effectiveness or causal
+improvement.
+
+### Operator review, approval and rollback
+
+1. Resolve the actual Job and procedure IDs in the running catalog. Review or
+   develop the pending method through the existing nomination/seed workflow;
+   leave the incumbent active. Work a fresh ordinary experiment Run so Mira can
+   request the bounded comparison. A trial is optional, not automatically created
+   merely because a pending method exists.
+2. Inspect `job procedure trials JOB<n>` and `job procedure trial TRIAL<n>`.
+   The latter shows recommendation/reason, score totals and regressions, every
+   attempt's Run ID, both exact snapshots, fixed inputs/rubric/budget, tool
+   evidence, feedback and cost. `job result RUN<n>` and `job procedure snapshot
+   RUN<n>` also inspect retained attempt evidence. The full comparison retains
+   evidence even beyond the ordinary 100-snapshot window.
+3. A winner can request approval through the existing configured autonomous
+   notification route (`initiative.messages` plus an eligible operator sink).
+   The message references `TRIAL<n>` and prints the exact command:
+
+   ```text
+   job procedure activate JOB<n> PROC<tested-candidate-version>
+   ```
+
+   No route means `not_configured`; delivery failure means `rejected`. Neither
+   removes the report or changes the incumbent. Notification intent is durably
+   claimed **before** delivery, so ordinary restart never repeats that attempt.
+   A crash can therefore leave `claimed` without confirmed delivery. There is no
+   receipt, acknowledgement, reply binding or automatic notification retry.
+4. Review the report, then use that exact console activation command while the
+   Job is idle. Activation for a compared candidate requires a winning, still
+   current recommendation, exact incumbent and candidate snapshots, compatible
+   Job definition and enabled Job/procedure policy, checked transactionally with
+   promotion. An old recommendation cannot approve a replaced method. Compared
+   losing/inconclusive versions cannot bypass the gate by using manual activation;
+   reject and revise them. Manual activation for methods outside comparisons
+   remains available. Activation itself does not start work.
+5. A fresh ordinary Run now captures the winning version under the same Job
+   definition. The promotion record in `job procedure trial TRIAL<n>` retains the
+   former active method's **exact text and provenance**, the tested candidate,
+   definition and approval time. To restore the previous method, reject any
+   pending replacement, use the existing full `job procedure seed JOB<n> ...`
+   command with all seven fields from `promotion.previous.instructions`, inspect
+   the new pending version, and explicitly activate that version while idle.
+   This restores the exact method text as a new operator-authored version, with
+   the original version/provenance recoverable in the promotion record. It does
+   not reuse a version ID or rewrite earlier Run snapshots. A changed definition
+   requires a fresh compatibility review before restoring old instructions.
 
 ## Automated validation
 
 ```sh
 python3.13 -m unittest tests.test_job_procedures -q
+python3.13 -m unittest tests.test_procedure_trials -q
 python3.13 -m unittest discover -q
 python3.13 -m compileall -q embodied_runtime tests
 git diff --check
@@ -297,7 +472,22 @@ Fake providers, virtual backends and temporary SQLite databases exercise the ful
 cycle and failure paths without physical hardware or live providers. This validates
 mechanism and boundaries, not learned-method quality or effectiveness.
 
-Validation in the managed development environment: 29 procedure tests and 203
+Comparison-extension validation: 70 focused tests passed, including 50
+procedure/trial tests and the daily-activity tests. A broader 221-test Job and
+benchmark regression selection also passed. The full suite after rebase ran
+1,872 tests with 18 skips and two failures in the existing compatible-provider
+fixture for `power_recovery_continuity` (parallel-tool modes `disable` and `omit`).
+Both failures reproduce on untouched `main` at `711decf`; they are independent
+of procedure trials. Compileall and diff whitespace checks passed. Coverage includes paired inputs,
+ordinary/scheduled incumbent selection, forbidden capabilities/nomination,
+protected regressions, inconclusive evidence, bounded replacement attempts,
+shutdown/restart, atomic persistence, stale approval, notification failure and
+deduplication, promotion and rollback. Live-provider quality, deployed catalog
+identities and an operator-observed notification/activation walkthrough remain
+unvalidated; no deployed Job or physical hardware was changed.
+
+Historical validation of the original nomination slice in its managed
+development environment: 29 procedure tests and 203
 focused regression tests passed with the standard runner. The full suite ran
 1,513 tests with 16 skips and no failures using a temporary environment-only
 runner. The ordinary full-suite command hung in existing asyncio executor shutdown;

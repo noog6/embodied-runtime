@@ -670,7 +670,7 @@ claim or lease with a runtime identity. There is still no `claimed_by` column.
 
 ## Persistence, shutdown, and restart
 
-Jobs use their own `SQLiteJobStore`, schema version 12, normally in
+Jobs use their own `SQLiteJobStore`, schema version 13, normally in
 `data/jobs.sqlite3`. They are independent of persistent memory and Tasks. Jobs
 and memory can each be enabled or disabled independently.
 
@@ -713,6 +713,10 @@ hourly slot; a later eligible slot can start normally.
 Durable Workspace artifacts published before interruption survive independently,
 but their existence does not turn the interrupted JobRun into completed work.
 Automatic JobRun recovery is not implemented.
+The opt-in procedure experiment has separate bounded trial coordination: it may
+allocate fresh isolated attempts for remaining cases, with new Run IDs charged
+to the pinned trial budget. It never restores an interrupted Task/Run. See
+[Job procedure comparisons](job-procedures.md#bounded-activepending-comparison).
 
 The console inspection commands are `jobs`, `job show JOB<n>`, `job runs
 JOB<n>`, `job files JOB<n> [directory]`, and `job file JOB<n> <logical-path>
@@ -808,7 +812,9 @@ authority; a new JobRun performs bounded cognition; and a later event may wake
 that same run. Interrupted runs are never resurrected. Startup attention creates
 a new occurrence when the condition remains unresolved.
 
-The Jobs database schema version is 12. Opening a version-4 database transactionally
+The Jobs database schema version is 13. Version 13 transactionally adds bounded
+procedure-comparison and attempt records without changing existing Jobs, Runs,
+schedules or procedure selection. Opening a version-4 database transactionally
 adds the trigger table; opening version 5 expands its bounded event-type constraint.
 Opening version 7 removes the former globally unique enabled-event index without
 rewriting or deleting trigger rows. All migrations preserve Jobs, JobRuns,
@@ -875,3 +881,5 @@ failure limits, and the bounded operator-only inspection tools.
 Private bounded methods and the explicit disabled, unscheduled experimental Job
 are documented in [Job procedures](job-procedures.md). Schema 12 adds default-off
 procedure policy and bounded per-Run snapshots without changing existing Jobs.
+Schema 13 adds opt-in paired comparisons and explicit console approval; ordinary
+selection still captures only the incumbent.

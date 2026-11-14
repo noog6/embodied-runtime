@@ -53,6 +53,7 @@ WITH normalized AS MATERIALIZED (
            job_activity_time(finished_at) AS finished_us,
            started_at IS NULL AS no_start, finished_at IS NULL AS no_finish
     FROM job_runs
+    WHERE id NOT IN (SELECT run_id FROM procedure_trial_attempts)
 ), checked AS MATERIALIZED (
     SELECT *, COALESCE(
         created_us IS NOT NULL AND created_us <= :retrieved
@@ -135,6 +136,7 @@ def summarize_activity(connection: sqlite3.Connection, start: datetime, end: dat
     return {
         "status": "ok", "source": "configured_jobs_database",
         "scope": "timestamp_consistent_retained_records", "record_authority": "runtime",
+        "excluded_record_kinds": ["procedure_trial"],
         "coverage": {"status": "partial" if totals["unclassified_records"] else "complete",
                      "retained_records": totals["retained_records"],
                      "unclassified_records": totals["unclassified_records"],

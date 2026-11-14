@@ -237,6 +237,14 @@ notifications are not retained for recovery. Notification persistence, human
 acknowledgement tracking, voice notifications, model channel selection, and
 fallback remain outside this feature.
 
+The opt-in Job procedure experiment can send one runtime-authored approval
+request through this same configured notification path after a winning bounded
+comparison. It references an inspectable `TRIAL<n>` and exact console activation
+command; it opens no dialogue turn and never interprets a reply as approval.
+Its comparison-specific durable delivery claim prevents repeat notification
+attempts after restart, including when delivery fails. A claim is not proof of
+delivery or operator acknowledgement. See [procedure comparisons](job-procedures.md#bounded-activepending-comparison).
+
 Console dialogue exposes `channel=console`, while voice dialogue exposes
 `channel=voice`; both expose the same dialogue mode, operator initiator, and
 expected-response semantics. The context neither grants nor removes tools and is

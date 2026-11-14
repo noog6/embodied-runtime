@@ -254,7 +254,7 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.assertEqual(run.outcome_summary, "old result")
         self.assertIsNone(run.result_report)
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 12)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 13)
 
     def test_version_three_rebuild_preserves_ids_content_and_schedule(self):
         job = self.store.create_job("Scheduled", "description")
@@ -273,6 +273,8 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.store.close()
         with sqlite3.connect(self.path) as connection:
             connection.executescript("""
+                DROP TABLE procedure_trial_attempts;
+                DROP TABLE procedure_trials;
                 DROP TABLE job_run_procedures;
                 DROP TABLE job_procedures;
                 ALTER TABLE jobs DROP COLUMN procedure_enabled;
@@ -306,7 +308,7 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.assertEqual(interrupted[0].id, expected_runs[0].id)
         self.assertIs(interrupted[0].status, JobRunStatus.INTERRUPTED)
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 12)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 13)
 
     def test_unsupported_schema_fails_closed(self):
         self.store.close()

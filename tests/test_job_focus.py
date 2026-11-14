@@ -666,6 +666,8 @@ class JobFocusTests(unittest.IsolatedAsyncioTestCase):
         trigger = self.store.set_trigger(job.id, JobTriggerType.RUNTIME_READY)
         self.store.close()
         with sqlite3.connect(self.path) as connection:
+            connection.execute("DROP TABLE procedure_trial_attempts")
+            connection.execute("DROP TABLE procedure_trials")
             connection.execute("DROP TABLE job_run_procedures")
             connection.execute("DROP TABLE job_procedures")
             connection.execute("ALTER TABLE jobs DROP COLUMN procedure_enabled")
@@ -682,4 +684,4 @@ class JobFocusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_triggers(), (trigger,))
         self.assertEqual(self.store.list_findings(), (finding,))
         self.assertIsNone(self.store.get_focus(job.id))
-        self.assertEqual(self.store._connection.execute("PRAGMA user_version").fetchone()[0], 12)
+        self.assertEqual(self.store._connection.execute("PRAGMA user_version").fetchone()[0], 13)
