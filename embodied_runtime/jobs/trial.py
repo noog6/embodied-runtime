@@ -251,7 +251,8 @@ def render_trial_request(evidence):
         else:
             fact = 'not requested'
         if decision.get('pending_version') is not None:
-            fact += f"; pending PROC{decision['pending_version']}"
+            label = 'requested' if disposition == 'rejected' else 'pending'
+            fact += f"; {label} PROC{decision['pending_version']}"
         facts.append(fact)
     return ' | '.join(facts)
 

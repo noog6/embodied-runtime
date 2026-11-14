@@ -199,6 +199,8 @@ accepted Run status, including after restart. Both `job work` and `snapshot` sho
 the captured procedure, runtime `supplied` flag, comparison's pending version when
 known, and runtime trial disposition: `not requested`, `rejected` with a bounded
 runtime-authored reason, `queued as TRIAL<n>`, or `already exists as TRIAL<n>`.
+Rejected proposals label their candidate version `requested PROC<n>` because it
+may not identify a current pending version in the catalog.
 A rejected attempt survives a corrected outcome, including a subsequent queued
 comparison; both facts are displayed separately from Job outcome and procedure
 feedback. Rejections are recorded at the runtime decision, independently of

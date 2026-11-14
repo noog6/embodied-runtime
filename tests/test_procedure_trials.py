@@ -240,7 +240,8 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
         shown, _ = await console.execute_async(f'job work RUN{source.run.id}')
         trial = self.store.list_procedure_trials(job.id)[0]
         self.assertIn('disposition:   completed', shown)
-        self.assertIn('rejected (expected exact current active and pending versions); pending PROC999', shown)
+        self.assertIn('rejected (expected exact current active and pending versions); requested PROC999', shown)
+        self.assertNotIn('pending PROC999', shown)
         self.assertIn(f'queued as TRIAL{trial["id"]}; pending PROC2', shown)
         self.assertIn('procedure feedback (model):', shown)
         self.assertIn('"response": "followed"', shown)
@@ -253,6 +254,8 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
         await app2.start()
         retained = RuntimeConsole(app2).execute(f'job procedure snapshot RUN{source.run.id}')[0]
         self.assertIn('rejected (expected exact current', retained)
+        self.assertIn('requested PROC999', retained)
+        self.assertNotIn('pending PROC999', retained)
         self.assertIn(f'queued as TRIAL{trial["id"]}', retained)
 
     async def test_omitted_request_is_recorded_with_pending_version(self):
