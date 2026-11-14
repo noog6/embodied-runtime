@@ -553,11 +553,13 @@ class RuntimeConsole:
             run.error_summary
             if run.status is JobRunStatus.FAILED else run.outcome_summary
         )
+        trial = store.get_procedure_trial_run(run.id)
         return "\n".join((
             "Job result", f"  job:           JOB{job.id} ({job.name})",
             f"  run:           RUN{run.id}", f"  status:        {run.status.value}",
             f"  started_at:    {run.started_at.isoformat() if run.started_at else 'none'}",
             f"  finished_at:   {run.finished_at.isoformat() if run.finished_at else 'none'}",
+            *((f"  evidence:      {trial.render()}",) if trial is not None else ()),
             f"  summary:       {summary or 'none'}",
             f"  report:        {run.result_report or 'none'}",
         ))

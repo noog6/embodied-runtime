@@ -322,6 +322,10 @@ inconclusive result; repeatedly requesting it returns the existing comparison.
 At most ten campaigns are admitted per Job, with no automatic pruning. A new
 campaign requires a new pending version. These bounds prevent repeated sampling
 until a candidate happens to win.
+Capacity is checked before accepting the optional outcome request and rechecked
+inside its terminal transaction. At capacity, a new campaign request is rejected
+while the source Task and Run remain running; Mira can complete that same Run
+with `procedure_trial=null`. Reusing an existing campaign still succeeds at the cap.
 
 The background coordinator offers **one attempt at a time**, at the existing
 configured Job scheduler polling interval. This coordination is independent of
@@ -353,8 +357,18 @@ exact-version self-report. Ordinary manual, scheduled and triggered occurrences
 continue to capture the incumbent and retain their single-live-occurrence rule;
 isolated trial Run rows do not participate in their admission, latest-completed
 result selection or ordinary daily Job activity totals. `job runs` includes trial
-IDs; the comparison identifies their
-case, version and disposition.
+IDs; the comparison identifies their case, version and disposition. Exact-Run
+inspection, shared result reads and retained-report retrieval explicitly label
+trial work as `historical_procedure_trial_result`, with
+`content_provenance=cognition_trial_work_product` and
+`content_authority=synthetic_non_authoritative`. Their `procedure_trial` metadata
+identifies the trial, case, variant and exact procedure version, with
+`evidence_scope=synthetic_diagnostic_fixture` and `deployed_runtime_evidence=false`.
+The label comes from the durable attempt association, not authored prose or a
+retained procedure snapshot, and survives restart, policy disablement and snapshot
+pruning. Console results and retained-report delivery framing also identify fixture
+evidence explicitly; the captured report body is unchanged. An acquired report
+reference retains its synthetic label through delivery without rereading the catalog.
 
 The catalog persists an attempt before provider work, then imports its terminal
 result, projection evidence, bounded tool trace, scores, provider calls and cost
@@ -472,10 +486,13 @@ Fake providers, virtual backends and temporary SQLite databases exercise the ful
 cycle and failure paths without physical hardware or live providers. This validates
 mechanism and boundaries, not learned-method quality or effectiveness.
 
-Comparison-extension validation: 70 focused tests passed, including 50
-procedure/trial tests and the daily-activity tests. A broader 221-test Job and
-benchmark regression selection also passed. The full suite after rebase ran
-1,872 tests with 18 skips and two failures in the existing compatible-provider
+Comparison-extension validation: 287 focused regression tests passed across
+procedures/trials, exact/shared reads, retained reports, Job persistence/scheduling
+and benchmarks; the procedure/trial subset now has 55 passing tests. Coverage
+includes cap rejection before outcome acceptance, bounded in-request correction,
+transactional capacity recheck, and synthetic markers surviving restart and
+snapshot pruning through each result-read path. The full suite ran
+1,878 tests with 18 skips and two failures in the existing compatible-provider
 fixture for `power_recovery_continuity` (parallel-tool modes `disable` and `omit`).
 Both failures reproduce on untouched `main` at `711decf`; they are independent
 of procedure trials. Compileall and diff whitespace checks passed. Coverage includes paired inputs,

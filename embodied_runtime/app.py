@@ -103,6 +103,7 @@ from embodied_runtime.jobs.procedure import (
     ProcedureProposal, ProcedureFeedback, ProcedureRunSnapshot,
     PROCEDURE_CANDIDATE_SCHEMA, PROCEDURE_FEEDBACK_SCHEMA,
 )
+from embodied_runtime.jobs.trial import ProcedureTrialRun
 from embodied_runtime.jobs.focus import (
     JobFocus, JobFocusProposal, FOCUS_PROPOSAL_SCHEMA,
 )
@@ -1245,6 +1246,7 @@ class RetainedReportSnapshot:
     run_id: int | None = None
     path: str | None = None
     content_version: str | None = None
+    procedure_trial: ProcedureTrialRun | None = None
 
 
 class RobotApplication:
@@ -7221,12 +7223,16 @@ class RobotApplication:
                 if job is None:
                     result = {"status": "not_found", "reason": "job_not_found"}
                     return CognitionToolResult(json.dumps(result, sort_keys=True))
+                trial = self.jobs.get_procedure_trial_run(run.id)
                 if run.result_report is None:
                     result = {"status": "no_report", "reason": "result_report_absent",
                               "job": f"JOB{job.id}", "run": f"RUN{run.id}"}
+                    if trial is not None:
+                        result.update(trial.result_metadata())
                     return CognitionToolResult(json.dumps(result, sort_keys=True))
                 snapshot = RetainedReportSnapshot(
-                    source_kind, job.id, job.name, run.result_report, run_id=run.id)
+                    source_kind, job.id, job.name, run.result_report, run_id=run.id,
+                    procedure_trial=trial)
             else:
                 if self.job_workspaces is None:
                     raise RuntimeError("workspace_persistence_unavailable")
@@ -7258,6 +7264,8 @@ class RobotApplication:
                 result["run"] = f"RUN{snapshot.run_id}"
             else:
                 result.update(path=snapshot.path, content_version=snapshot.content_version)
+            if snapshot.procedure_trial is not None:
+                result.update(snapshot.procedure_trial.result_metadata())
         except WorkspaceValidationError:
             result = {"status": "rejected", "reason": "invalid_logical_path"}
         except WorkspaceNotFoundError:
@@ -7993,7 +8001,7 @@ class RobotApplication:
             or (run.outcome_summary is None and run.error_summary is not None)
             else "outcome"
         )
-        return {
+        result = {
             "status": "ok",
             "source": "durable_job_store",
             "scope": "historical_job_run_result",
@@ -8015,6 +8023,10 @@ class RobotApplication:
             "report": run.result_report,
             "report_present": run.result_report is not None,
         }
+        trial = self.jobs.get_procedure_trial_run(run.id)
+        if trial is not None:
+            result.update(trial.result_metadata())
+        return result
 
     def _execute_run_history_inspection(
         self, call: CognitionToolCall, *, expected_goal: ActiveGoal | None = None,
@@ -8932,6 +8944,8 @@ class RobotApplication:
                     f"source: JOB{snapshot.job_id} workspace {snapshot.path}\n"
                     f"content_version: {snapshot.content_version}"
                 )
+            if snapshot.procedure_trial is not None:
+                provenance += '\n' + snapshot.procedure_trial.render()
             message = f"Retained report\n{provenance}\n\n{snapshot.content}"
             await route.sink.deliver(OperatorMessage(
                 message, source, operator_delivery(route.destination.channel),

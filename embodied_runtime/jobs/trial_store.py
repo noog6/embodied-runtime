@@ -4,7 +4,8 @@ from copy import deepcopy
 import json
 
 from .model import JobRunStatus
-from .trial import CASES, RUBRIC, MAX_TRIALS_PER_JOB, TRIAL_CONTRACT, compare, digest
+from .trial import (CASES, RUBRIC, MAX_TRIALS_PER_JOB, TRIAL_CONTRACT,
+                    ProcedureTrialRun, compare, digest)
 
 TRIAL_SCHEMA = (
     '''CREATE TABLE procedure_trials (
@@ -39,7 +40,20 @@ class ProcedureTrialStore:
                 or any(type(v) is not int for v in versions.values())
                 or [versions['active'], versions['pending']] != [p['version'] for p in pair]):
             raise ValueError('trial must name the exact current active and pending versions')
+        identity = digest(dict(job_id=job_id, definition=definition, pair=pair))
+        self._validate_trial_capacity(job_id, identity)
         return job, definition, pair
+
+    def _validate_trial_capacity(self, job_id, identity):
+        # Preflight before outcome acceptance, and rechecked in the terminal
+        # transaction. Reusing an existing campaign consumes no new capacity.
+        existing = self._connection.execute('SELECT id FROM procedure_trials WHERE identity=?', (identity,)).fetchone()
+        if existing:
+            return existing[0]
+        count = self._connection.execute('SELECT count(*) FROM procedure_trials WHERE job_id=?', (job_id,)).fetchone()[0]
+        if count >= MAX_TRIALS_PER_JOB:
+            raise ValueError('trial retention/admission limit reached for this Job')
+        return None
 
     def _request_procedure_trial(self, job_id, versions, configuration, source_run_id):
         job, definition, pair = self.validate_procedure_trial_request(job_id, versions)
@@ -47,9 +61,6 @@ class ProcedureTrialStore:
         existing = self._connection.execute('SELECT id FROM procedure_trials WHERE identity=?', (identity,)).fetchone()
         if existing:
             return existing[0]  # One campaign per exact pair; no repeated cherry-picking.
-        count = self._connection.execute('SELECT count(*) FROM procedure_trials WHERE job_id=?', (job_id,)).fetchone()[0]
-        if count >= MAX_TRIALS_PER_JOB:
-            raise ValueError('trial retention/admission limit reached for this Job')
         record = dict(job_id=job_id, definition_identity=definition,
                       job=dict(id=job.id, name=job.name, description=job.description,
                                target_kind=job.target.kind if job.target else None,
@@ -65,6 +76,15 @@ class ProcedureTrialStore:
 
     def is_procedure_trial_run(self, run_id):
         return self._connection.execute('SELECT 1 FROM procedure_trial_attempts WHERE run_id=?', (run_id,)).fetchone() is not None
+
+    def get_procedure_trial_run(self, run_id) -> ProcedureTrialRun | None:
+        row = self._connection.execute('SELECT trial_id,record_json FROM procedure_trial_attempts WHERE run_id=?',
+                                        (run_id,)).fetchone()
+        if row is None:
+            return None
+        attempt = json.loads(row['record_json'])
+        return ProcedureTrialRun(row['trial_id'], attempt['case_id'], attempt['variant'],
+                                 attempt['procedure_version'])
 
     def _mark_trial_attempt_interrupted(self, run_id):
         row = self._connection.execute('SELECT trial_id,record_json FROM procedure_trial_attempts WHERE run_id=?',

@@ -68,6 +68,11 @@ the `delivery` interaction identity (`initiator=operator`,
 `response_expected=false`). The originating dialogue source remains `console` or
 `voice`; delivering to console does not change a voice conversation's identity.
 
+Retained procedure-trial results expose explicit synthetic fixture provenance
+when retrieved. Their episode-local snapshot also captures that marker, and
+delivery adds a runtime-authored fixture label around the unchanged report body;
+it does not present the trial as an assessment of the deployed robot.
+
 The authorized destination set is captured for the episode, while execution
 re-resolves the current route. Removed or channel-incompatible routes reject without
 fallback; a compatible replacement route is used. Report delivery shares the one

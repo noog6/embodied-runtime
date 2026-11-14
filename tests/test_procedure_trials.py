@@ -11,14 +11,17 @@ import unittest
 from unittest.mock import patch
 
 from embodied_runtime.app import JOB_OUTCOME_EVALUATION_REQUEST
+from embodied_runtime.app import deliver_report_tool
 from embodied_runtime.cognition import CognitionToolCall, TextCognitionBackend
 from embodied_runtime.console import RuntimeConsole
 from embodied_runtime.jobs import JobRunStatus, SQLiteJobStore
 from embodied_runtime.jobs.procedure import ProcedureProposal
 from embodied_runtime.jobs.trial import trial_configuration, CASES, score_attempt
+from embodied_runtime.interaction import CONSOLE_DIALOGUE
 from tests.test_job_procedures import ProcedureBackend, candidate
 from tests import test_job_focus as harness
 from tests.test_interaction import RecordingSink
+from tests import test_report_delivery as report_harness
 
 
 class DiagnosticBackend(TextCognitionBackend):
@@ -266,6 +269,7 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
         app.start_job_run(job.id)
         await app.work_current_job_once()
         self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
+
         for versions in ({'active': 1, 'pending': 99}, {'active': True, 'pending': 2}):
             with self.assertRaises(ValueError):
                 self.store.validate_procedure_trial_request(job.id, versions)
@@ -283,6 +287,147 @@ class ProcedureTrialTests(unittest.IsolatedAsyncioTestCase):
             await app.work_current_job_once()
         self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
 
+    async def test_campaign_cap_rejects_request_before_task_completion_and_allows_completion_without_trial(self):
+        with patch('embodied_runtime.jobs.trial_store.MAX_TRIALS_PER_JOB', 1):
+            app, job, backend, trial = await self.setup_trial()
+            # Reusing the sole campaign remains legal at the cap.
+            repeat = app.start_job_run(job.id)
+            await app.work_current_job_once()
+            self.assertEqual(self.store.get_run(repeat.run.id).status, JobRunStatus.COMPLETED)
+            self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
+            self.store.review_procedure(job.id, 2, activate=False)
+            self.store.seed_procedure(job.id, ProcedureProposal(**candidate(name='New candidate')))
+            backend.versions = {'active': 1, 'pending': 3}
+            source = app.start_job_run(job.id)
+            respond = backend.respond
+
+            async def correct_optional_request(message, **kwargs):
+                response = await respond(message, **kwargs)
+                if message == JOB_OUTCOME_EVALUATION_REQUEST:
+                    rejected = json.loads(backend.results[-1].output)
+                    self.assertEqual(rejected['status'], 'rejected')
+                    self.assertIn('trial retention/admission limit', rejected['error'])
+                    self.assertEqual(self.store.get_run(source.run.id).status, JobRunStatus.RUNNING)
+                    self.assertEqual(app.current_task.status.value, 'running')
+                    # The existing bounded correction opportunity can finish
+                    # this same Run in this same outcome request.
+                    backend.versions = None
+                    backend.results.append(await kwargs['tool_executor'](backend.call()))
+                return response
+
+            backend.respond = correct_optional_request
+            await app.work_current_job_once()
+            self.assertEqual(json.loads(backend.results[-1].output)['status'], 'accepted')
+            self.assertEqual(self.store.get_run(source.run.id).status, JobRunStatus.COMPLETED)
+            self.assertFalse(app.job_execution_contexts)
+            self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
+
+    async def test_terminal_transaction_rechecks_campaign_capacity(self):
+        app, job, backend, trial = await self.setup_trial()
+        self.store.review_procedure(job.id, 2, activate=False)
+        self.store.seed_procedure(job.id, ProcedureProposal(**candidate(name='New candidate')))
+        source = app.start_job_run(job.id)
+        versions = {'active': 1, 'pending': 3}
+        self.store.validate_procedure_trial_request(job.id, versions)
+        # A changed cap after preflight must still fail atomically at commit.
+        with patch('embodied_runtime.jobs.trial_store.MAX_TRIALS_PER_JOB', 1):
+            with self.assertRaisesRegex(ValueError, 'trial retention/admission limit'):
+                self.store.transition_run(source.run.id, JobRunStatus.COMPLETED,
+                    procedure_job_id=job.id,
+                    procedure_definition=self.store.focus_definition_identity(job.id),
+                    procedure_trial_request=dict(versions=versions, configuration=trial_configuration(app)))
+        self.assertEqual(self.store.get_run(source.run.id).status, JobRunStatus.RUNNING)
+        self.assertEqual(app.current_task.status.value, 'running')
+        self.assertEqual(len(self.store.list_procedure_trials(job.id)), 1)
+
+    async def test_trial_result_marker_survives_restart_retention_and_all_exact_read_paths(self):
+        app, job, backend, trial = await self.setup_trial()
+        await app.advance_procedure_trials_once()
+        await app.advance_procedure_trials_once()
+        attempt = self.store.procedure_trial_attempts(trial['id'])[1]
+        run_id = attempt['run_id']
+        expected = dict(trial_id=trial['id'], case_id=attempt['case_id'], variant='pending',
+                        procedure_version=2, evidence_scope='synthetic_diagnostic_fixture',
+                        deployed_runtime_evidence=False)
+        # Neither prose nor the bounded procedure snapshot window owns the label.
+        self.store._connection.execute('UPDATE job_runs SET outcome_summary=? WHERE id=?',
+                                       ('A historical assessment', run_id))
+        self.store._connection.execute('DELETE FROM job_run_procedures WHERE run_id=?', (run_id,))
+        self.store.set_procedure_enabled(job.id, False)
+        await app.stop()
+        self.store = SQLiteJobStore(self.path, clock=lambda: self.now)
+        delivery = report_harness.ReportBackend(dict(source_kind='job_run_result', selector=f'RUN{run_id}'))
+        app2 = self.app(delivery)
+        app2.options = replace(app2.options, shared_reads_enabled=True)
+        sink = report_harness.RecordingSink()
+        app2._operator_delivery_routes = report_harness.RetainedReportDeliveryTests.catalog(sink)
+        await app2.start()
+        exact = json.loads(app2._execute_job_result_inspection(CognitionToolCall(
+            'inspect_job_result', json.dumps(dict(selector=f'RUN{run_id}')))).output)
+        self.assertEqual(exact['procedure_trial'], expected)
+        self.assertEqual(exact['scope'], 'historical_procedure_trial_result')
+        self.assertEqual(exact['content_provenance'], 'cognition_trial_work_product')
+        self.assertEqual(exact['content_authority'], 'synthetic_non_authoritative')
+        self.assertTrue(exact['report_present'])
+        shown = RuntimeConsole(app2).execute(f'job result RUN{run_id}')[0]
+        self.assertIn(f'Synthetic procedure trial TRIAL{trial["id"]}', shown)
+        self.assertIn('not an assessment of the deployed robot', shown)
+
+        reader = self.store.create_job('Reader', 'Inspect historical evidence')
+        binding = app2.start_job_run(reader.id)
+        captured = (binding, app2._current_task_binding, app2.active_goal)
+        shared = json.loads(app2._execute_shared_job_acquisition(CognitionToolCall(
+            'shared_inspect_job_run', json.dumps(dict(selection='exact_run', selector=f'RUN{run_id}'))),
+            job_binding=captured, expected_goal=captured[2]).output)
+        self.assertEqual(shared['procedure_trial'], expected)
+        self.assertEqual(shared['scope'], 'historical_procedure_trial_result')
+        self.assertEqual(app2.current_job_run.run.id, binding.run.id)
+        app2.finish_job_run(JobRunStatus.STOPPED, 'Read check complete')
+
+        await app2.request_cognition('Deliver that exact retained report.', interaction=CONSOLE_DIALOGUE)
+        acquired = delivery.results[0]
+        self.assertEqual(acquired['procedure_trial'], expected)
+        self.assertEqual(acquired['content_authority'], 'synthetic_non_authoritative')
+        self.assertEqual(delivery.results[1]['status'], 'applied')
+        self.assertIn(f'Synthetic procedure trial TRIAL{trial["id"]}', sink.messages[0].text)
+        self.assertTrue(sink.messages[0].text.endswith('\n\n' + exact['report']))
+        ordinary = app2._project_job_result(self.store.get_run(trial['source_run_id']))
+        self.assertNotIn('procedure_trial', ordinary)
+        self.assertEqual(ordinary['scope'], 'historical_job_run_result')
+        self.assertEqual(ordinary['content_provenance'], 'cognition_work_product')
+
+    async def test_report_snapshot_keeps_synthetic_marker_without_rereading_catalog_on_delivery(self):
+        app, job, backend, trial = await self.setup_trial()
+        await app.advance_procedure_trials_once()
+        run_id = self.store.procedure_trial_attempts(trial['id'])[0]['run_id']
+        references = {}
+        acquired = json.loads(app._execute_report_retrieval(CognitionToolCall('retrieve_report',
+            json.dumps(dict(source_kind='job_run_result', selector=f'RUN{run_id}'))), references).output)
+        sink = report_harness.RecordingSink()
+        app._operator_delivery_routes = report_harness.RetainedReportDeliveryTests.catalog(sink)
+        destinations = app._operator_delivery_routes.destinations
+        with patch.object(self.store, 'get_procedure_trial_run', side_effect=AssertionError('must use captured marker')):
+            result = await app._execute_deliver_report(CognitionToolCall('deliver_report',
+                json.dumps(dict(report_ref=acquired['report_ref'], destination='console'))),
+                available=(deliver_report_tool(destinations),), authorized=destinations,
+                references=references, source='console')
+        self.assertEqual(json.loads(result.output)['status'], 'applied')
+        self.assertIn(f'Synthetic procedure trial TRIAL{trial["id"]}', sink.messages[0].text)
+
+    async def test_interrupted_attempt_without_report_still_exposes_fixture_identity(self):
+        app, job, backend, trial = await self.setup_trial()
+        attempt = self.store.begin_procedure_trial_attempt(trial['id'], trial_configuration(app))
+        self.store.transition_run(attempt['run_id'], JobRunStatus.INTERRUPTED)
+        references = {}
+        result = json.loads(app._execute_report_retrieval(CognitionToolCall('retrieve_report',
+            json.dumps(dict(source_kind='job_run_result', selector=f'RUN{attempt["run_id"]}'))), references).output)
+        self.assertEqual(result['status'], 'no_report')
+        self.assertEqual(result['procedure_trial']['trial_id'], trial['id'])
+        self.assertFalse(result['procedure_trial']['deployed_runtime_evidence'])
+        self.assertEqual(references, {})
+        shown = RuntimeConsole(app).execute(f'job result RUN{attempt["run_id"]}')[0]
+        self.assertIn('interrupted', shown)
+        self.assertIn('Synthetic procedure trial', shown)
     async def test_attempt_budget_exhaustion_stays_inspectable_and_inconclusive(self):
         app, job, backend, trial = await self.setup_trial()
         for _ in range(trial['configuration']['budget']['attempts']):

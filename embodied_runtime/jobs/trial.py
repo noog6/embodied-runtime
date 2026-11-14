@@ -1,13 +1,40 @@
 """Fixed, deliberately narrow runtime-health trial contract (no model judge)."""
 
 from copy import deepcopy
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
 
 from .procedure import PROCEDURE_GUIDANCE
 
 TRIAL_CONTRACT = 'runtime-health-v1'
+
+
+@dataclass(frozen=True, slots=True)
+class ProcedureTrialRun:
+    """Durable attempt identity; fixture results are never deployed observations."""
+
+    trial_id: int
+    case_id: str
+    variant: str
+    procedure_version: int
+
+    def projection(self) -> dict:
+        return dict(asdict(self), evidence_scope='synthetic_diagnostic_fixture',
+                    deployed_runtime_evidence=False)
+
+    def result_metadata(self) -> dict:
+        return dict(scope='historical_procedure_trial_result',
+                    content_provenance='cognition_trial_work_product',
+                    content_authority='synthetic_non_authoritative',
+                    procedure_trial=self.projection())
+
+    def render(self) -> str:
+        return (f'Synthetic procedure trial TRIAL{self.trial_id}; case={self.case_id}; '
+                f'variant={self.variant}; PROC{self.procedure_version}. '
+                'Fixture evidence, not an assessment of the deployed robot.')
+
+
 MAX_TRIALS_PER_JOB = 10
 TRIAL_BUDGET = {'attempts': 14, 'seconds_per_attempt': 60, 'episodes_per_attempt': 1}
 RUBRIC = {
