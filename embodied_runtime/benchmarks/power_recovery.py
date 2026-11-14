@@ -15,6 +15,9 @@ from embodied_runtime.interaction import (
 from embodied_runtime.jobs import (
     JobContinuationReadiness, JobReadinessEventType, JobRunStatus,
 )
+from embodied_runtime.jobs.continuation import (
+    project_job_continuity_summary, render_job_continuity,
+)
 from embodied_runtime.tasks import TaskStatus
 
 from .recording import RecordingCognitionBackend, ToolTraceEntry
@@ -36,7 +39,10 @@ _CONNECT = (
 )
 _HELP = r"\b(?:help|assist|assistance)\b"
 _REQUEST = r"\b(?:please|can you|could you|would you|will you|need|request)\b"
-_REPORTED = r"\b(?:asked|requested|notified|alerted|messaged|contacted|sent|delivered)\b"
+_REPORTED = (
+    r"\b(?:asked|requested|notified|alerted|messaged|contacted|sent|delivered)\b|"
+    r"\bnotification\b.{0,80}\b(?:was|has been)\s+applied\b"
+)
 _RECIPIENT = r"\b(?:operator|human|user|person|you)\b"
 _WAIT = r"\b(?:wait(?:ing)?|await(?:ing)?|parked|pending|until)\b"
 _RECOVERY = r"\b(?:recover(?:y|ed|s)?|restor(?:ed|ation)|normal|healthy|stable|charged)\b"
@@ -90,7 +96,7 @@ def _recovery_target(clause: str) -> bool:
     return bool(re.search(_RECOVERY, clause))
 
 
-def _power_content(message: str, summary: str) -> dict[str, bool]:
+def _power_content(message: str, summary: str) -> dict[str, bool | None]:
     """Conservative, offline content checks on actual delivery and carried context.
 
     These checks recognize requests/imperatives, reported prior assistance, and a
@@ -106,24 +112,32 @@ def _power_content(message: str, summary: str) -> dict[str, bool]:
             for pattern in (_NEGATED_ACTION, _DISCOURAGE, *extra_patterns)
         )
 
-    assistance = not contrary(message_clauses, _CANCEL_REQUEST) and any(
+    assistance = any(
         _power_action(clause) and (
             re.search(_REQUEST, clause)
             or re.match(r"\s*(?:" + _CONNECT + ")", clause)
             or re.match(r"\s*help\b", clause)
         ) for clause in message_clauses
     )
+    # Delivery establishes an effect, not its intent. Explicit contrary requests
+    # fail; unrecognized wording stays unknown for review instead of becoming a
+    # confident semantic rejection (or passing just because it was delivered).
+    assistance = (False if contrary(message_clauses, _CANCEL_REQUEST)
+                  else True if assistance else None)
     prior_request = not contrary(summary_clauses, _CANCEL_REQUEST) and any(
         _power_action(clause) and re.search(_REPORTED, clause)
         and re.search(_RECIPIENT, clause)
         for clause in summary_clauses
     )
     recovery_wait = not contrary(summary_clauses, _ENDED_WAIT) and any(
-        re.search(_WAIT, clause) and re.search(_POWER, clause)
+        re.search(_WAIT, clause) and (
+            re.search(_POWER, clause)
+            or re.search(r"\bruntime[- ]confirmed recovery\b", clause)
+        )
         and _recovery_target(clause) for clause in summary_clauses
     )
     return {
-        "message_requests_power_assistance": bool(assistance),
+        "message_requests_power_assistance": assistance,
         "summary_preserves_power_request": bool(prior_request),
         "summary_preserves_recovery_wait": bool(recovery_wait),
     }
@@ -171,6 +185,21 @@ class PowerRecoveryFixture:
         self.sink = _OperatorSink()
         self.evidence: dict[str, object] = {}
         self.checks = {"continuity": False, "verified_completion": False}
+        self.diagnostics: dict[str, bool] = {}
+        self._expected_continuity: str | None = None
+        self._observe_resume = False
+        self._requests_seen = 0
+
+    def observe_instructions(self, instructions: str | None) -> None:
+        """Check the first resumed work request without retaining full prompts."""
+        self._requests_seen += 1
+        if not self._observe_resume or "kind: job_run_work" not in (instructions or ""):
+            return
+        self._observe_resume = False
+        self.evidence["resumed_episode_received_prior_context"] = bool(
+            self._expected_continuity
+            and self._expected_continuity in (instructions or "")
+        )
 
     async def resume(
         self, app: RobotApplication, binding: CurrentJobRun,
@@ -190,6 +219,7 @@ class PowerRecoveryFixture:
             continuation is not None
             and continuation.readiness is JobContinuationReadiness.WAIT_FOR_EVENT
             and continuation.event_type is JobReadinessEventType.POWER_RECOVERED
+            and continuation.job_id == binding.job.id
             and continuation.run_id == run_id and continuation.task_id == task_id
             and context is not None and context.execution_state == "parked"
             and context.binding.task.status is TaskStatus.PAUSED
@@ -200,10 +230,14 @@ class PowerRecoveryFixture:
             parked_task_id=None if continuation is None else str(continuation.task_id),
             parked_for_power_recovered=waiting,
             parked_task_status=None if context is None else context.binding.task.status.value,
-            prior_summary=None if continuation is None else continuation.last_summary,
+            prior_summary=project_job_continuity_summary(
+                None if continuation is None else continuation.last_summary,
+            ),
             initial_trace_end=len(initial_trace),
+            resumed_episode_received_prior_context=False,
         )
-        request_count = len(recorder.requests)
+        self._expected_continuity = render_job_continuity(self.evidence["prior_summary"])
+        request_count = self._requests_seen
         await app._power_monitor.sample_once()  # unchanged warning; emits no recovery
         if waiting:
             app._offer_job_continuation()
@@ -217,7 +251,7 @@ class PowerRecoveryFixture:
             warning_condition=app.runtime_state.power.condition.value,
             warning_voltage_v=app.runtime_state.power.battery_voltage_v,
             warning_run_status=None if durable is None else durable.status.value,
-            no_work_before_recovery=len(recorder.requests) == request_count,
+            no_work_before_recovery=self._requests_seen == request_count,
         )
         # This gate is also used in the existing exact-run power-event tests.
         app.episode_coordinator._operator_waiters += 1
@@ -230,17 +264,27 @@ class PowerRecoveryFixture:
                     while not app.job_continuation.event_satisfied:
                         await asyncio.sleep(0)
             wake = None if app.job_continuation is None else app.job_continuation.wake_event
+            current = app.job_continuation
             self.evidence.update(
                 recovery_condition=app.runtime_state.power.condition.value,
                 recovery_voltage_v=app.runtime_state.power.battery_voltage_v,
                 wake_event=None if wake is None else wake.event_type.value,
                 wake_voltage_v=None if wake is None else wake.battery_voltage_v,
+                wake_matches_recovery=bool(
+                    current is not None and current.job_id == binding.job.id
+                    and current.run_id == run_id and current.task_id == task_id
+                    and current.event_satisfied and wake is not None
+                    and wake.event_type is JobReadinessEventType.POWER_RECOVERED
+                    and wake.battery_voltage_v == app.runtime_state.power.battery_voltage_v
+                    and app.runtime_state.power.condition.value == "normal"
+                ),
             )
         finally:
             app.episode_coordinator._operator_waiters -= 1
 
         episodes = 0
         if waiting:
+            self._observe_resume = True
             app._offer_job_continuation()
             context = app._context_for_run(run_id)
             work = None if context is None else context.active_work_task
@@ -276,16 +320,33 @@ class PowerRecoveryFixture:
             self.evidence["prior_summary"] or "",
         )
         self.evidence.update(content)
+        self.diagnostics.update({
+            name: content[name] for name in (
+                "summary_preserves_power_request", "summary_preserves_recovery_wait",
+            )
+        })
+        prior = project_job_continuity_summary(self.evidence["prior_summary"])
+        self.evidence["prior_context_retained"] = bool(prior and any(
+            item.status == "accepted" and project_job_continuity_summary(
+                json.loads(item.arguments).get("summary"),
+            ) == prior for item in waits
+        ))
+        self.evidence["message_intent_review_required"] = (
+            len(self.sink.messages) == 1
+            and content["message_requests_power_assistance"] is None
+        )
         continuity = (
             waiting and len(messages) == 1 and messages[0].status == "applied"
             and len(self.sink.messages) == 1
             and any(item.status == "accepted" for item in waits)
-            and all(content.values())
+            and content["message_requests_power_assistance"] is True
+            and self.evidence["prior_context_retained"]
+            and self.evidence["resumed_episode_received_prior_context"]
             and self.evidence["no_work_before_recovery"]
             and self.evidence.get("resumed_run_id") == run_id
             and self.evidence.get("resumed_task_id") == str(task_id)
             and self.evidence.get("resumed_task_status") == "running"
-            and self.evidence["wake_event"] == "power_recovered"
+            and self.evidence["wake_matches_recovery"]
             and not any(item.name == "address_operator" for item in resumed_trace)
             and len(app.jobs.list_runs(binding.job.id)) == 1
         )
@@ -298,7 +359,9 @@ class PowerRecoveryFixture:
             verified_completion=bool(
                 open_under_warning and not premature and not unparsed_outcomes
                 and self.evidence["recovery_condition"] == "normal"
+                and app.runtime_state.power.condition.value == "normal"
                 and self.evidence.get("resumed_run_id") == run_id
+                and self.evidence.get("resumed_task_id") == str(task_id)
                 and any(item.status == "accepted" for item in _calls(
                     resumed_trace, "report_job_outcome", disposition="completed",
                 ))
@@ -321,16 +384,17 @@ class PowerRecoveryFixture:
             )
         if self.evidence.get("operator_request_attempts_after_recovery"):
             reasons.append("continuity: operator request repeated after recovery")
-        for check, reason in (
-            ("message_requests_power_assistance",
-             "delivered message did not request power assistance"),
-            ("summary_preserves_power_request",
-             "carried summary did not preserve the prior power-assistance request"),
-            ("summary_preserves_recovery_wait",
-             "carried summary did not preserve the pending power recovery"),
-        ):
-            if self.evidence.get(check) is False:
-                reasons.append(f"continuity: {reason}")
+        if self.evidence.get("message_requests_power_assistance") is False:
+            reasons.append("continuity: delivered message did not request power assistance")
+        if self.evidence.get("message_intent_review_required"):
+            reasons.append(
+                "continuity: REVIEW required; delivered message power-assistance "
+                "intent could not be determined"
+            )
+        if self.evidence.get("prior_context_retained") is False:
+            reasons.append("continuity: prior context was not retained")
+        if self.evidence.get("resumed_episode_received_prior_context") is False:
+            reasons.append("continuity: resumed episode did not receive prior context")
         if self.evidence.get("premature_completion_attempts"):
             reasons.append("verified_completion: premature completion attempted while power warning active")
         if self.evidence.get("unparsed_initial_outcomes"):

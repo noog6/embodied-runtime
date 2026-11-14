@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from embodied_runtime.app import JOB_OUTCOME_EVALUATION_REQUEST
 from embodied_runtime.benchmarks import (
@@ -246,12 +247,14 @@ class PowerRecoveryBackend(TextCognitionBackend):
 
     def __init__(self, *, premature=False, correct=True, repeat=False,
                  notify=True, finish=True, oversized_report=False,
-                 notification="Please connect power.", summary=None):
+                 notification="Please connect power.", summary=None,
+                 event_type="power_recovered"):
         self.premature, self.correct = premature, correct
         self.repeat, self.notify, self.finish = repeat, notify, finish
         self.oversized_report = oversized_report
         self.notification = notification
         self.summary = self.summary if summary is None else summary
+        self.event_type = event_type
         self.instructions = []
         self.outcome_count = 0
         self.sent = set()
@@ -274,7 +277,7 @@ class PowerRecoveryBackend(TextCognitionBackend):
                                    and self.outcome_count == 1 and not continuing else None),
                         "progress_update": None,
                         "readiness": "wait_for_event" if continuing else None,
-                        "event_type": "power_recovered" if continuing else None,
+                        "event_type": self.event_type if continuing else None,
                         "delay_seconds": None,
                     }),
                 ))
@@ -416,9 +419,12 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence["warning_condition"], "attention")
         self.assertEqual(evidence["warning_run_status"], "running")
         self.assertTrue(evidence["no_work_before_recovery"])
+        self.assertTrue(evidence["prior_context_retained"])
+        self.assertTrue(evidence["resumed_episode_received_prior_context"])
         self.assertEqual(evidence["recovery_condition"], "normal")
         self.assertEqual(evidence["wake_event"], "power_recovered")
         self.assertEqual(evidence["wake_voltage_v"], 7.8)
+        self.assertTrue(evidence["wake_matches_recovery"])
         work = [context for message, context in backend.instructions
                 if message != JOB_OUTCOME_EVALUATION_REQUEST
                 and "kind: job_run_work" in context]
@@ -440,6 +446,10 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
                          result.scenario_checks)
         report = BenchmarkReport("fixed", POWER_RECOVERY_SCENARIO_ID, (result,), "fixed")
         self.assertIn("continuity=PASS, verified_completion=PASS", render_report(report))
+        self.assertIn("summary diagnostics (do not affect PASS/FAIL)", render_report(report))
+        self.assertIn("summary_preserves_power_request=YES", render_report(report))
+        self.assertEqual(json.loads(report.to_json())["trials"][0]["scenario_diagnostics"],
+                         result.scenario_diagnostics)
 
     async def test_power_premature_completion_fails_even_after_valid_correction(self):
         result = await run_trial(
@@ -468,10 +478,6 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             "Please note that power assistance is unnecessary.",
             "Please note that power assistance is not required.",
             "Please connect power. Keep the charger unplugged.",
-            "The power supply is low.",
-            "Please ignore the power supply.",
-            "Please check the battery charge.",
-            "Please help with unrelated work.",
         ):
             with self.subTest(notification=notification):
                 result = await run_trial(
@@ -490,7 +496,32 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("continuity: delivered message did not request power assistance",
                               result.failure_reasons)
 
-    async def test_power_summary_content_fails_independently_of_valid_message(self):
+    async def test_power_unrecognized_message_intent_requires_review(self):
+        for notification in (
+            "The power supply is low.",
+            "Please ignore the power supply.",
+            "Please check the battery charge.",
+            "Please help with unrelated work.",
+            "Could you give the robot some juice?",
+        ):
+            with self.subTest(notification=notification):
+                result = await run_trial(
+                    PowerRecoveryBackend(notification=notification), "offline", 1,
+                    scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertIsNone(result.error)
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": False, "verified_completion": True})
+                self.assertEqual(result.scenario_evidence["operator_requests_delivered"], 1)
+                self.assertIsNone(result.scenario_evidence["message_requests_power_assistance"])
+                self.assertTrue(result.scenario_evidence["message_intent_review_required"])
+                report = BenchmarkReport("fixed", POWER_RECOVERY_SCENARIO_ID, (result,), "fixed")
+                self.assertIn("REVIEW required", render_report(report))
+                self.assertIsNone(json.loads(report.to_json())["trials"][0][
+                    "scenario_evidence"]["message_requests_power_assistance"])
+
+    async def test_power_summary_content_is_diagnostic_independently_of_behavior(self):
         for summary, prior_request, recovery_wait in (
             ("Unrelated work", False, False),
             ("Waiting for power recovery.", False, True),
@@ -507,23 +538,50 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
                     scenario_id=POWER_RECOVERY_SCENARIO_ID,
                 )
                 self.assertIsNone(result.error)
-                self.assertFalse(result.passed)
+                self.assertTrue(result.passed, result.failure_reasons)
                 self.assertEqual(result.scenario_checks,
-                                 {"continuity": False, "verified_completion": True})
+                                 {"continuity": True, "verified_completion": True})
                 evidence = result.scenario_evidence
                 self.assertTrue(evidence["message_requests_power_assistance"])
                 self.assertEqual(evidence["summary_preserves_power_request"], prior_request)
                 self.assertEqual(evidence["summary_preserves_recovery_wait"], recovery_wait)
+                self.assertEqual(result.scenario_diagnostics, {
+                    "summary_preserves_power_request": prior_request,
+                    "summary_preserves_recovery_wait": recovery_wait,
+                })
+                self.assertEqual(result.failure_reasons, ())
+
+    async def test_power_reproduces_captured_summary_wording_offline(self):
+        # Captured phrases supplied from the live run, scripted through the real
+        # executor. These are reproductions, not replays of nine saved traces.
+        for summary, prior_request, recovery_wait in (
+            ("Asked the operator to connect power; Await runtime-confirmed recovery "
+             "to at least 7.7 V without repeating the request", True, True),
+            ("The operator notification to connect power was applied.", True, False),
+            ("The operator notification to connect power was applied. "
+             "Await runtime-confirmed recovery to at least 7.7 V without repeating "
+             "the request", True, True),
+            ("Power attention was reported to the operator; keep this occurrence "
+             "open until recovery is observed.", False, False),
+        ):
+            with self.subTest(summary=summary):
+                result = await run_trial(
+                    PowerRecoveryBackend(summary=summary), "scripted-captured-wording", 1,
+                    scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertTrue(result.passed, (result.failure_reasons, result.error))
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": True, "verified_completion": True})
+                self.assertEqual(result.scenario_diagnostics, {
+                    "summary_preserves_power_request": prior_request,
+                    "summary_preserves_recovery_wait": recovery_wait,
+                })
+                self.assertTrue(result.scenario_evidence["prior_context_retained"])
+                self.assertTrue(result.scenario_evidence["resumed_episode_received_prior_context"])
+                report = BenchmarkReport("fixed", POWER_RECOVERY_SCENARIO_ID, (result,), "fixed")
+                self.assertIn("PASS 1/1", render_report(report))
                 if not prior_request:
-                    self.assertIn(
-                        "continuity: carried summary did not preserve the prior power-assistance request",
-                        result.failure_reasons,
-                    )
-                if not recovery_wait:
-                    self.assertIn(
-                        "continuity: carried summary did not preserve the pending power recovery",
-                        result.failure_reasons,
-                    )
+                    self.assertIn("summary_preserves_power_request=NO", render_report(report))
 
     async def test_power_rejects_review_reproduction_despite_runtime_recovery(self):
         result = await run_trial(
@@ -554,10 +612,11 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.scenario_checks,
                                  {"continuity": False, "verified_completion": True})
                 self.assertFalse(result.scenario_evidence["message_requests_power_assistance"])
+                self.assertFalse(result.scenario_evidence["message_intent_review_required"])
                 self.assertTrue(result.scenario_evidence["summary_preserves_power_request"])
                 self.assertTrue(result.scenario_evidence["summary_preserves_recovery_wait"])
 
-    async def test_power_rejects_ended_wait_despite_recovery(self):
+    async def test_power_ended_summary_wait_remains_a_negative_diagnostic(self):
         for ending in (
             "no longer waiting for power recovery",
             "stopped awaiting power recovery",
@@ -570,12 +629,13 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
                     ), "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
                 )
                 self.assertIsNone(result.error)
-                self.assertFalse(result.passed)
+                self.assertTrue(result.passed, result.failure_reasons)
                 self.assertEqual(result.scenario_checks,
-                                 {"continuity": False, "verified_completion": True})
+                                 {"continuity": True, "verified_completion": True})
                 self.assertTrue(result.scenario_evidence["message_requests_power_assistance"])
                 self.assertTrue(result.scenario_evidence["summary_preserves_power_request"])
                 self.assertFalse(result.scenario_evidence["summary_preserves_recovery_wait"])
+                self.assertFalse(result.scenario_diagnostics["summary_preserves_recovery_wait"])
 
     async def test_power_accepts_wait_for_configured_recovery_voltage(self):
         for threshold in ("7.7 V", "7.70 volts"):
@@ -601,10 +661,55 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
                     )), "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
                 )
                 self.assertIsNone(result.error)
-                self.assertFalse(result.passed)
+                self.assertTrue(result.passed, result.failure_reasons)
                 self.assertEqual(result.scenario_checks,
-                                 {"continuity": False, "verified_completion": True})
+                                 {"continuity": True, "verified_completion": True})
                 self.assertFalse(result.scenario_evidence["summary_preserves_recovery_wait"])
+
+    async def test_power_incorrect_event_wait_fails_behaviorally(self):
+        result = await run_trial(
+            PowerRecoveryBackend(event_type="presence_changed"), "offline", 1,
+            scenario_id=POWER_RECOVERY_SCENARIO_ID,
+        )
+        self.assertFalse(result.passed)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.scenario_checks,
+                         {"continuity": False, "verified_completion": False})
+        self.assertFalse(result.scenario_evidence["parked_for_power_recovered"])
+        self.assertEqual(result.metrics.job_work_episodes, 1)
+        wait = next(item for item in result.tool_trace if item.name == "report_job_outcome")
+        self.assertEqual(wait.status, "rejected")
+        self.assertEqual(json.loads(wait.arguments)["event_type"], "presence_changed")
+
+    async def test_power_uses_the_bounded_context_actually_carried(self):
+        summary = "Historical context. " * 40 + PowerRecoveryBackend.summary
+        result = await run_trial(
+            PowerRecoveryBackend(summary=summary), "offline", 1,
+            scenario_id=POWER_RECOVERY_SCENARIO_ID,
+        )
+        self.assertTrue(result.passed, (result.failure_reasons, result.error))
+        self.assertEqual(result.scenario_evidence["prior_summary"], summary[:750])
+        self.assertTrue(result.scenario_evidence["prior_context_retained"])
+        self.assertTrue(result.scenario_evidence["resumed_episode_received_prior_context"])
+        self.assertEqual(result.scenario_diagnostics, {
+            "summary_preserves_power_request": False,
+            "summary_preserves_recovery_wait": False,
+        })
+
+    async def test_power_requires_prior_context_in_the_resumed_episode(self):
+        with patch("embodied_runtime.app.render_job_continuity", return_value=None):
+            result = await run_trial(
+                PowerRecoveryBackend(), "offline", 1,
+                scenario_id=POWER_RECOVERY_SCENARIO_ID,
+            )
+        self.assertFalse(result.passed)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.scenario_checks,
+                         {"continuity": False, "verified_completion": True})
+        self.assertTrue(result.scenario_evidence["prior_context_retained"])
+        self.assertFalse(result.scenario_evidence["resumed_episode_received_prior_context"])
+        self.assertIn("continuity: resumed episode did not receive prior context",
+                      result.failure_reasons)
 
     async def test_power_content_accepts_paraphrased_assistance_and_continuity(self):
         for notification, summary in (

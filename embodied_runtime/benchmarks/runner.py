@@ -128,8 +128,10 @@ async def run_trial(
     """Run one entirely fresh trial; the application owns and closes both stores."""
     scenario = get_scenario(scenario_id)
     started = perf_counter()
-    recorder = RecordingCognitionBackend(backend)
     power = PowerRecoveryFixture() if scenario_id == POWER_RECOVERY_SCENARIO_ID else None
+    recorder = RecordingCognitionBackend(
+        backend, instructions_observer=None if power is None else power.observe_instructions,
+    )
     heartbeat = _Heartbeat()
     app: RobotApplication | None = None
     status = disposition = continuation_state = None
@@ -344,6 +346,7 @@ async def run_trial(
         provider_calls=tuple(calls), failure_category=failure_category, **scenario_cost,
         scenario_checks={} if power is None else power.checks,
         scenario_evidence={} if power is None else power.evidence,
+        scenario_diagnostics={} if power is None else power.diagnostics,
     )
 
 
@@ -417,6 +420,11 @@ def render_report(report: BenchmarkReport) -> str:
                 lines.append("  checks: " + ", ".join(
                     f"{name}={'PASS' if passed else 'FAIL'}"
                     for name, passed in trial.scenario_checks.items()
+                ))
+            if trial.scenario_diagnostics:
+                lines.append("  summary diagnostics (do not affect PASS/FAIL): " + ", ".join(
+                    f"{name}={'YES' if value else 'NO'}"
+                    for name, value in trial.scenario_diagnostics.items()
                 ))
         lines.append(_total_label("model", trials))
         failures = [trial for trial in trials if not trial.passed]

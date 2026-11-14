@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 from time import perf_counter
 from typing import Any
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from embodied_runtime.attachments import ImageAttachment
 from embodied_runtime.cognition.base import (
@@ -60,12 +60,16 @@ class CognitionRequestRecord:
 class RecordingCognitionBackend(TextCognitionBackend):
     """Delegate every operation and observe calls through the supplied executor."""
 
-    def __init__(self, delegate: TextCognitionBackend) -> None:
+    def __init__(
+        self, delegate: TextCognitionBackend, *,
+        instructions_observer: Callable[[str | None], None] | None = None,
+    ) -> None:
         self.delegate = delegate
         self.identifier = f"recording:{delegate.identifier}"
         self.supports_image_input = delegate.supports_image_input
         self.requests: list[CognitionRequestRecord] = []
         self.tool_trace: list[ToolTraceEntry] = []
+        self._instructions_observer = instructions_observer
 
     @property
     def model(self) -> str | None:
@@ -102,6 +106,8 @@ class RecordingCognitionBackend(TextCognitionBackend):
         refreshed_instructions: InstructionsProvider | None = None,
         image_attachments: Sequence[ImageAttachment] = (),
     ) -> str:
+        if self._instructions_observer is not None:
+            self._instructions_observer(instructions)
         ordinal = len(self.requests) + 1
         started = perf_counter()
 
