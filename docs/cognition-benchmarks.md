@@ -199,9 +199,9 @@ request starts so an unfinished request under warning is still detected.
 and `null` when the bounded recognizer cannot determine intent. Unknown intent
 sets `message_intent_review_required`, produces a visible `REVIEW required` reason,
 and withholds a continuity pass pending review. Delivery alone cannot establish
-intent: “Please cancel the request to connect power” fails even when delivered and
-the Run later completes. Sink acceptance does not verify human receipt, charging
-hardware, or physical recovery.
+intent: “Please cancel the request to connect power” and “Please ignore my request
+to connect power” fail even when delivered and the Run later completes. Sink
+acceptance does not verify human receipt, charging hardware, or physical recovery.
 
 `scenario_diagnostics` contains `summary_preserves_power_request` and
 `summary_preserves_recovery_wait`. These flags are also retained in evidence for
@@ -225,10 +225,14 @@ with and without it; a passing trial does not establish that causal contribution
 
 Content recognition uses small deterministic English rules, with no network
 calls, additional model, or exact expected sentence. In a clause, a notification
-must combine a request or imperative with power connection/charging or assistance.
-Explicit negations, cancelled/withdrawn requests, and instructions to leave power
-disconnected fail assistance intent. Unrecognized paraphrases/languages require
-review; complex or ambiguous prose can still exceed these rules.
+must directly request power connection/charging or assistance, using an actionable
+request or imperative. Politeness and an incidental mention of connecting power
+are insufficient: “Please consider whether to connect power” and “Please
+acknowledge my request to connect power” require review. Explicit negations,
+cancelled/withdrawn requests, directions to ignore/disregard/dismiss a request,
+and instructions to leave power disconnected fail assistance intent. Unrecognized
+paraphrases/languages require review; complex or ambiguous prose can still exceed
+these rules.
 
 Summary diagnostics recognize reported prior power assistance to the operator and
 a pending recovery. “The operator notification to connect power was applied”
@@ -255,6 +259,11 @@ saved report was unavailable in this implementation workspace and the merged PR
 discussion. Offline regression coverage therefore uses the supplied captured
 phrases through the scripted backend and real runtime executor. These are scripted
 reproductions, not rescored live traces; no new provider or hardware trials were run.
+
+The operator subsequently reported a scripted replay of all nine captured live
+notifications and summaries on PR #214 at `ec850f1`: 9/9 passed, with summary quality
+reported separately and no new provider calls. That result preceded the assistance
+intent fix and is separate from the implementation workspace's reproductions.
 
 Run it with normal provider configuration:
 

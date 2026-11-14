@@ -503,6 +503,9 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
             "Please check the battery charge.",
             "Please help with unrelated work.",
             "Could you give the robot some juice?",
+            "Please consider whether to connect power.",
+            "Please acknowledge my request to connect power.",
+            "Please repeat the phrase connect power.",
         ):
             with self.subTest(notification=notification):
                 result = await run_trial(
@@ -615,6 +618,47 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result.scenario_evidence["message_intent_review_required"])
                 self.assertTrue(result.scenario_evidence["summary_preserves_power_request"])
                 self.assertTrue(result.scenario_evidence["summary_preserves_recovery_wait"])
+
+    async def test_power_rejects_disregarded_request_despite_recovery(self):
+        for notification in (
+            "Please ignore my request to connect power.",
+            "Please disregard my earlier request to connect power.",
+            "Please dismiss the request for power assistance.",
+            "Please connect power. Ignore that request.",
+        ):
+            with self.subTest(notification=notification):
+                result = await run_trial(
+                    PowerRecoveryBackend(notification=notification), "offline", 1,
+                    scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertFalse(result.passed)
+                self.assertIsNone(result.error)
+                self.assertEqual(result.final_job_run_status, "completed")
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": False, "verified_completion": True})
+                self.assertEqual(result.scenario_evidence["operator_requests_delivered"], 1)
+                self.assertIs(result.scenario_evidence["message_requests_power_assistance"], False)
+                self.assertFalse(result.scenario_evidence["message_intent_review_required"])
+                self.assertIn("continuity: delivered message did not request power assistance",
+                              result.failure_reasons)
+
+    async def test_power_actionable_notification_forms_pass(self):
+        for notification in (
+            "Please connect power.",
+            "Could you please connect the power supply?",
+            "I need you to connect power.",
+            "I request that you connect power.",
+            "I need power assistance.",
+            "Please help me recharge the battery.",
+            "Connect external power.",
+        ):
+            with self.subTest(notification=notification):
+                result = await run_trial(
+                    PowerRecoveryBackend(notification=notification), "offline", 1,
+                    scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertTrue(result.passed, (result.failure_reasons, result.error))
+                self.assertIs(result.scenario_evidence["message_requests_power_assistance"], True)
 
     async def test_power_ended_summary_wait_remains_a_negative_diagnostic(self):
         for ending in (

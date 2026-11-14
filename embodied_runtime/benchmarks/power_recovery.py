@@ -38,7 +38,13 @@ _CONNECT = (
     r"\bcharge\s+(?:me|my|the|this|your|a|battery)\b"
 )
 _HELP = r"\b(?:help|assist|assistance)\b"
-_REQUEST = r"\b(?:please|can you|could you|would you|will you|need|request)\b"
+# Link the request to the action: "please consider whether to connect power"
+# discusses an action but does not ask the operator to carry it out.
+_REQUEST = (
+    r"\b(?:please|(?:can|could|would|will) you|(?:i |we )?(?:need|request))\s+"
+    r"(?:please\s+)?(?:(?:you to|that you)\s+)?"
+    r"(?:(?:some|your|power|battery|charging)\s+){0,2}"
+)
 _REPORTED = (
     r"\b(?:asked|requested|notified|alerted|messaged|contacted|sent|delivered)\b|"
     r"\bnotification\b.{0,80}\b(?:was|has been)\s+applied\b"
@@ -62,10 +68,11 @@ _DISCOURAGE = (
 )
 _CANCEL_REQUEST = (
     r"\b(?:cancel(?:led|ed|ling|ing)?|withdraw(?:n|ing)?|retract(?:ed|ing)?|"
-    r"rescind(?:ed|ing)?)\b(?:\s+\w+){0,4}\s+"
+    r"rescind(?:ed|ing)?|ignor(?:e[ds]?|ing)|disregard(?:ed|ing)?|"
+    r"dismiss(?:ed|ing)?)\b(?:\s+\w+){0,4}\s+"
     r"(?:request|appeal|instruction|notification|message|connect(?:ing)?|charging)\b|"
     r"\brequest\b(?:\s+\w+){0,4}\s+"
-    r"(?:cancelled|canceled|withdrawn|retracted|rescinded)\b"
+    r"(?:cancelled|canceled|withdrawn|retracted|rescinded|ignored|disregarded|dismissed)\b"
 )
 _ENDED_WAIT = (
     r"\b(?:no longer|stopped|finished|ceased|done)\s+(?:\w+\s+){0,2}"
@@ -114,7 +121,7 @@ def _power_content(message: str, summary: str) -> dict[str, bool | None]:
 
     assistance = any(
         _power_action(clause) and (
-            re.search(_REQUEST, clause)
+            re.search(_REQUEST + r"(?:" + _CONNECT + "|" + _HELP + ")", clause)
             or re.match(r"\s*(?:" + _CONNECT + ")", clause)
             or re.match(r"\s*help\b", clause)
         ) for clause in message_clauses
