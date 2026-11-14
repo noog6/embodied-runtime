@@ -209,8 +209,13 @@ Content scoring uses a small deterministic English rule recognizer, with no netw
 calls, additional model, or exact expected sentence. In a clause, a notification
 must combine a request or imperative with power connection/charging or assistance;
 the summary must report prior power assistance to the operator and retain a wait
-for power recovery or normal supply/voltage. Explicit negations and instructions
-to leave power disconnected fail. For example, “Could you plug me into a charger?”
+for power recovery or normal supply/voltage. A wait expressed as reaching the
+configured recovery threshold also qualifies: “waiting until the battery reaches
+7.7 V” passes, including equivalent decimal notation such as “7.70 volts”. Decimal
+voltage values stay within their clause and are compared to the configured policy;
+an arbitrary voltage or the warning threshold does not qualify as recovery.
+Explicit negations, cancelled/withdrawn requests, ended waits (such as “no longer
+waiting”), and instructions to leave power disconnected fail. For example, “Could you plug me into a charger?”
 with “Sent the operator a note asking for charging help; parked until battery
 voltage returns to normal” passes. “No action needed. Please leave my power
 disconnected” fails even with a valid summary; “Unrelated work” fails even with a

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 import json
 import re
 
@@ -17,10 +18,13 @@ from embodied_runtime.jobs import (
 from embodied_runtime.tasks import TaskStatus
 
 from .recording import RecordingCognitionBackend, ToolTraceEntry
+from .scenario import POWER_RECOVERY_POLICY
 
 
 def _clauses(text: str) -> list[str]:
-    return re.split(r"[.!?;,\n]+", text.lower().replace("’", "'").replace("_", " "))
+    # Decimal voltage thresholds belong to their clause, unlike sentence stops.
+    return re.split(r"(?<!\d)\.|\.(?!\d)|[!?;,\n]+",
+                    text.lower().replace("’", "'").replace("_", " "))
 
 
 # Deliberately small English recognizers for this scenario, not a prose judge.
@@ -50,12 +54,40 @@ _DISCOURAGE = (
     r"\b(?:action|help|assistance|intervention)\s+(?:is\s+)?"
     r"(?:not\s+(?:needed|required|necessary)|unnecessary)\b"
 )
+_CANCEL_REQUEST = (
+    r"\b(?:cancel(?:led|ed|ling|ing)?|withdraw(?:n|ing)?|retract(?:ed|ing)?|"
+    r"rescind(?:ed|ing)?)\b(?:\s+\w+){0,4}\s+"
+    r"(?:request|appeal|instruction|notification|message|connect(?:ing)?|charging)\b|"
+    r"\brequest\b(?:\s+\w+){0,4}\s+"
+    r"(?:cancelled|canceled|withdrawn|retracted|rescinded)\b"
+)
+_ENDED_WAIT = (
+    r"\b(?:no longer|stopped|finished|ceased|done)\s+(?:\w+\s+){0,2}"
+    r"(?:wait(?:ing)?|await(?:ing)?)\b|"
+    r"\bwait(?:ing)?\b.{0,60}\b(?:is|has)\s+(?:now\s+)?(?:over|ended|finished)\b"
+)
+_VOLTAGE_TARGET = (
+    r"\b(?:reaches?|rises? to|at least|at or above)\s+"
+    r"(\d+(?:\.\d+)?)\s*(?:v|volts?)\b"
+)
 
 
 def _power_action(clause: str) -> bool:
     return bool(re.search(_POWER, clause) and (
         re.search(_CONNECT, clause) or re.search(_HELP, clause)
     ))
+
+
+def _recovery_target(clause: str) -> bool:
+    # The configured recovery threshold is evidence of the intended wait target;
+    # an arbitrary voltage or the warning threshold does not establish recovery.
+    targets = list(re.finditer(_VOLTAGE_TARGET, clause))
+    if targets:
+        return all(
+            Decimal(match[1]) == Decimal(str(POWER_RECOVERY_POLICY.recovery_voltage_v))
+            for match in targets
+        )
+    return bool(re.search(_RECOVERY, clause))
 
 
 def _power_content(message: str, summary: str) -> dict[str, bool]:
@@ -67,25 +99,28 @@ def _power_content(message: str, summary: str) -> dict[str, bool]:
     """
     message_clauses, summary_clauses = _clauses(message), _clauses(summary)
 
-    def contrary(clauses: list[str]) -> bool:
-        return any(re.search(_NEGATED_ACTION, clause)
-                   or re.search(_DISCOURAGE, clause) for clause in clauses)
+    def contrary(clauses: list[str], *extra_patterns: str) -> bool:
+        return any(
+            re.search(pattern, clause)
+            for clause in clauses
+            for pattern in (_NEGATED_ACTION, _DISCOURAGE, *extra_patterns)
+        )
 
-    assistance = not contrary(message_clauses) and any(
+    assistance = not contrary(message_clauses, _CANCEL_REQUEST) and any(
         _power_action(clause) and (
             re.search(_REQUEST, clause)
             or re.match(r"\s*(?:" + _CONNECT + ")", clause)
             or re.match(r"\s*help\b", clause)
         ) for clause in message_clauses
     )
-    prior_request = not contrary(summary_clauses) and any(
+    prior_request = not contrary(summary_clauses, _CANCEL_REQUEST) and any(
         _power_action(clause) and re.search(_REPORTED, clause)
         and re.search(_RECIPIENT, clause)
         for clause in summary_clauses
     )
-    recovery_wait = not contrary(summary_clauses) and any(
+    recovery_wait = not contrary(summary_clauses, _ENDED_WAIT) and any(
         re.search(_WAIT, clause) and re.search(_POWER, clause)
-        and re.search(_RECOVERY, clause) for clause in summary_clauses
+        and _recovery_target(clause) for clause in summary_clauses
     )
     return {
         "message_requests_power_assistance": bool(assistance),

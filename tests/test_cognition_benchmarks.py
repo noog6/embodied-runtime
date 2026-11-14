@@ -538,6 +538,74 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.scenario_checks,
                          {"continuity": False, "verified_completion": True})
 
+    async def test_power_rejects_cancelled_request_despite_recovery(self):
+        for notification in (
+            "Please cancel the request to connect power.",
+            "Please withdraw the request for power assistance.",
+            "Please connect power. Cancel that request.",
+        ):
+            with self.subTest(notification=notification):
+                result = await run_trial(
+                    PowerRecoveryBackend(notification=notification), "offline", 1,
+                    scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertIsNone(result.error)
+                self.assertFalse(result.passed)
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": False, "verified_completion": True})
+                self.assertFalse(result.scenario_evidence["message_requests_power_assistance"])
+                self.assertTrue(result.scenario_evidence["summary_preserves_power_request"])
+                self.assertTrue(result.scenario_evidence["summary_preserves_recovery_wait"])
+
+    async def test_power_rejects_ended_wait_despite_recovery(self):
+        for ending in (
+            "no longer waiting for power recovery",
+            "stopped awaiting power recovery",
+            "the wait for power recovery is over",
+        ):
+            with self.subTest(ending=ending):
+                result = await run_trial(
+                    PowerRecoveryBackend(
+                        summary=f"Asked the operator to connect power; {ending}.",
+                    ), "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertIsNone(result.error)
+                self.assertFalse(result.passed)
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": False, "verified_completion": True})
+                self.assertTrue(result.scenario_evidence["message_requests_power_assistance"])
+                self.assertTrue(result.scenario_evidence["summary_preserves_power_request"])
+                self.assertFalse(result.scenario_evidence["summary_preserves_recovery_wait"])
+
+    async def test_power_accepts_wait_for_configured_recovery_voltage(self):
+        for threshold in ("7.7 V", "7.70 volts"):
+            with self.subTest(threshold=threshold):
+                result = await run_trial(
+                    PowerRecoveryBackend(summary=(
+                        "Asked the operator to connect power; "
+                        f"waiting until the battery reaches {threshold}."
+                    )), "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertTrue(result.passed, (result.failure_reasons, result.error))
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": True, "verified_completion": True})
+                self.assertTrue(result.scenario_evidence["summary_preserves_recovery_wait"])
+
+    async def test_power_voltage_wait_requires_recovery_threshold_and_direction(self):
+        for condition in ("reaches 7.4 V", "drops to 7.7 V", "reaches 7.0 V"):
+            with self.subTest(condition=condition):
+                result = await run_trial(
+                    PowerRecoveryBackend(summary=(
+                        "Asked the operator to connect power; "
+                        f"waiting until the battery {condition}."
+                    )), "offline", 1, scenario_id=POWER_RECOVERY_SCENARIO_ID,
+                )
+                self.assertIsNone(result.error)
+                self.assertFalse(result.passed)
+                self.assertEqual(result.scenario_checks,
+                                 {"continuity": False, "verified_completion": True})
+                self.assertFalse(result.scenario_evidence["summary_preserves_recovery_wait"])
+
     async def test_power_content_accepts_paraphrased_assistance_and_continuity(self):
         for notification, summary in (
             ("Could you plug me into a charger?",
