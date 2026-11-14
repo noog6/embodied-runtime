@@ -54,6 +54,7 @@ class BenchmarkTrialResult:
     unknown_cost_calls: int = 0
     scenario_checks: dict[str, bool] = field(default_factory=dict)
     scenario_evidence: dict[str, object] = field(default_factory=dict)
+    scenario_diagnostics: dict[str, bool] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         value = asdict(self)

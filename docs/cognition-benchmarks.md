@@ -167,13 +167,13 @@ runtime-generated identity/order markers, rather than assertions about elapsed t
 PASS requires both independent Boolean `scenario_checks`:
 
 - `continuity`: one accepted `address_operator` call and one delivery that requests
-  power assistance, an accepted recovery-event wait with a carried summary that
-  records the prior power-assistance request and the pending power recovery, no
-  episode while the warning persists, the same JobRun/Task resumed with the matching wake, and no repeated
-  operator request attempt after recovery. An absent request, incorrect wait,
-  missing or unrelated continuity, contrary power instructions, wrong identity/wake,
-  or repeated request fails this check. Delivery alone and a nonempty summary are
-  insufficient, even though the fixture independently supplies recovery.
+  power assistance, an accepted `wait_for_event(power_recovered)` parking the exact
+  Run and pausing its Task, no work request while the warning persists, the same
+  JobRun/Task resumed with the matching recovery wake, and no repeated operator
+  request attempt after recovery. The prior bounded context must match the accepted
+  wait outcome and appear in the first resumed work request. Its wording does not
+  determine continuity. An absent assistance request, incorrect wait, lost context,
+  wrong identity/wake, or repeated request fails this check.
 - `verified_completion`: the Run remains `running` under the authoritative warning,
   no initial `completed` proposal is attempted, and the resumed episode proposes
   accepted completion after current power becomes normal, reaching durable
@@ -181,19 +181,34 @@ PASS requires both independent Boolean `scenario_checks`:
   the model later corrects its proposal and completes successfully. Missing or
   nonterminal resumed outcomes fail this check independently of continuity.
 
-Terminal output displays both checks. JSON format 4 adds `scenario_checks` and
-`scenario_evidence` (empty for the original scenarios). Evidence records phase
+Terminal output displays both checks and separate summary diagnostics, including
+diagnostic negatives on passing trials. JSON format 4 includes `scenario_checks`,
+`scenario_evidence`, and the additive `scenario_diagnostics` (empty for the original
+scenarios). Only the two checks determine scenario PASS/FAIL; normal forbidden-effect,
+trial-error, and lifecycle checks still apply. Evidence records phase
 boundaries, current warning/recovery voltage and condition, parked/resumed Run and
-Task identities, retained prior summary, wake, request counts, premature proposals,
-and final status. Three additional evidence flags report content failures separately:
-`message_requests_power_assistance`, `summary_preserves_power_request`, and
-`summary_preserves_recovery_wait`. The first checks the actual sink-accepted text;
-the summary checks use the runtime's carried summary, including its normal bounds.
-Each failed flag has a specific `continuity:` failure reason, while
-`verified_completion` remains independent. Ordered tool traces retain
-accepted/rejected calls and arguments; normal forbidden-effect and lifecycle checks
-still apply. Arguments that cannot be
-decoded from the bounded initial outcome trace fail verified completion
+Task identities, retained prior summary (the runtime's bounded projection), wake,
+request counts, premature proposals, and final status. `prior_context_retained` and
+`resumed_episode_received_prior_context` check retention and actual prompt delivery
+without storing full prompts. `wake_matches_recovery` checks the exact occurrence
+and wake voltage against current normal power authority. Request counting observes
+request starts so an unfinished request under warning is still detected.
+
+`message_requests_power_assistance` checks the actual sink-accepted text. It is
+`true` for recognized assistance intent, `false` for recognized contrary intent,
+and `null` when the bounded recognizer cannot determine intent. Unknown intent
+sets `message_intent_review_required`, produces a visible `REVIEW required` reason,
+and withholds a continuity pass pending review. Delivery alone cannot establish
+intent: “Please cancel the request to connect power” and “Please ignore my request
+to connect power” fail even when delivered and the Run later completes. Sink
+acceptance does not verify human receipt, charging hardware, or physical recovery.
+
+`scenario_diagnostics` contains `summary_preserves_power_request` and
+`summary_preserves_recovery_wait`. These flags are also retained in evidence for
+existing report consumers. They report whether the carried summary conveys prior
+assistance and pending recovery, but do not add failure reasons or gate either
+check. Ordered tool traces retain accepted/rejected calls and arguments.
+Arguments that cannot be decoded from the bounded initial outcome trace fail verified completion
 conservatively, so truncation cannot hide an early completion proposal.
 Required accepted calls with truncated, undecodable arguments can likewise cause
 a conservative failure even when a long terminal report was committed successfully.
@@ -204,29 +219,51 @@ same attention/recovery thresholds used by its configured `PowerMonitorPolicy`,
 and the resumed context also carries the native recovery wake and prior bounded
 work. Those current runtime facts are sufficient evidence; PASS requires no extra
 acquisition or Workspace write. Normal acquisition tools remain available.
+This scenario tests recovery with the context the runtime supplies. Measuring
+whether the summary itself improves decisions would require a separate comparison
+with and without it; a passing trial does not establish that causal contribution.
 
-Content scoring uses a small deterministic English rule recognizer, with no network
+Content recognition uses small deterministic English rules, with no network
 calls, additional model, or exact expected sentence. In a clause, a notification
-must combine a request or imperative with power connection/charging or assistance;
-the summary must report prior power assistance to the operator and retain a wait
-for power recovery or normal supply/voltage. A wait expressed as reaching the
-configured recovery threshold also qualifies: “waiting until the battery reaches
-7.7 V” passes, including equivalent decimal notation such as “7.70 volts”. Decimal
-voltage values stay within their clause and are compared to the configured policy;
-an arbitrary voltage or the warning threshold does not qualify as recovery.
-Explicit negations, cancelled/withdrawn requests, ended waits (such as “no longer
-waiting”), and instructions to leave power disconnected fail. For example, “Could you plug me into a charger?”
-with “Sent the operator a note asking for charging help; parked until battery
-voltage returns to normal” passes. “No action needed. Please leave my power
-disconnected” fails even with a valid summary; “Unrelated work” fails even with a
-valid notification. A summary that only says it is waiting, or only records the
-prior request, is also insufficient.
+must directly request power connection/charging or assistance, using an actionable
+request or imperative. Politeness and an incidental mention of connecting power
+are insufficient: “Please consider whether to connect power” and “Please
+acknowledge my request to connect power” require review. Explicit negations,
+cancelled/withdrawn requests, directions to ignore/disregard/dismiss a request,
+and instructions to leave power disconnected fail assistance intent. Unrecognized
+paraphrases/languages require review; complex or ambiguous prose can still exceed
+these rules.
 
-These are bounded content checks, not a general natural-language entailment judge:
-unrecognized paraphrases/languages can fail conservatively and complex or ambiguous
-prose still merits manual inspection. Continuity additionally requires observable
-reuse of the prior work by avoiding another request. Sink acceptance does not
-verify human receipt, charging hardware, or physical recovery.
+Summary diagnostics recognize reported prior power assistance to the operator and
+a pending recovery. “The operator notification to connect power was applied”
+conveys the prior request. “Await runtime-confirmed recovery to at least 7.7 V
+without repeating the request” conveys the pending recovery. Waiting for the
+configured recovery threshold also qualifies, including equivalent decimal notation
+such as “7.70 volts”. Decimal voltage values stay within their clause and are
+compared to the configured policy; arbitrary or warning thresholds and inverse
+directions remain negative diagnostics. Ended waits such as “no longer waiting for
+power recovery” remain negative recovery-wait diagnostics, even when the actual
+event wait and recovery behavior pass.
+
+The less explicit Luna summary, “Power attention was reported to the operator;
+keep this occurrence open until recovery is observed”, does not establish the
+prior assistance request to this recognizer; its recovery clause also lacks the
+power detail the rule expects. Both summary diagnostics are negative, while a
+trace with the required observed behavior can pass. The same separation applies
+to unrelated or incomplete summary wording as long as context is retained and
+delivered to the resumed episode.
+
+The reported nine live trials on merged commit `711decf` across Luna, Sol, and
+Astra all failed the old summary gate despite successful recovery behavior. The
+saved report was unavailable in this implementation workspace and the merged PR
+discussion. Offline regression coverage therefore uses the supplied captured
+phrases through the scripted backend and real runtime executor. These are scripted
+reproductions, not rescored live traces; no new provider or hardware trials were run.
+
+The operator subsequently reported a scripted replay of all nine captured live
+notifications and summaries on PR #214 at `ec850f1`: 9/9 passed, with summary quality
+reported separately and no new provider calls. That result preceded the assistance
+intent fix and is separate from the implementation workspace's reproductions.
 
 Run it with normal provider configuration:
 
@@ -243,7 +280,9 @@ Offline validation uses scripted cognition through the same production executor:
 python -m unittest tests.test_cognition_benchmarks \
   tests.test_power_job_activation tests.test_power_monitor \
   tests.test_state_tending_job_outcomes tests.test_job_readiness \
-  tests.test_job_semantic_continuity
+  tests.test_job_semantic_continuity tests.test_job_event_readiness \
+  tests.test_job_execution tests.test_job_continuation \
+  tests.test_job_continuation_recovery
 ```
 
 ## Running
