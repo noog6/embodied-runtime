@@ -1,14 +1,16 @@
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from embodied_runtime.jobs import (
     MAX_RUN_REPORT_CHARS, InvalidJobRunTransitionError, JobRunStatus, JobTarget,
     SQLiteJobStore,
 )
-from embodied_runtime.jobs.model import MAX_JOB_DESCRIPTION_CHARS
+from embodied_runtime.jobs.model import MAX_JOB_DESCRIPTION_CHARS, MAX_JOB_NAME_CHARS
 
 
 class Clock:
@@ -87,6 +89,66 @@ class SQLiteJobStoreTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.store.set_job_description(999, "Nothing")
         self.assertEqual(self.store.get_job(original.id), original)
+
+    def test_definition_update_returns_persisted_snapshot_with_existing_flags(self):
+        experiment = self.store.create_procedure_experiment()
+        original = self.store.set_carry_forward_enabled(experiment.id, True)
+        self.assertTrue(original.carry_forward_enabled)
+        self.assertTrue(original.procedure_enabled)
+        self.assertTrue(original.procedure_experiment)
+        original_definition = self.store.focus_definition_identity(original.id)
+
+        renamed = self.store.update_job_definition(original.id, name="  Check my embodiment  ")
+        self.assertEqual(renamed, replace(original, name="Check my embodiment",
+                                          updated_at=original.updated_at + timedelta(seconds=1)))
+        self.assertEqual(renamed, self.store.get_job(original.id))
+        self.assertNotEqual(self.store.focus_definition_identity(original.id), original_definition)
+
+        revised = self.store.set_job_description(original.id, "  Inspect the body.  ")
+        self.assertEqual(revised, replace(renamed, description="Inspect the body.",
+                                          updated_at=renamed.updated_at + timedelta(seconds=1)))
+        self.assertEqual(revised, self.store.get_job(original.id))
+
+        updated = self.store.update_job_definition(
+            original.id, description="", name="Check the runtime"
+        )
+        self.assertEqual(updated, replace(revised, name="Check the runtime", description="",
+                                          updated_at=revised.updated_at + timedelta(seconds=1)))
+        self.assertEqual(updated, self.store.get_job(original.id))
+
+    def test_definition_update_validates_every_field_before_writing(self):
+        original = self.store.create_job("Review logs", "Keep this")
+        for name, description, error in (
+            ("   ", "Would change", "name must not be empty"),
+            ("x" * (MAX_JOB_NAME_CHARS + 1), "Would change", "name must be at most"),
+            ("Would change", "x" * (MAX_JOB_DESCRIPTION_CHARS + 1), "description must be at most"),
+        ):
+            with self.subTest(error=error):
+                with self.assertRaisesRegex(ValueError, error):
+                    self.store.update_job_definition(original.id, description=description, name=name)
+                self.assertEqual(self.store.get_job(original.id), original)
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            self.store.update_job_definition(original.id)
+        self.assertEqual(self.store.get_job(original.id), original)
+
+    def test_independent_definition_updates_preserve_each_others_fields(self):
+        original = self.store.create_job("Review logs", "Original instructions")
+        with SQLiteJobStore(self.path, clock=self.clock) as second_store:
+            for changes, concurrent_changes in (
+                ({"name": "Review the runtime"}, {"description": "Inspect the runtime."}),
+                ({"description": "Inspect the body."}, {"name": "Review the body"}),
+            ):
+                with self.subTest(changes=changes):
+                    def update_other_field_then_get_time():
+                        second_store.update_job_definition(original.id, **concurrent_changes)
+                        return self.clock()
+
+                    with patch.object(self.store, "_clock", side_effect=update_other_field_then_get_time):
+                        updated = self.store.update_job_definition(original.id, **changes)
+
+                    for field, value in (changes | concurrent_changes).items():
+                        self.assertEqual(getattr(updated, field), value)
+                    self.assertEqual(updated, second_store.get_job(original.id))
 
     def test_catalog_is_global_and_filter_is_explicit(self):
         targets = [JobTarget("body", name) for name in ("camera", "arms", "sprayer")]

@@ -243,10 +243,12 @@ The supported commands are exactly:
 - `ask <message>` for one independent text cognition request;
 - `voice` to start one bounded voice session;
 - `memory` for working-memory count/capacity metadata (not retained text);
-- `job update JOB<n> --description <text>` to change only a durable Job's
-  responsibility description for future occurrences; it preserves the Job's
-  identity, history, schedule, and Workspace, and is rejected while that same
-  Job is currently executing;
+- `job update JOB<n> [--title <text>] [--description <text>]` updates the supplied
+  fields of a durable Job for future occurrences. Supply at least one option.
+  Each option takes one value and can appear once, in either order. A title must
+  contain non-whitespace text, and `--description ""` clears the description.
+  Quote values that begin with `--`. The command is rejected while the Job has
+  an active JobRun. See [Jobs](jobs.md#persistence-shutdown-and-restart).
 - `job schedule JOB<n>` to inspect the single durable schedule;
   `job schedule JOB<n> daily HH:MM [--timezone ZONE]` or
   `job schedule JOB<n> hourly [--minute M] [--timezone ZONE]` to replace it;

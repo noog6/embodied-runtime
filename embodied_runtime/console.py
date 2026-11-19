@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import Callable
+from io import StringIO
 import math
 import logging
 from pathlib import Path
@@ -33,6 +34,10 @@ from embodied_runtime.run_history import (
     DEFAULT_HISTORY_ROOT, MAX_GREP_QUERY_LENGTH, RunDataUnavailable,
     RunMetadataError, UnsupportedRunSchema, canonical_run_id, discover_run_ids,
     grep_run_log, read_run_record,
+)
+
+_JOB_UPDATE_SYNTAX = (
+    "job update JOB<n> [--title <text>] [--description <text>] (at least one option required)"
 )
 
 
@@ -138,6 +143,8 @@ class RuntimeConsole:
             return self._job_result(words), False
         if vocabulary[:2] == ["job", "latest-result"]:
             return self._job_latest_result(words), False
+        if vocabulary[:2] == ["job", "update"]:
+            return self._job_update(words, command), False
         if (len(words) > 2 and vocabulary[:2] in (
                 ["job", "complete"], ["job", "fail"], ["job", "stop"])
                 and _catalog_id(words[2], "RUN") is not None):
@@ -342,7 +349,7 @@ class RuntimeConsole:
                 "  job result RUN<n>              Show one durable JobRun result",
                 "  job latest-result JOB<n>       Show latest completed JobRun result",
                 "  job add <name> [options]       Add an enabled Job definition",
-                "  job update JOB<n> --description <text>",
+                f"  {_JOB_UPDATE_SYNTAX}",
                 "  job enable|disable JOB<n>      Change Job definition state",
                 "  job procedure experiment       Create disabled unscheduled experiment Job",
                 "  job procedure show|enable|disable JOB<n>",
@@ -595,8 +602,6 @@ class RuntimeConsole:
             return self._job_focus(words)
         if action == "add":
             return self._job_add(words)
-        if action == "update":
-            return self._job_update(words)
         if action in ("enable", "disable"):
             return self._job_enable(words, action == "enable")
         if action == "schedule":
@@ -1031,26 +1036,48 @@ class RuntimeConsole:
         except Exception:
             return "Unable to administer focus: persistence operation failed."
 
-    def _job_update(self, words: list[str]) -> str:
-        usage = "Usage: job update JOB<n> --description <text>."
-        if (len(words) != 5 or
-                (job_id := _catalog_id(words[2], "JOB")) is None or
-                words[3] != "--description"):
+    def _job_update(self, words: list[str], command: str) -> str:
+        usage = f"Usage: {_JOB_UPDATE_SYNTAX}."
+        if len(words) < 4 or (job_id := _catalog_id(words[2], "JOB")) is None:
             return usage
+
+        # Keep the original value spelling so quoted flag-like text remains valid.
+        source = StringIO(command)
+        lexer = shlex.shlex(source, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        for _ in range(3):
+            lexer.get_token()
+        fields = {"--title": "name", "--description": "description"}
+        changes = {}
+        for option in lexer:
+            field = fields.get(option)
+            if field is None or field in changes:
+                return usage
+            start = source.tell()
+            value = lexer.get_token()
+            raw_value = command[start:source.tell()].lstrip(lexer.whitespace)
+            if value is None or raw_value.startswith("--"):
+                return usage
+            changes[field] = value
+
         store = self._application.jobs
         if store is None:
             return "Jobs persistence is disabled."
         if any(c.job_id == job_id for c in self._application.job_execution_contexts):
             return f"Unable to update JOB{job_id}: its current JobRun is still active."
         try:
-            job = store.set_job_description(job_id, words[4])
+            job = store.update_job_definition(job_id, **changes)
         except KeyError:
             return f"Job not found: JOB{job_id}."
         except (RuntimeError, TypeError, ValueError) as error:
             return f"Unable to update JOB{job_id}: {error}."
         except Exception:
             return f"Unable to update JOB{job_id}: persistence operation failed."
-        return f"Updated JOB{job.id} description."
+        if len(changes) == 2:
+            return f"Updated JOB{job.id} title and description."
+        field = "title" if "name" in changes else "description"
+        return f"Updated JOB{job.id} {field}."
 
     def _job_current(self) -> str:
         binding = self._application.current_job_run
