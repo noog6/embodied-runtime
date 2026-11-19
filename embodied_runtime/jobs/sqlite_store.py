@@ -1,7 +1,7 @@
 """SQLite-backed durable Job catalog."""
 
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -358,24 +358,29 @@ class SQLiteJobStore(ProcedureTrialStore):
             raise KeyError(f"unknown job: {job_id}")
         return self.get_job(job_id)  # type: ignore[return-value]
 
-    def set_job_description(self, job_id: int, description: str) -> Job:
-        """Replace only a Job's normalized description and modification time."""
-        _id(job_id, "job")
+    def update_job_definition(self, job_id: int, **changes: str) -> Job:
+        """Update the supplied name and/or description and return the updated Job."""
+        if not changes:
+            raise ValueError("at least one Job definition field is required")
+        if changes.keys() - {"name", "description"}:
+            raise TypeError("only name and description can be updated")
         current = self.get_job(job_id)
         if current is None:
             raise KeyError(f"unknown job: {job_id}")
-        now = self._now()
-        replacement = Job(
-            current.id, current.name, description, current.enabled, current.target,
-            current.created_at, now, current.carry_forward_enabled,
-        )
-        cursor = self._connection.execute(
-            "UPDATE jobs SET description = ?, updated_at = ? WHERE id = ?",
-            (replacement.description, _format(replacement.updated_at), job_id),
-        )
-        if cursor.rowcount != 1:
+        replacement = replace(current, updated_at=self._now(), **changes)
+        assignments = ", ".join(f"{field} = ?" for field in changes)
+        values = tuple(getattr(replacement, field) for field in changes)
+        row = self._connection.execute(
+            f"UPDATE jobs SET {assignments}, updated_at = ? WHERE id = ? RETURNING *",
+            (*values, _format(replacement.updated_at), job_id),
+        ).fetchone()
+        if row is None:
             raise KeyError(f"unknown job: {job_id}")
-        return replacement
+        return _job(row)
+
+    def set_job_description(self, job_id: int, description: str) -> Job:
+        """Replace only a Job's normalized description and modification time."""
+        return self.update_job_definition(job_id, description=description)
 
     def create_run(self, job_id: int, *, require_idle: bool = False) -> JobRun:
         _id(job_id, "job")

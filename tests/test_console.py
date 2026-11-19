@@ -200,7 +200,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(store.get_trigger(job.id, JobTriggerType.RUNTIME_READY))
             await app.stop()
 
-    async def test_job_description_update_preserves_owned_state_and_guards_current_run(self):
+    async def test_job_update_preserves_owned_state_and_guards_current_run(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3")
             workspaces = FilesystemJobWorkspaceStore(Path(temporary) / "jobs-workspaces")
@@ -222,17 +222,34 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             historical = store.transition_run(
                 historical.id, JobRunStatus.COMPLETED, outcome_summary="Reviewed"
             )
+            trigger = store.set_trigger(1, JobTriggerType.RUNTIME_READY)
             workspaces.write(1, "notes/review.md", "create", "preserved content")
 
             self.assertIn("Started JOB1", console.execute("job start JOB1")[0])
-            rejected_at = store.get_job(1).updated_at
-            self.assertEqual(
-                console.execute('job update JOB1 --description "New instructions"')[0],
-                "Unable to update JOB1: its current JobRun is still active.",
-            )
-            self.assertEqual(store.get_job(1).description, "Original")
-            self.assertEqual(store.get_job(1).updated_at, rejected_at)
+            for options in (
+                '--title "New title"',
+                '--description "New instructions"',
+                '--title "New title" --description "New instructions"',
+                '--description "New instructions" --title "New title"',
+            ):
+                with self.subTest(active_run_options=options):
+                    self.assertEqual(
+                        console.execute(f"job update JOB1 {options}")[0],
+                        "Unable to update JOB1: its current JobRun is still active.",
+                    )
+                    self.assertEqual(store.get_job(1), original)
             self.assertEqual(console.execute("job complete")[0], "Job RUN2 completed.")
+            runs = store.list_runs(1)
+            schedule = store.get_schedule(1)
+
+            response, _ = await console.execute_async(
+                'job update JOB1 --title "  Check my embodiment  "'
+            )
+            self.assertEqual(response, "Updated JOB1 title.")
+            self.assertEqual(store.get_job(1).description, "Original")
+            self.assertIn("Check my embodiment", console.execute("jobs")[0])
+            self.assertIn("name:          Check my embodiment", console.execute("job show JOB1")[0])
+
             self.assertEqual(
                 console.execute(
                     'job update JOB1 --description "  Updated nightly review instructions.  "'
@@ -242,26 +259,60 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
 
             updated = store.get_job(1)
             self.assertEqual(updated.description, "Updated nightly review instructions.")
+            self.assertEqual(updated.name, "Check my embodiment")
+            for options, title, description in (
+                ('--title "Check body state" --description "Inspect the body."',
+                 "Check body state", "Inspect the body."),
+                ('--description "Inspect the runtime." --title "Check runtime"',
+                 "Check runtime", "Inspect the runtime."),
+            ):
+                with self.subTest(options=options):
+                    self.assertEqual(console.execute(f"job update JOB1 {options}")[0],
+                                     "Updated JOB1 title and description.")
+                    updated = store.get_job(1)
+                    self.assertEqual((updated.name, updated.description), (title, description))
+            self.assertEqual(console.execute('job update JOB1 --description "--title"')[0],
+                             "Updated JOB1 description.")
+            self.assertEqual(store.get_job(1).description, "--title")
+            self.assertEqual(console.execute('job update JOB1 --description ""')[0],
+                             "Updated JOB1 description.")
+            updated = store.get_job(1)
+            self.assertEqual(updated.description, "")
+            self.assertEqual(updated.name, "Check runtime")
             self.assertEqual(updated.id, original.id)
-            self.assertEqual(updated.name, original.name)
             self.assertEqual(updated.enabled, original.enabled)
             self.assertEqual(updated.target, original.target)
             self.assertEqual(updated.created_at, original.created_at)
             self.assertGreater(updated.updated_at, original.updated_at)
-            self.assertEqual(store.get_schedule(1).last_started_local_date, "2026-09-25")
-            self.assertEqual(store.list_runs(1)[0], historical)
+            self.assertEqual(schedule.last_started_local_date, "2026-09-25")
+            self.assertEqual(store.get_schedule(1), schedule)
+            self.assertEqual(store.get_trigger(1, JobTriggerType.RUNTIME_READY), trigger)
+            self.assertIn(historical, runs)
+            self.assertEqual(store.list_runs(1), runs)
             self.assertEqual(workspaces.read(1, "notes/review.md").content,
                              "preserved content")
 
-            usage = "Usage: job update JOB<n> --description <text>."
+            usage = ("Usage: job update JOB<n> [--title <text>] [--description <text>] "
+                     "(at least one option required).")
             for malformed in (
                 "job update", "job update JOB1", "job update JOB1 --description",
+                "job update JOB1 --title", "job update JOB1 --title --description",
                 'job update JOB1 --name "x"',
+                'job update JOB1 --description --unknown',
                 'job update JOB1 --description "x" --target agent:mira',
+                'job update JOB1 --title "x" --description',
+                'job update JOB1 --title "x" --title "y"',
+                'job update JOB1 --description "x" --description "y"',
                 'job update NOTAJOB --description "x"',
             ):
                 with self.subTest(command=malformed):
                     self.assertEqual(console.execute(malformed)[0], usage)
+                    self.assertEqual(store.get_job(1), updated)
+            self.assertEqual(
+                console.execute('job update JOB1 --description "Would change" --title ""')[0],
+                "Unable to update JOB1: name must not be empty.",
+            )
+            self.assertEqual(store.get_job(1), updated)
             self.assertEqual(
                 console.execute('job update JOB99 --description "x"')[0],
                 "Job not found: JOB99.",
@@ -293,7 +344,8 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  job result RUN<n>              Show one durable JobRun result\n"
             "  job latest-result JOB<n>       Show latest completed JobRun result\n"
             "  job add <name> [options]       Add an enabled Job definition\n"
-            "  job update JOB<n> --description <text>\n"
+            "  job update JOB<n> [--title <text>] [--description <text>] "
+            "(at least one option required)\n"
             "  job enable|disable JOB<n>      Change Job definition state\n"
             "  job procedure experiment       Create disabled unscheduled experiment Job\n"
             "  job procedure show|enable|disable JOB<n>\n"

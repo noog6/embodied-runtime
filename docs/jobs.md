@@ -721,10 +721,15 @@ to the pinned trial budget. It never restores an interrupted Task/Run. See
 The console inspection commands are `jobs`, `job show JOB<n>`, `job runs
 JOB<n>`, `job files JOB<n> [directory]`, and `job file JOB<n> <logical-path>
 [offset_chars]`. Definition commands are `job add`, `job update`, `job enable`,
-and `job disable`. `job update JOB<n> --description ...` changes the durable
-responsibility definition in place for future occurrences while preserving Job
-identity, history, schedule, and Workspace. The currently executing same Job
-cannot be updated until its occurrence is terminal.
+and `job disable`. `job update JOB<n> [--title <text>] [--description <text>]`
+changes the durable responsibility definition in place for future occurrences.
+Supply either option or both in either order. The title is stored as the Job's
+name and must contain non-whitespace text. Use `--description ""` to clear the
+description. When both options are supplied, the changes are validated together
+and written atomically. The Job keeps its ID, assignment, enabled state, schedule,
+triggers, history, Workspace, and focus and procedure settings. Changes to the
+title or description participate in the existing definition fingerprint.
+Wait until the Job's active occurrence is terminal before updating it.
 Runtime coordination commands are `job start`, asynchronous `job work`, `job
 current`, `job complete`, `job fail`, and `job stop`. Terminal commands accept
 an exact `RUN<n>` selector; selector-less compatibility is allowed only when one
