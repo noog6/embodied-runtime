@@ -171,13 +171,14 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.store.transition_run(older.id, JobRunStatus.COMPLETED)
 
         self.assertEqual(self.store.list_jobs_with_latest_run(), (
-            (first, latest.id, None),
-            (second, other.id, other.finished_at),
-            (never_run, None, None),
+            (first, latest.id, JobRunStatus.RUNNING, None),
+            (second, other.id, JobRunStatus.STOPPED, other.finished_at),
+            (never_run, None, None, None),
         ))
         latest = self.store.transition_run(latest.id, JobRunStatus.COMPLETED)
         self.assertEqual(
-            self.store.list_jobs_with_latest_run()[0], (first, latest.id, latest.finished_at)
+            self.store.list_jobs_with_latest_run()[0],
+            (first, latest.id, JobRunStatus.COMPLETED, latest.finished_at),
         )
 
     def test_unassigned_round_trips_as_none(self):

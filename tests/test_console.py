@@ -113,7 +113,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.console.prompt, "test> ")
         self.assertEqual(self.console.heading, "Test Robot Runtime Console")
 
-    async def test_jobs_lists_latest_run_ids_and_finish_times(self):
+    async def test_jobs_lists_latest_run_ids_active_statuses_and_finish_times(self):
         self.assertEqual(self.console.execute("jobs")[0], "Jobs\n  persistence:   disabled")
         with tempfile.TemporaryDirectory() as temporary:
             store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3", clock=lambda: TEST_INSTANT)
@@ -127,20 +127,29 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(console.execute("jobs")[0], "Jobs\n  none")
                 finished = store.create_job("Review logs", target=JobTarget("agent", "mira"))
                 pending = store.create_job("Check power", enabled=False)
+                running = store.create_job("Check surroundings")
                 store.create_job("Check communications")
                 run = store.create_run(finished.id)
                 store.transition_run(run.id, JobRunStatus.RUNNING)
                 store.transition_run(run.id, JobRunStatus.FAILED)
                 store.create_run(pending.id)
+                current = store.create_run(running.id)
+                store.transition_run(current.id, JobRunStatus.RUNNING)
 
                 report, _ = await console.execute_async("jobs")
                 self.assertEqual(report.splitlines(), [
                     "Jobs",
-                    "  JOB       STATE     LAST RUN  FINISHED AT (UTC)    TITLE",
-                    "  JOB1      enabled   RUN1      2026-01-01 00:00:00  Review logs",
-                    "  JOB2      disabled  RUN2      -                    Check power",
-                    "  JOB3      enabled   -         -                    Check communications",
+                    "  JOB       STATE     LAST RUN        FINISHED AT (UTC)    TITLE",
+                    "  JOB1      enabled   RUN1            2026-01-01 00:00:00  Review logs",
+                    "  JOB2      disabled  RUN2 (pending)  -                    Check power",
+                    "  JOB3      enabled   RUN3 (running)  -                    Check surroundings",
+                    "  JOB4      enabled   -               -                    Check communications",
                 ])
+                store.transition_run(current.id, JobRunStatus.COMPLETED)
+                self.assertIn(
+                    "  JOB3      enabled   RUN3            2026-01-01 00:00:00  Check surroundings",
+                    console.execute("jobs")[0],
+                )
                 self.assertIn("target:        agent:mira", console.execute("job show JOB1")[0])
             finally:
                 await app.stop()

@@ -402,14 +402,20 @@ class RuntimeConsole:
         jobs = store.list_jobs_with_latest_run()
         if not jobs:
             return "Jobs\n  none"
-        row_format = "  {:<8}  {:<8}  {:<8}  {:<19}  {}"
-        lines = ["Jobs", row_format.format("JOB", "STATE", "LAST RUN", "FINISHED AT (UTC)", "TITLE")]
-        for job, run_id, finished_at in jobs:
+        rows = [("JOB", "STATE", "LAST RUN", "FINISHED AT (UTC)", "TITLE")]
+        for job, run_id, run_status, finished_at in jobs:
             job_label = f"JOB{job.id}"
             state = "enabled" if job.enabled else "disabled"
             run_label = f"RUN{run_id}" if run_id is not None else "-"
+            if run_status in (JobRunStatus.PENDING, JobRunStatus.RUNNING):
+                run_label += f" ({run_status.value})"
             finish_label = finished_at.strftime("%Y-%m-%d %H:%M:%S") if finished_at is not None else "-"
-            lines.append(row_format.format(job_label, state, run_label, finish_label, job.name))
+            rows.append((job_label, state, run_label, finish_label, job.name))
+        job_width = max(8, max(len(row[0]) for row in rows))
+        run_width = max(len(row[2]) for row in rows)
+        row_format = "  {:<{job_width}}  {:<8}  {:<{run_width}}  {:<19}  {}"
+        lines = ["Jobs"]
+        lines.extend(row_format.format(*row, job_width=job_width, run_width=run_width) for row in rows)
         return "\n".join(lines)
 
     def _findings(self, query: str) -> str:

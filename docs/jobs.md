@@ -659,6 +659,7 @@ does not inspect `RobotProfile`, attached hardware, or the current process.
 
 The console's `jobs` command shows the latest durable Run by ID for each Job,
 using the same Run history as `job runs JOB<n>`, including procedure trial Runs.
+The Run ID shows a `(pending)` or `(running)` suffix while the Run is nonterminal.
 The UTC finish time belongs to that Run and appears once it reaches any terminal
 state. Use `job show JOB<n>` to see assignment details.
 

@@ -168,8 +168,9 @@ Command-result retention is independent of this lossy notification policy.
 `jobs` lists every durable Job with its ID, enabled state, title, and latest
 Run ID. **Finished at (UTC)** shows when that same Run became terminal. A Job
 without history shows dashes in both Run columns. A pending or running Run shows
-its ID with a dash for the finish time. Use `job show JOB<n>` to see the Job's
-assignment and `job runs JOB<n>` to inspect its Run history.
+its status beside its ID, such as `RUN1253 (running)`, with a dash for the finish
+time. Use `job show JOB<n>` to see the Job's assignment and `job runs JOB<n>` to
+inspect its Run history.
 
 `job files JOB<n> [directory]` lists at most one bounded Workspace directory
 page without recursion. `job file JOB<n> <logical-path> [offset_chars]` reads at
