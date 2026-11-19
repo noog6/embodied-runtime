@@ -339,7 +339,7 @@ class RuntimeConsole:
                 "  ask <message>                  Send one text cognition request",
                 "  voice                          Start one bounded voice session",
                 "  memory                         Show working-memory metadata",
-                "  jobs                           List the entire durable Job catalog",
+                "  jobs                           List all Jobs with their latest Run",
                 "  findings [query]               List or search durable Findings",
                 "  finding show FIND<n>           Show one Finding and its provenance",
                 "  job show JOB<n>                Show one Job and its assignment",
@@ -399,14 +399,17 @@ class RuntimeConsole:
         store = self._application.jobs
         if store is None:
             return "Jobs\n  persistence:   disabled"
-        lines = ["Jobs"]
-        jobs = store.list_jobs()
+        jobs = store.list_jobs_with_latest_run()
         if not jobs:
-            lines.append("  none")
-        for job in jobs:
-            target = "unassigned" if job.target is None else str(job.target)
+            return "Jobs\n  none"
+        row_format = "  {:<8}  {:<8}  {:<8}  {:<19}  {}"
+        lines = ["Jobs", row_format.format("JOB", "STATE", "LAST RUN", "FINISHED AT (UTC)", "TITLE")]
+        for job, run_id, finished_at in jobs:
+            job_label = f"JOB{job.id}"
             state = "enabled" if job.enabled else "disabled"
-            lines.append(f"  JOB{job.id:<5} {state:<8} {target:<20} {job.name}")
+            run_label = f"RUN{run_id}" if run_id is not None else "-"
+            finish_label = finished_at.strftime("%Y-%m-%d %H:%M:%S") if finished_at is not None else "-"
+            lines.append(row_format.format(job_label, state, run_label, finish_label, job.name))
         return "\n".join(lines)
 
     def _findings(self, query: str) -> str:

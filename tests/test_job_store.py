@@ -158,6 +158,28 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.assertEqual(self.store.list_jobs(target=targets[0]), (jobs[0],))
         self.assertEqual(self.store.list_jobs(), tuple(jobs))
 
+    def test_catalog_latest_run_uses_highest_run_id_and_its_own_finish_time(self):
+        first = self.store.create_job("First")
+        second = self.store.create_job("Second", enabled=False)
+        never_run = self.store.create_job("Never run")
+        older = self.store.create_run(first.id)
+        self.store.transition_run(older.id, JobRunStatus.RUNNING)
+        other = self.store.create_run(second.id)
+        other = self.store.transition_run(other.id, JobRunStatus.STOPPED)
+        latest = self.store.create_run(first.id)
+        self.store.transition_run(latest.id, JobRunStatus.RUNNING)
+        self.store.transition_run(older.id, JobRunStatus.COMPLETED)
+
+        self.assertEqual(self.store.list_jobs_with_latest_run(), (
+            (first, latest.id, None),
+            (second, other.id, other.finished_at),
+            (never_run, None, None),
+        ))
+        latest = self.store.transition_run(latest.id, JobRunStatus.COMPLETED)
+        self.assertEqual(
+            self.store.list_jobs_with_latest_run()[0], (first, latest.id, latest.finished_at)
+        )
+
     def test_unassigned_round_trips_as_none(self):
         job = self.store.create_job("Await assignment", target=None)
         self.assertIsNone(self.store.get_job(job.id).target)

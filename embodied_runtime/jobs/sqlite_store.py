@@ -333,6 +333,21 @@ class SQLiteJobStore(ProcedureTrialStore):
             ).fetchall()
         return tuple(_job(row) for row in rows)
 
+    def list_jobs_with_latest_run(self) -> tuple[tuple[Job, int | None, datetime | None], ...]:
+        """List each Job with its latest Run ID and that Run's finish time."""
+        rows = self._connection.execute(
+            """SELECT jobs.*, latest.id AS latest_run_id, latest.finished_at AS latest_finished_at
+               FROM jobs
+               LEFT JOIN job_runs AS latest ON latest.id = (
+                   SELECT id FROM job_runs WHERE job_id = jobs.id ORDER BY id DESC LIMIT 1
+               )
+               ORDER BY jobs.id"""
+        )
+        return tuple(
+            (_job(row), row["latest_run_id"], _parse(row["latest_finished_at"]))
+            for row in rows
+        )
+
     def discover_jobs(self, *, after_id: int = 0, limit: int = 5) -> tuple[Job, ...]:
         """Bounded catalog page, including disabled Jobs, in stable numeric ID order."""
         if type(after_id) is not int or not 0 <= after_id <= 2**63 - 1:
