@@ -16,7 +16,7 @@ from embodied_runtime.cognition import CognitionError
 from embodied_runtime.console import AsyncLineTerminal, RuntimeConsole, run_console_session
 from embodied_runtime.hardware.virtual import VirtualHardwareBackend
 from embodied_runtime.jobs import (
-    FilesystemJobWorkspaceStore, JobRunStatus, JobTriggerType, SQLiteJobStore,
+    FilesystemJobWorkspaceStore, JobRunStatus, JobTarget, JobTriggerType, SQLiteJobStore,
 )
 from embodied_runtime.memory import SQLiteMemoryStore
 from embodied_runtime.profile import RobotProfile
@@ -112,6 +112,47 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
     def test_prompt_and_heading_derive_from_profile(self):
         self.assertEqual(self.console.prompt, "test> ")
         self.assertEqual(self.console.heading, "Test Robot Runtime Console")
+
+    async def test_jobs_lists_latest_run_ids_active_statuses_and_finish_times(self):
+        self.assertEqual(self.console.execute("jobs")[0], "Jobs\n  persistence:   disabled")
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SQLiteJobStore(Path(temporary) / "jobs.sqlite3", clock=lambda: TEST_INSTANT)
+            app = RobotApplication(
+                RobotProfile("jobs", "Jobs Robot"), VirtualHardwareBackend(),
+                platform_provider=CountingProvider([self.first, self.first]), job_store=store,
+            )
+            await app.start()
+            try:
+                console = RuntimeConsole(app)
+                self.assertEqual(console.execute("jobs")[0], "Jobs\n  none")
+                finished = store.create_job("Review logs", target=JobTarget("agent", "mira"))
+                pending = store.create_job("Check power", enabled=False)
+                running = store.create_job("Check surroundings")
+                store.create_job("Check communications")
+                run = store.create_run(finished.id)
+                store.transition_run(run.id, JobRunStatus.RUNNING)
+                store.transition_run(run.id, JobRunStatus.FAILED)
+                store.create_run(pending.id)
+                current = store.create_run(running.id)
+                store.transition_run(current.id, JobRunStatus.RUNNING)
+
+                report, _ = await console.execute_async("jobs")
+                self.assertEqual(report.splitlines(), [
+                    "Jobs",
+                    "  JOB       STATE     LAST RUN        FINISHED AT (UTC)    TITLE",
+                    "  JOB1      enabled   RUN1            2026-01-01 00:00:00  Review logs",
+                    "  JOB2      disabled  RUN2 (pending)  -                    Check power",
+                    "  JOB3      enabled   RUN3 (running)  -                    Check surroundings",
+                    "  JOB4      enabled   -               -                    Check communications",
+                ])
+                store.transition_run(current.id, JobRunStatus.COMPLETED)
+                self.assertIn(
+                    "  JOB3      enabled   RUN3            2026-01-01 00:00:00  Check surroundings",
+                    console.execute("jobs")[0],
+                )
+                self.assertIn("target:        agent:mira", console.execute("job show JOB1")[0])
+            finally:
+                await app.stop()
 
     async def test_job_definition_and_manual_lifecycle_commands(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -334,7 +375,7 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
             "  ask <message>                  Send one text cognition request\n"
             "  voice                          Start one bounded voice session\n"
             "  memory                         Show working-memory metadata\n"
-            "  jobs                           List the entire durable Job catalog\n"
+            "  jobs                           List all Jobs with their latest Run\n"
             "  findings [query]               List or search durable Findings\n"
             "  finding show FIND<n>           Show one Finding and its provenance\n"
             "  job show JOB<n>                Show one Job and its assignment\n"
